@@ -1,0 +1,19 @@
+{
+  "projects": [
+    {
+      "name": "Discovery",
+      "paths": ["D:\\p4\\games\\Games\\Discovery\\Script"]
+    },
+    {
+      "name": "Pioneer",
+      "paths": ["D:\\p4\\games\\Games\\Pioneer\\Script"]
+    },
+    {
+      "name": "Shared",
+      "paths": ["D:\\p4\\games\\Games\\Shared\\Plugins"],
+      "recursive": true
+    }
+  ],
+  "exclude": ["**/Editor/**", "**/*_Test.as"],
+  "cacheFile": "data/index.json"
+}
