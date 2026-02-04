@@ -71,6 +71,23 @@ export class IndexDatabase {
       CREATE INDEX IF NOT EXISTS idx_members_file_id ON members(file_id);
       CREATE INDEX IF NOT EXISTS idx_members_kind ON members(member_kind);
 
+      CREATE TABLE IF NOT EXISTS assets (
+        id INTEGER PRIMARY KEY,
+        path TEXT UNIQUE NOT NULL,
+        name TEXT NOT NULL,
+        content_path TEXT NOT NULL,
+        folder TEXT NOT NULL,
+        project TEXT NOT NULL,
+        extension TEXT NOT NULL,
+        mtime INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_assets_name ON assets(name);
+      CREATE INDEX IF NOT EXISTS idx_assets_name_lower ON assets(lower(name));
+      CREATE INDEX IF NOT EXISTS idx_assets_folder ON assets(folder);
+      CREATE INDEX IF NOT EXISTS idx_assets_project ON assets(project);
+      CREATE INDEX IF NOT EXISTS idx_assets_content_path ON assets(content_path);
+
       CREATE TABLE IF NOT EXISTS metadata (
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
@@ -113,6 +130,30 @@ export class IndexDatabase {
           error_message TEXT,
           last_updated TEXT
         )
+      `);
+    }
+
+    const hasAssetsTable = this.db.prepare(`
+      SELECT COUNT(*) as count FROM sqlite_master WHERE type='table' AND name='assets'
+    `).get().count > 0;
+
+    if (!hasAssetsTable) {
+      this.db.exec(`
+        CREATE TABLE assets (
+          id INTEGER PRIMARY KEY,
+          path TEXT UNIQUE NOT NULL,
+          name TEXT NOT NULL,
+          content_path TEXT NOT NULL,
+          folder TEXT NOT NULL,
+          project TEXT NOT NULL,
+          extension TEXT NOT NULL,
+          mtime INTEGER NOT NULL
+        );
+        CREATE INDEX idx_assets_name ON assets(name);
+        CREATE INDEX idx_assets_name_lower ON assets(lower(name));
+        CREATE INDEX idx_assets_folder ON assets(folder);
+        CREATE INDEX idx_assets_project ON assets(project);
+        CREATE INDEX idx_assets_content_path ON assets(content_path);
       `);
     }
 
@@ -788,5 +829,159 @@ export class IndexDatabase {
     });
 
     insertMany(types);
+  }
+
+  // --- Asset methods ---
+
+  upsertAssetBatch(assets) {
+    const stmt = this.db.prepare(`
+      INSERT INTO assets (path, name, content_path, folder, project, extension, mtime)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(path) DO UPDATE SET
+        name = excluded.name,
+        content_path = excluded.content_path,
+        folder = excluded.folder,
+        project = excluded.project,
+        extension = excluded.extension,
+        mtime = excluded.mtime
+    `);
+
+    const insertMany = this.db.transaction((items) => {
+      for (const item of items) {
+        stmt.run(item.path, item.name, item.contentPath, item.folder, item.project, item.extension, item.mtime);
+      }
+    });
+
+    insertMany(assets);
+  }
+
+  clearAssets(project) {
+    if (project) {
+      this.db.prepare('DELETE FROM assets WHERE project = ?').run(project);
+    } else {
+      this.db.exec('DELETE FROM assets');
+    }
+  }
+
+  isAssetIndexEmpty(project) {
+    if (project) {
+      return this.db.prepare('SELECT COUNT(*) as count FROM assets WHERE project = ?').get(project).count === 0;
+    }
+    return this.db.prepare('SELECT COUNT(*) as count FROM assets').get().count === 0;
+  }
+
+  findAssetByName(name, options = {}) {
+    const { fuzzy = false, project = null, folder = null, maxResults = 20 } = options;
+
+    if (!fuzzy) {
+      let sql = 'SELECT * FROM assets WHERE name = ?';
+      const params = [name];
+
+      if (project) { sql += ' AND project = ?'; params.push(project); }
+      if (folder) { sql += ' AND folder LIKE ?'; params.push(folder + '%'); }
+      sql += ' LIMIT ?';
+      params.push(maxResults);
+
+      let results = this.db.prepare(sql).all(...params);
+
+      if (results.length === 0) {
+        // Try case-insensitive exact match
+        sql = 'SELECT * FROM assets WHERE lower(name) = lower(?)';
+        const params2 = [name];
+        if (project) { sql += ' AND project = ?'; params2.push(project); }
+        if (folder) { sql += ' AND folder LIKE ?'; params2.push(folder + '%'); }
+        sql += ' LIMIT ?';
+        params2.push(maxResults);
+        results = this.db.prepare(sql).all(...params2);
+      }
+
+      return results;
+    }
+
+    const nameLower = name.toLowerCase();
+    let sql = `
+      SELECT *,
+        CASE
+          WHEN lower(name) = ? THEN 1.0
+          WHEN lower(name) LIKE ? THEN 0.95
+          WHEN lower(name) LIKE ? THEN 0.85
+          WHEN lower(name) LIKE ? THEN 0.7
+          ELSE 0.5
+        END as score
+      FROM assets
+      WHERE (lower(name) LIKE ? OR lower(name) LIKE ?)
+    `;
+    const params = [
+      nameLower,
+      nameLower + '%',
+      '%' + nameLower + '%',
+      '%' + nameLower,
+      nameLower + '%',
+      '%' + nameLower + '%'
+    ];
+
+    if (project) { sql += ' AND project = ?'; params.push(project); }
+    if (folder) { sql += ' AND folder LIKE ?'; params.push(folder + '%'); }
+    sql += ' ORDER BY score DESC LIMIT ?';
+    params.push(maxResults);
+
+    return this.db.prepare(sql).all(...params);
+  }
+
+  browseAssetFolder(folder, options = {}) {
+    const { project = null, maxResults = 100 } = options;
+
+    let sql = 'SELECT * FROM assets WHERE folder = ?';
+    const params = [folder];
+
+    if (project) { sql += ' AND project = ?'; params.push(project); }
+    sql += ' ORDER BY name LIMIT ?';
+    params.push(maxResults + 1);
+
+    const results = this.db.prepare(sql).all(...params);
+    const truncated = results.length > maxResults;
+
+    return { assets: results.slice(0, maxResults), truncated };
+  }
+
+  listAssetFolders(parent = '/Game', options = {}) {
+    const { project = null, depth = 1 } = options;
+
+    let sql = 'SELECT folder FROM assets WHERE folder LIKE ?';
+    const params = [parent + '%'];
+
+    if (project) { sql += ' AND project = ?'; params.push(project); }
+
+    const rows = this.db.prepare(sql).all(...params);
+
+    const parentDepth = parent === '/' ? 0 : parent.split('/').filter(Boolean).length;
+    const targetDepth = parentDepth + depth;
+    const folderCounts = new Map();
+
+    for (const row of rows) {
+      const parts = row.folder.split('/').filter(Boolean);
+      if (parts.length <= parentDepth) continue;
+
+      const truncated = '/' + parts.slice(0, targetDepth).join('/');
+      folderCounts.set(truncated, (folderCounts.get(truncated) || 0) + 1);
+    }
+
+    return Array.from(folderCounts.entries())
+      .map(([path, assetCount]) => ({ path, assetCount }))
+      .sort((a, b) => a.path.localeCompare(b.path));
+  }
+
+  getAssetStats() {
+    const total = this.db.prepare('SELECT COUNT(*) as count FROM assets').get().count;
+
+    const byProject = this.db.prepare(`
+      SELECT project, COUNT(*) as count FROM assets GROUP BY project
+    `).all();
+
+    const byExtension = this.db.prepare(`
+      SELECT extension, COUNT(*) as count FROM assets GROUP BY extension
+    `).all();
+
+    return { total, byProject, byExtension };
   }
 }

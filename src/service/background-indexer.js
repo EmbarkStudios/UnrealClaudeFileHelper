@@ -223,6 +223,63 @@ export class BackgroundIndexer {
     });
   }
 
+  async indexAssets() {
+    const contentProjects = this.config.projects.filter(p => p.language === 'content');
+    if (contentProjects.length === 0) {
+      return;
+    }
+
+    console.log('Starting asset indexing...');
+    this.database.setIndexStatus('content', 'indexing', 0, 0);
+
+    try {
+      let totalAssets = 0;
+
+      for (const project of contentProjects) {
+        const contentRoot = project.contentRoot || project.paths[0];
+        const extensions = project.extensions || ['.uasset', '.umap'];
+
+        console.log(`Scanning assets for ${project.name}...`);
+        const files = this.collectFiles(contentRoot, project.name, extensions, 'content');
+        console.log(`Found ${files.length} assets in ${project.name}`);
+
+        const BATCH_SIZE = 5000;
+        for (let i = 0; i < files.length; i += BATCH_SIZE) {
+          const batch = files.slice(i, i + BATCH_SIZE);
+          const assets = batch.map(f => {
+            const relativePath = relative(contentRoot, f.path).replace(/\\/g, '/');
+            const ext = relativePath.match(/\.[^.]+$/)?.[0] || '';
+            const contentPath = '/Game/' + relativePath.replace(/\.[^.]+$/, '');
+            const name = relativePath.split('/').pop().replace(/\.[^.]+$/, '');
+            const folder = '/Game/' + relativePath.split('/').slice(0, -1).join('/');
+
+            return {
+              path: f.path,
+              name,
+              contentPath,
+              folder: folder || '/Game',
+              project: project.name,
+              extension: ext,
+              mtime: f.mtime
+            };
+          });
+
+          this.database.upsertAssetBatch(assets);
+          totalAssets += batch.length;
+          this.database.setIndexStatus('content', 'indexing', totalAssets, files.length);
+
+          await new Promise(resolve => setImmediate(resolve));
+        }
+      }
+
+      console.log(`Asset indexing complete: ${totalAssets} assets indexed`);
+      this.database.setIndexStatus('content', 'ready', totalAssets, totalAssets);
+    } catch (error) {
+      console.error('Error indexing assets:', error);
+      this.database.setIndexStatus('content', 'error', 0, 0, error.message);
+    }
+  }
+
   abort() {
     if (this.abortController) {
       this.abortController.abort();

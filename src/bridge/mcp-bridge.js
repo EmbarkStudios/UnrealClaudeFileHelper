@@ -261,6 +261,38 @@ class UnrealIndexBridge {
             }
           },
           {
+            name: 'unreal_find_asset',
+            description: 'Find Unreal assets (Blueprints, Materials, Maps, DataAssets, etc.) by name. Returns content browser paths. Works offline without a running editor.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                name: {
+                  type: 'string',
+                  description: 'Asset name to search for (e.g. BP_ATK_MapBorder, M_Highlight, MI_Default)'
+                },
+                fuzzy: {
+                  type: 'boolean',
+                  default: false,
+                  description: 'Enable fuzzy/partial matching'
+                },
+                project: {
+                  type: 'string',
+                  description: 'Filter by project (DiscoveryContent, PioneerContent, EngineContent)'
+                },
+                folder: {
+                  type: 'string',
+                  description: 'Filter by content browser folder path (e.g. /Game/Discovery/Props)'
+                },
+                maxResults: {
+                  type: 'number',
+                  default: 20,
+                  description: 'Maximum results to return'
+                }
+              },
+              required: ['name']
+            }
+          },
+          {
             name: 'unreal_grep',
             description: 'Search file contents for a pattern (regex or literal string). Scoped to indexed projects. Use for finding usages, string references, variable assignments, or any content pattern that structural type/member lookups cannot find.',
             inputSchema: {
@@ -405,6 +437,19 @@ class UnrealIndexBridge {
               memberKind: args.memberKind,
               project: args.project,
               language: args.language,
+              maxResults: args.maxResults
+            });
+            return {
+              content: [{ type: 'text', text: JSON.stringify(result, null, 2) }]
+            };
+          }
+
+          case 'unreal_find_asset': {
+            const result = await fetchService('/find-asset', {
+              name: args.name,
+              fuzzy: args.fuzzy,
+              project: args.project,
+              folder: args.folder,
               maxResults: args.maxResults
             });
             return {

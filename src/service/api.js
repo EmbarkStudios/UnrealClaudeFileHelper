@@ -197,6 +197,71 @@ export function createApi(database, indexer) {
     }
   });
 
+  // --- Asset search ---
+
+  app.get('/find-asset', (req, res) => {
+    try {
+      const { name, fuzzy, project, folder, maxResults } = req.query;
+
+      if (!name) {
+        return res.status(400).json({ error: 'name parameter required' });
+      }
+
+      const results = database.findAssetByName(name, {
+        fuzzy: fuzzy === 'true',
+        project: project || null,
+        folder: folder || null,
+        maxResults: parseInt(maxResults, 10) || 20
+      });
+
+      res.json({ results });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get('/browse-assets', (req, res) => {
+    try {
+      const { folder, project, maxResults } = req.query;
+
+      if (!folder) {
+        return res.status(400).json({ error: 'folder parameter required' });
+      }
+
+      const result = database.browseAssetFolder(folder, {
+        project: project || null,
+        maxResults: parseInt(maxResults, 10) || 100
+      });
+
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get('/list-asset-folders', (req, res) => {
+    try {
+      const { parent, project, depth } = req.query;
+
+      const results = database.listAssetFolders(parent || '/Game', {
+        project: project || null,
+        depth: parseInt(depth, 10) || 1
+      });
+
+      res.json({ results });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get('/asset-stats', (req, res) => {
+    try {
+      res.json(database.getAssetStats());
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   // --- Content search (grep) ---
 
   async function collectFiles(dir, extensions, excludePatterns) {

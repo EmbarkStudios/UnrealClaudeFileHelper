@@ -103,6 +103,16 @@ class UnrealIndexService {
       });
     }
 
+    const assetsEmpty = this.database.isAssetIndexEmpty();
+    if (assetsEmpty) {
+      console.log('Starting asset indexing in background...');
+      this.backgroundIndexer.indexAssets().then(() => {
+        this.printIndexSummary();
+      }).catch(err => {
+        console.error('Asset indexing failed:', err);
+      });
+    }
+
     this.printIndexSummary();
 
     process.on('SIGINT', () => this.shutdown());
