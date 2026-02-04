@@ -296,10 +296,17 @@ class UnrealIndexService {
 
   printIndexSummary() {
     const stats = this.database.getStats();
+    const assetStats = this.database.getAssetStats();
 
     console.log('--- Index Summary ---');
     for (const [lang, langStats] of Object.entries(stats.byLanguage)) {
+      if (lang === 'content') continue; // shown separately as assets
       console.log(`  ${lang}: ${langStats.files} files, ${langStats.types} types`);
+    }
+
+    if (assetStats.total > 0) {
+      const bpCount = assetStats.blueprintCount || 0;
+      console.log(`  assets: ${assetStats.total} files (${bpCount} with class hierarchy)`);
     }
 
     const kindEntries = Object.entries(stats.byKind);
