@@ -18,7 +18,7 @@
     "claude",
     "index"
   ],
-  "author": "Joxx0r",
+  "author": "EmbarkStudios",
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
