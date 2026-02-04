@@ -36,9 +36,30 @@
       "paths": ["D:\\p4\\games\\Games\\Discovery\\Plugins"],
       "language": "cpp",
       "extensions": [".h", ".cpp"]
+    },
+    {
+      "name": "DiscoveryContent",
+      "paths": ["D:\\p4\\games\\Games\\Discovery\\Content"],
+      "contentRoot": "D:\\p4\\games\\Games\\Discovery\\Content",
+      "language": "content",
+      "extensions": [".uasset", ".umap"]
+    },
+    {
+      "name": "PioneerContent",
+      "paths": ["D:\\p4\\games\\Games\\Pioneer\\Content"],
+      "contentRoot": "D:\\p4\\games\\Games\\Pioneer\\Content",
+      "language": "content",
+      "extensions": [".uasset", ".umap"]
+    },
+    {
+      "name": "EngineContent",
+      "paths": ["D:\\p4\\games\\Games\\Engine\\Content"],
+      "contentRoot": "D:\\p4\\games\\Games\\Engine\\Content",
+      "language": "content",
+      "extensions": [".uasset", ".umap"]
     }
   ],
-  "exclude": ["**/*_Test.as", "**/Intermediate/**", "**/ThirdParty/**"],
+  "exclude": ["**/*_Test.as", "**/Intermediate/**", "**/ThirdParty/**", "**/__ExternalActors__/**", "**/__ExternalObjects__/**", "**/Developers/**"],
   "service": {
     "port": 3847,
     "host": "127.0.0.1"

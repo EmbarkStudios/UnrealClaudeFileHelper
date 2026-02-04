@@ -481,13 +481,30 @@ export class IndexDatabase {
         results = this.db.prepare(sql).all(...params);
 
         if (results.length === 0) {
-          const nameWithoutPrefix = name.replace(/^[UAFESI]/, '');
-          for (const prefix of ['U', 'A', 'F', 'E', 'S', 'I', '']) {
-            const tryName = prefix + nameWithoutPrefix;
+          // Strategy 1: Try adding each UE prefix to the original name
+          // Handles: "EmbarkGameMode" → finds "AEmbarkGameMode"
+          for (const prefix of ['A', 'U', 'F', 'E', 'S', 'I']) {
+            const tryName = prefix + name;
             if (tryName !== name) {
               params[0] = tryName;
               results = this.db.prepare(sql).all(...params);
               if (results.length > 0) break;
+            }
+          }
+
+          // Strategy 2: Strip existing prefix and try alternatives
+          // Handles: "UMyActor" → finds "AMyActor"
+          if (results.length === 0) {
+            const nameWithoutPrefix = name.replace(/^[UAFESI]/, '');
+            if (nameWithoutPrefix !== name) {
+              for (const prefix of ['A', 'U', 'F', 'E', 'S', 'I', '']) {
+                const tryName = prefix + nameWithoutPrefix;
+                if (tryName !== name) {
+                  params[0] = tryName;
+                  results = this.db.prepare(sql).all(...params);
+                  if (results.length > 0) break;
+                }
+              }
             }
           }
         }
