@@ -94,7 +94,7 @@ class UnrealIndexBridge {
                   type: 'string',
                   enum: ['all', 'angelscript', 'cpp', 'blueprint'],
                   default: 'all',
-                  description: 'Filter by language: all, angelscript, cpp, or blueprint'
+                  description: 'Filter by source language. Note: C++ types exposed to AngelScript via bindings are stored as cpp, so use "all" (default) to find all types usable from AngelScript.'
                 },
                 kind: {
                   type: 'string',
@@ -133,7 +133,7 @@ class UnrealIndexBridge {
                   type: 'string',
                   enum: ['all', 'angelscript', 'cpp', 'blueprint'],
                   default: 'all',
-                  description: 'Filter by language: all, angelscript, cpp, or blueprint'
+                  description: 'Filter by source language. Note: C++ types exposed to AngelScript via bindings are stored as cpp, so use "all" (default) to find all types usable from AngelScript.'
                 },
                 maxResults: {
                   type: 'number',
