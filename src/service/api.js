@@ -1,4 +1,6 @@
 import express from 'express';
+import { readdir, readFile } from 'fs/promises';
+import { join } from 'path';
 
 export function createApi(database, indexer) {
   const app = express();
@@ -190,6 +192,145 @@ export function createApi(database, indexer) {
       });
 
       res.json({ results });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // --- Content search (grep) ---
+
+  async function collectFiles(dir, extensions, excludePatterns) {
+    const results = [];
+    async function walk(d) {
+      let entries;
+      try {
+        entries = await readdir(d, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const entry of entries) {
+        const full = join(d, entry.name);
+        const normalized = full.replace(/\\/g, '/');
+        const excluded = excludePatterns.some(pat => {
+          if (pat.includes('**')) {
+            return new RegExp(pat.replace(/\*\*/g, '.*').replace(/\*/g, '[^/]*')).test(normalized);
+          }
+          return normalized.includes(pat.replace(/\*/g, ''));
+        });
+        if (excluded) continue;
+
+        if (entry.isDirectory()) {
+          await walk(full);
+        } else if (entry.isFile() && extensions.some(ext => entry.name.endsWith(ext))) {
+          results.push(full);
+        }
+      }
+    }
+    await walk(dir);
+    return results;
+  }
+
+  app.get('/grep', async (req, res) => {
+    try {
+      const { pattern, project, language, caseSensitive: cs, maxResults: mr, contextLines: cl } = req.query;
+
+      if (!pattern) {
+        return res.status(400).json({ error: 'pattern parameter required' });
+      }
+
+      const caseSensitive = cs !== 'false';
+      const maxResults = parseInt(mr, 10) || 50;
+      const contextLines = parseInt(cl, 10) || 2;
+
+      let regex;
+      try {
+        regex = new RegExp(pattern, caseSensitive ? '' : 'i');
+      } catch (e) {
+        return res.status(400).json({ error: `Invalid regex: ${e.message}` });
+      }
+
+      const config = indexer.config;
+      if (!config) {
+        return res.status(500).json({ error: 'Config not loaded' });
+      }
+
+      // Determine which projects/extensions to search
+      let projects = config.projects;
+      if (project) {
+        projects = projects.filter(p => p.name === project);
+        if (projects.length === 0) {
+          return res.status(400).json({ error: `Unknown project: ${project}` });
+        }
+      }
+      if (language && language !== 'all') {
+        projects = projects.filter(p => p.language === language);
+      }
+
+      const excludePatterns = config.exclude || [];
+      const results = [];
+      let totalMatches = 0;
+      let filesSearched = 0;
+      let done = false;
+
+      for (const proj of projects) {
+        if (done) break;
+        const extensions = proj.extensions || (proj.language === 'cpp' ? ['.h', '.cpp'] : ['.as']);
+
+        for (const basePath of proj.paths) {
+          if (done) break;
+          const files = await collectFiles(basePath, extensions, excludePatterns);
+
+          for (const filePath of files) {
+            if (done) break;
+            filesSearched++;
+
+            let content;
+            try {
+              content = await readFile(filePath, 'utf-8');
+            } catch {
+              continue;
+            }
+
+            const lines = content.split('\n');
+            for (let i = 0; i < lines.length; i++) {
+              const match = regex.exec(lines[i]);
+              if (!match) continue;
+
+              totalMatches++;
+              if (results.length < maxResults) {
+                const ctxStart = Math.max(0, i - contextLines);
+                const ctxEnd = Math.min(lines.length - 1, i + contextLines);
+                const context = [];
+                for (let c = ctxStart; c <= ctxEnd; c++) {
+                  context.push(lines[c]);
+                }
+
+                results.push({
+                  file: filePath,
+                  project: proj.name,
+                  language: proj.language,
+                  line: i + 1,
+                  column: match.index + 1,
+                  match: lines[i],
+                  context
+                });
+              }
+
+              if (results.length >= maxResults && totalMatches > maxResults * 2) {
+                done = true;
+                break;
+              }
+            }
+          }
+        }
+      }
+
+      res.json({
+        results,
+        totalMatches,
+        truncated: results.length < totalMatches,
+        filesSearched
+      });
     } catch (err) {
       res.status(500).json({ error: err.message });
     }

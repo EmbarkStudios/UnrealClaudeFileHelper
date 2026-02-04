@@ -261,6 +261,45 @@ class UnrealIndexBridge {
             }
           },
           {
+            name: 'unreal_grep',
+            description: 'Search file contents for a pattern (regex or literal string). Scoped to indexed projects. Use for finding usages, string references, variable assignments, or any content pattern that structural type/member lookups cannot find.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                pattern: {
+                  type: 'string',
+                  description: 'Search pattern (regex supported, e.g. "GameModeTagExclusionFilter", "UPROPERTY.*EditAnywhere")'
+                },
+                project: {
+                  type: 'string',
+                  description: 'Filter by project (Discovery, Pioneer, Shared, Engine, EnginePlugins, DiscoveryPlugins)'
+                },
+                language: {
+                  type: 'string',
+                  enum: ['all', 'angelscript', 'cpp'],
+                  default: 'all',
+                  description: 'Filter by language: all, angelscript, or cpp'
+                },
+                caseSensitive: {
+                  type: 'boolean',
+                  default: true,
+                  description: 'Case sensitive search'
+                },
+                maxResults: {
+                  type: 'number',
+                  default: 50,
+                  description: 'Maximum matching lines to return'
+                },
+                contextLines: {
+                  type: 'number',
+                  default: 2,
+                  description: 'Lines of context before and after each match'
+                }
+              },
+              required: ['pattern']
+            }
+          },
+          {
             name: 'unreal_list_modules',
             description: 'List available modules/directories in the codebase. Use to discover code organization and navigate the module tree.',
             inputSchema: {
@@ -367,6 +406,20 @@ class UnrealIndexBridge {
               project: args.project,
               language: args.language,
               maxResults: args.maxResults
+            });
+            return {
+              content: [{ type: 'text', text: JSON.stringify(result, null, 2) }]
+            };
+          }
+
+          case 'unreal_grep': {
+            const result = await fetchService('/grep', {
+              pattern: args.pattern,
+              project: args.project,
+              language: args.language,
+              caseSensitive: args.caseSensitive,
+              maxResults: args.maxResults,
+              contextLines: args.contextLines
             });
             return {
               content: [{ type: 'text', text: JSON.stringify(result, null, 2) }]
