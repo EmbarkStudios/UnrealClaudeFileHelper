@@ -1,31 +1,35 @@
 #!/usr/bin/env node
 
-import { createInterface } from 'readline';
+import * as p from '@clack/prompts';
 import { existsSync, readdirSync, unlinkSync } from 'fs';
 import { writeFile, readFile } from 'fs/promises';
 import { join, dirname, basename, resolve } from 'path';
 import { fileURLToPath } from 'url';
+import { spawn } from 'child_process';
+import http from 'http';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const ROOT = join(__dirname, '..');
+const CONFIG_PATH = join(ROOT, 'config.json');
+const DB_PATH = join(ROOT, 'data', 'index.db');
 
-const rl = createInterface({ input: process.stdin, output: process.stdout });
+// ── Utilities ──────────────────────────────────────────────
 
-function ask(question) {
-  return new Promise(resolve => rl.question(question, resolve));
-}
-
-function log(msg = '') {
-  console.log(msg);
-}
-
-function fwd(p) {
-  return p.replace(/\\/g, '/');
+function fwd(path) {
+  return path.replace(/\\/g, '/');
 }
 
 function cleanPath(input) {
   return resolve(input.trim().replace(/^["']|["']$/g, ''));
+}
+
+function cancelGuard(value) {
+  if (p.isCancel(value)) {
+    p.cancel('Cancelled.');
+    process.exit(0);
+  }
+  return value;
 }
 
 function findUProjectFile(dir) {
@@ -40,63 +44,80 @@ function findUProjectFile(dir) {
   return null;
 }
 
-function detectProjects(projectRoot, projectName) {
-  const projects = [];
-  const detected = [];
+// ── Config I/O ─────────────────────────────────────────────
 
-  const scriptDir = join(projectRoot, 'Script');
-  if (existsSync(scriptDir)) {
-    projects.push({
-      name: projectName,
-      paths: [fwd(scriptDir)],
-      language: 'angelscript'
-    });
-    detected.push(`  AngelScript: ${scriptDir}`);
+async function loadConfig() {
+  if (!existsSync(CONFIG_PATH)) return null;
+  try {
+    return JSON.parse(await readFile(CONFIG_PATH, 'utf-8'));
+  } catch {
+    return null;
   }
+}
 
-  const sourceDir = join(projectRoot, 'Source');
-  if (existsSync(sourceDir)) {
-    projects.push({
-      name: `${projectName}-Cpp`,
-      paths: [fwd(sourceDir)],
-      language: 'cpp'
-    });
-    detected.push(`  C++:         ${sourceDir}`);
+async function saveConfig(config) {
+  await writeFile(CONFIG_PATH, JSON.stringify(config, null, 2) + '\n');
+}
+
+function ensureDefaults(config) {
+  if (!config.port) config.port = 3847;
+  if (!config.projects) config.projects = [];
+  if (!config.exclude) {
+    config.exclude = [
+      '**/Intermediate/**',
+      '**/Binaries/**',
+      '**/.git/**',
+      '**/node_modules/**',
+    ];
   }
+  return config;
+}
 
-  const contentDir = join(projectRoot, 'Content');
-  if (existsSync(contentDir)) {
-    projects.push({
-      name: `${projectName}-Content`,
-      paths: [fwd(contentDir)],
-      language: 'content',
-      contentRoot: fwd(contentDir),
-      extensions: ['.uasset', '.umap']
+// ── Service status ─────────────────────────────────────────
+
+function checkService(port) {
+  return new Promise((resolve) => {
+    const req = http.get(`http://127.0.0.1:${port}/status`, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        try {
+          resolve({ running: true, status: JSON.parse(data) });
+        } catch {
+          resolve({ running: true, status: null });
+        }
+      });
     });
-    detected.push(`  Content:     ${contentDir}`);
-  }
+    req.on('error', () => resolve({ running: false }));
+    req.setTimeout(1000, () => { req.destroy(); resolve({ running: false }); });
+  });
+}
 
-  const configDir = join(projectRoot, 'Config');
-  if (existsSync(configDir)) {
-    projects.push({
-      name: `${projectName}-Config`,
-      paths: [fwd(configDir)],
-      language: 'config',
-      extensions: ['.ini']
-    });
-    detected.push(`  Config:      ${configDir}`);
-  }
+// ── Detection ──────────────────────────────────────────────
 
-  return { projects, detected };
+function detectDirectories(projectRoot) {
+  const candidates = [];
+  const checks = [
+    { subdir: 'Script', language: 'angelscript', label: 'Script/' },
+    { subdir: 'Source', language: 'cpp', label: 'Source/' },
+    { subdir: 'Plugins', language: 'cpp', label: 'Plugins/' },
+    { subdir: 'Content', language: 'content', label: 'Content/' },
+    { subdir: 'Config', language: 'config', label: 'Config/' },
+  ];
+  for (const check of checks) {
+    const dir = join(projectRoot, check.subdir);
+    if (existsSync(dir)) {
+      candidates.push({ dir: fwd(dir), label: check.label, language: check.language });
+    }
+  }
+  return candidates;
 }
 
 function detectEngineRoot(projectRoot) {
   let dir = dirname(projectRoot);
   for (let i = 0; i < 5; i++) {
     const engineSource = join(dir, 'Engine', 'Source');
-    if (existsSync(engineSource)) {
-      return dir;
-    }
+    if (existsSync(engineSource)) return dir;
     const parent = dirname(dir);
     if (parent === dir) break;
     dir = parent;
@@ -104,229 +125,513 @@ function detectEngineRoot(projectRoot) {
   return null;
 }
 
-function validateExistingConfig(config) {
-  if (!config.projects || !Array.isArray(config.projects) || config.projects.length === 0) {
-    return false;
-  }
-  // At least one project must have paths that exist
-  for (const p of config.projects) {
-    if (p.paths && p.paths.some(path => existsSync(path))) {
-      return true;
+function detectEngineDirectories(engineRoot) {
+  const candidates = [];
+  for (const sub of [join('Engine', 'Source'), join('Engine', 'Plugins')]) {
+    const dir = join(engineRoot, sub);
+    if (existsSync(dir)) {
+      candidates.push({ dir: fwd(dir), label: sub.replace(/\\/g, '/'), language: 'cpp' });
     }
   }
-  return false;
+  return candidates;
 }
 
-function printConfig(config) {
-  log(`  Port: ${config.port || 3847}`);
-  for (const p of config.projects || []) {
-    const lang = p.language || 'angelscript';
-    const paths = (p.paths || []).join(', ');
-    const exists = (p.paths || []).every(path => existsSync(path));
-    log(`    ${p.name} (${lang})${exists ? '' : ' [WARNING: path missing]'}`);
-    for (const path of p.paths || []) {
-      log(`      ${path}`);
+// ── Display helpers ────────────────────────────────────────
+
+function formatConfigPreview(config) {
+  const lines = [`Port: ${config.port}`, ''];
+  for (const proj of config.projects) {
+    lines.push(`${proj.name} (${proj.language})`);
+    for (const path of proj.paths) {
+      const ok = existsSync(path) ? '✓' : '✗';
+      lines.push(`  ${ok} ${path}`);
     }
   }
-  if (config.exclude && config.exclude.length > 0) {
-    log(`  Exclude: ${config.exclude.join(', ')}`);
+  if (config.exclude?.length > 0) {
+    lines.push('', `Exclude: ${config.exclude.join(', ')}`);
+  }
+  return lines.join('\n');
+}
+
+function buildProjectsFromSelections(selections, projectName) {
+  const byLanguage = {};
+  for (const sel of selections) {
+    if (!byLanguage[sel.language]) byLanguage[sel.language] = [];
+    byLanguage[sel.language].push(sel.dir);
+  }
+
+  const projects = [];
+  if (byLanguage.angelscript) {
+    projects.push({ name: projectName, paths: byLanguage.angelscript, language: 'angelscript' });
+  }
+  if (byLanguage.cpp) {
+    projects.push({ name: `${projectName}-Cpp`, paths: byLanguage.cpp, language: 'cpp' });
+  }
+  if (byLanguage.content) {
+    projects.push({
+      name: `${projectName}-Content`, paths: byLanguage.content, language: 'content',
+      contentRoot: byLanguage.content[0], extensions: ['.uasset', '.umap'],
+    });
+  }
+  if (byLanguage.config) {
+    projects.push({
+      name: `${projectName}-Config`, paths: byLanguage.config, language: 'config',
+      extensions: ['.ini'],
+    });
+  }
+  return projects;
+}
+
+// ── Menu actions ───────────────────────────────────────────
+
+async function actionViewConfig(config) {
+  if (!config || !config.projects?.length) {
+    p.log.warn('No config found. Run "Full setup" first.');
+    return;
+  }
+  p.note(formatConfigPreview(config), 'Current config');
+}
+
+async function actionAddPaths(config) {
+  if (!config || !config.projects?.length) {
+    p.log.warn('No config found. Run "Full setup" first.');
+    return null;
+  }
+
+  const projects = config.projects;
+  let changed = false;
+
+  let addMore = true;
+  while (addMore) {
+    const language = cancelGuard(await p.select({
+      message: 'Language type for new path:',
+      options: [
+        { value: 'angelscript', label: 'AngelScript', hint: '.as files' },
+        { value: 'cpp', label: 'C++', hint: '.h/.cpp files' },
+        { value: 'content', label: 'Content', hint: '.uasset/.umap files' },
+        { value: 'config', label: 'Config', hint: '.ini files' },
+      ],
+    }));
+
+    const extraPath = cancelGuard(await p.text({
+      message: 'Path to directory:',
+      validate: (value) => {
+        if (!value.trim()) return 'Please enter a path.';
+        const resolved = cleanPath(value);
+        if (!existsSync(resolved)) return `Path does not exist: ${resolved}`;
+      },
+    }));
+
+    const resolved = fwd(cleanPath(extraPath));
+    const dirName = basename(resolved);
+
+    // Offer to merge into existing project of same language
+    const sameLanguage = projects.filter(proj => proj.language === language);
+    let targetProject = null;
+
+    if (sameLanguage.length > 0) {
+      const mergeChoice = cancelGuard(await p.select({
+        message: 'Add to existing project or create new?',
+        options: [
+          ...sameLanguage.map(proj => ({
+            value: proj.name,
+            label: `Add to "${proj.name}"`,
+            hint: proj.paths.join(', '),
+          })),
+          { value: '__new__', label: 'Create new project' },
+        ],
+      }));
+      if (mergeChoice !== '__new__') {
+        targetProject = projects.find(proj => proj.name === mergeChoice);
+      }
+    }
+
+    if (targetProject) {
+      if (!targetProject.paths.includes(resolved)) {
+        targetProject.paths.push(resolved);
+        changed = true;
+      }
+      p.log.success(`Added ${resolved} to "${targetProject.name}"`);
+    } else {
+      const name = cancelGuard(await p.text({
+        message: 'Name for new project:',
+        defaultValue: dirName,
+        placeholder: dirName,
+      }));
+
+      const newProject = { name, paths: [resolved], language };
+      if (language === 'content') {
+        newProject.contentRoot = resolved;
+        newProject.extensions = ['.uasset', '.umap'];
+      } else if (language === 'config') {
+        newProject.extensions = ['.ini'];
+      }
+      projects.push(newProject);
+      changed = true;
+      p.log.success(`Created project "${name}" (${language}) → ${resolved}`);
+    }
+
+    addMore = cancelGuard(await p.confirm({
+      message: 'Add another path?',
+      initialValue: true,
+    }));
+  }
+
+  if (changed) {
+    p.note(formatConfigPreview(config), 'Updated config');
+    const writeIt = cancelGuard(await p.confirm({ message: 'Save changes?', initialValue: true }));
+    if (writeIt) {
+      await saveConfig(config);
+      clearDatabase();
+      p.log.success('Config saved.');
+      return config;
+    }
+  }
+
+  return null;
+}
+
+async function actionFullSetup() {
+  // State for each stage
+  let projectRoot = null;
+  let projectName = null;
+  let selectedDirs = [];
+  let extraPaths = [];
+  let engineSelections = [];
+
+  // Stage functions — each can be re-run to redo that step
+
+  async function stageProject() {
+    const inputRaw = cancelGuard(await p.text({
+      message: 'Path to .uproject file or project directory:',
+      placeholder: 'D:/Code/UE/MyProject/MyGame.uproject',
+      validate: (value) => {
+        if (!value.trim()) return 'Please enter a path.';
+        const resolved = cleanPath(value);
+        if (!existsSync(resolved)) return `Path does not exist: ${resolved}`;
+      },
+    }));
+
+    const inputPath = cleanPath(inputRaw);
+    if (inputPath.endsWith('.uproject')) {
+      projectRoot = dirname(inputPath);
+      projectName = basename(inputPath, '.uproject');
+    } else {
+      projectRoot = inputPath;
+      const uproject = findUProjectFile(inputPath);
+      projectName = uproject ? basename(uproject, '.uproject') : basename(inputPath);
+    }
+
+    // Reset downstream stages when project changes
+    selectedDirs = [];
+    extraPaths = [];
+    engineSelections = [];
+  }
+
+  async function stageDirectories() {
+    const candidates = detectDirectories(projectRoot);
+    if (candidates.length === 0) {
+      p.log.error('No Script/, Source/, Plugins/, Content/, or Config/ directories found.');
+      return;
+    }
+    selectedDirs = cancelGuard(await p.multiselect({
+      message: 'Select directories to index:',
+      options: candidates.map(c => ({ value: c, label: c.label, hint: c.language })),
+      initialValues: candidates,
+      required: true,
+    }));
+  }
+
+  async function stageExtraPaths() {
+    extraPaths = [];
+    let addMore = cancelGuard(await p.confirm({
+      message: 'Add additional paths to index?',
+      initialValue: false,
+    }));
+    while (addMore) {
+      const language = cancelGuard(await p.select({
+        message: 'Language type:',
+        options: [
+          { value: 'angelscript', label: 'AngelScript', hint: '.as files' },
+          { value: 'cpp', label: 'C++', hint: '.h/.cpp files' },
+          { value: 'content', label: 'Content', hint: '.uasset/.umap files' },
+          { value: 'config', label: 'Config', hint: '.ini files' },
+        ],
+      }));
+      const extraPath = cancelGuard(await p.text({
+        message: 'Path to directory:',
+        validate: (value) => {
+          if (!value.trim()) return 'Please enter a path.';
+          const resolved = cleanPath(value);
+          if (!existsSync(resolved)) return `Path does not exist: ${resolved}`;
+        },
+      }));
+      const resolved = cleanPath(extraPath);
+      extraPaths.push({ dir: fwd(resolved), label: `${basename(resolved)}/`, language });
+      p.log.success(`Added: ${basename(resolved)}/ (${language})`);
+      addMore = cancelGuard(await p.confirm({ message: 'Add another path?', initialValue: true }));
+    }
+  }
+
+  async function stageEngine() {
+    engineSelections = [];
+    const engineRoot = detectEngineRoot(projectRoot);
+    if (engineRoot) {
+      const engineCandidates = detectEngineDirectories(engineRoot);
+      if (engineCandidates.length > 0) {
+        const selected = cancelGuard(await p.multiselect({
+          message: 'Engine directories detected. Select which to index:',
+          options: [
+            ...engineCandidates.map(c => ({ value: c, label: c.label, hint: 'cpp' })),
+            { value: 'none', label: 'Skip engine indexing' },
+          ],
+          initialValues: engineCandidates,
+          required: true,
+        }));
+        for (const sel of selected) {
+          if (sel !== 'none') engineSelections.push(sel);
+        }
+      }
+    } else {
+      const addEngine = cancelGuard(await p.confirm({
+        message: 'Add engine source path manually?',
+        initialValue: false,
+      }));
+      if (addEngine) {
+        const enginePath = cancelGuard(await p.text({
+          message: 'Engine root directory (containing Engine/Source):',
+          validate: (value) => {
+            if (!value.trim()) return 'Please enter a path.';
+            const resolved = cleanPath(value);
+            if (!existsSync(resolved)) return `Path does not exist: ${resolved}`;
+            if (!existsSync(join(resolved, 'Engine', 'Source'))) return 'No Engine/Source found at this path.';
+          },
+        }));
+        const resolved = cleanPath(enginePath);
+        const engineCandidates = detectEngineDirectories(resolved);
+        if (engineCandidates.length > 0) {
+          const selected = cancelGuard(await p.multiselect({
+            message: 'Select engine directories to index:',
+            options: engineCandidates.map(c => ({ value: c, label: c.label, hint: 'cpp' })),
+            initialValues: engineCandidates,
+            required: true,
+          }));
+          engineSelections.push(...selected);
+        }
+      }
+    }
+  }
+
+  function buildSummary() {
+    const lines = [];
+    if (projectName) lines.push(`Project: ${projectName} (${projectRoot})`);
+    if (selectedDirs.length > 0) {
+      lines.push(`Directories: ${selectedDirs.map(d => d.label).join(', ')}`);
+    }
+    if (extraPaths.length > 0) {
+      lines.push(`Extra paths: ${extraPaths.map(d => `${d.label} (${d.language})`).join(', ')}`);
+    }
+    if (engineSelections.length > 0) {
+      lines.push(`Engine: ${engineSelections.map(e => e.label).join(', ')}`);
+    }
+    return lines.join('\n') || 'Nothing configured yet.';
+  }
+
+  // Run stages sequentially first time
+  await stageProject();
+  p.log.info(`Project: ${projectName} (${projectRoot})`);
+  await stageDirectories();
+  await stageExtraPaths();
+  await stageEngine();
+
+  // Review loop — show summary, let user redo any step or save
+  while (true) {
+    p.note(buildSummary(), 'Setup summary');
+
+    const reviewAction = cancelGuard(await p.select({
+      message: 'What next?',
+      options: [
+        { value: 'save', label: 'Save config', hint: 'write and finish' },
+        { value: 'project', label: 'Change project path', hint: projectName || 'not set' },
+        { value: 'dirs', label: 'Redo directory selection', hint: `${selectedDirs.length} selected` },
+        { value: 'extra', label: 'Redo extra paths', hint: `${extraPaths.length} added` },
+        { value: 'engine', label: 'Redo engine selection', hint: `${engineSelections.length} selected` },
+        { value: 'cancel', label: 'Cancel', hint: 'back to main menu' },
+      ],
+    }));
+
+    switch (reviewAction) {
+      case 'project':
+        await stageProject();
+        p.log.info(`Project: ${projectName} (${projectRoot})`);
+        await stageDirectories(); // re-detect after project change
+        break;
+      case 'dirs':
+        await stageDirectories();
+        break;
+      case 'extra':
+        await stageExtraPaths();
+        break;
+      case 'engine':
+        await stageEngine();
+        break;
+      case 'cancel':
+        p.log.warn('Setup cancelled.');
+        return null;
+      case 'save': {
+        const allSelections = [...selectedDirs, ...extraPaths];
+        const projects = buildProjectsFromSelections(allSelections, projectName);
+        if (engineSelections.length > 0) {
+          projects.push({ name: 'Engine', paths: engineSelections.map(s => s.dir), language: 'cpp' });
+        }
+        const config = ensureDefaults({ port: 3847, projects });
+
+        p.note(formatConfigPreview(config), 'Final config');
+        const writeIt = cancelGuard(await p.confirm({ message: 'Write this config?', initialValue: true }));
+        if (!writeIt) continue; // back to review loop
+
+        await saveConfig(config);
+        clearDatabase();
+        p.log.success('Config saved.');
+        return config;
+      }
+    }
   }
 }
+
+async function actionStartService(port) {
+  const { running } = await checkService(port);
+  if (running) {
+    p.log.warn(`Service is already running on port ${port}.`);
+    return;
+  }
+
+  p.log.info('Starting service...');
+
+  const child = spawn('node', [join(ROOT, 'src', 'service', 'index.js')], {
+    cwd: ROOT,
+    stdio: 'inherit',
+    detached: true,
+    shell: true,
+  });
+
+  child.unref();
+
+  // Wait briefly to see if it starts
+  await new Promise(r => setTimeout(r, 2000));
+  const check = await checkService(port);
+  if (check.running) {
+    p.log.success(`Service started on port ${port}.`);
+  } else {
+    p.log.info('Service is starting up (check console output above).');
+  }
+}
+
+function clearDatabase() {
+  if (existsSync(DB_PATH)) {
+    try {
+      unlinkSync(DB_PATH);
+      p.log.info('Cleared database (will rebuild on next start).');
+    } catch (err) {
+      p.log.warn(`Could not delete database: ${err.message}`);
+    }
+  }
+}
+
+// ── Main menu loop ─────────────────────────────────────────
 
 async function main() {
-  log('=== Unreal Index Setup ===');
-  log();
+  p.intro('Unreal Index Manager');
 
-  const configPath = join(ROOT, 'config.json');
+  let config = await loadConfig();
+  if (config) ensureDefaults(config);
 
-  // Check for existing config and offer to keep it
-  if (existsSync(configPath)) {
-    try {
-      const existing = JSON.parse(await readFile(configPath, 'utf-8'));
-      if (validateExistingConfig(existing)) {
-        log('Current config:');
-        printConfig(existing);
-        log();
-        const keep = await ask('Use this config? (Y/n): ');
-        if (keep.trim().toLowerCase() !== 'n') {
-          log('Keeping existing config.');
-          rl.close();
-          return;
-        }
-        log();
-      } else {
-        log('Existing config.json has issues (missing paths or no projects).');
-        log();
-      }
-    } catch {
-      log('Existing config.json could not be parsed, starting fresh.');
-      log();
-    }
-  }
+  let running = false;
 
-  // Ask for project path
-  const input = await ask('Path to .uproject file or project directory: ');
-  const inputPath = cleanPath(input);
-
-  if (!existsSync(inputPath)) {
-    log(`Error: Path does not exist: ${inputPath}`);
-    rl.close();
-    process.exit(1);
-  }
-
-  // Resolve project root
-  let projectRoot;
-  let projectName;
-
-  if (inputPath.endsWith('.uproject')) {
-    projectRoot = dirname(inputPath);
-    projectName = basename(inputPath, '.uproject');
-  } else {
-    projectRoot = inputPath;
-    const uproject = findUProjectFile(inputPath);
-    if (uproject) {
-      projectName = basename(uproject, '.uproject');
-    } else {
-      projectName = basename(inputPath);
-    }
-  }
-
-  log();
-  log(`Project root: ${projectRoot}`);
-  log(`Project name: ${projectName}`);
-  log();
-
-  // Detect project structure
-  const { projects, detected } = detectProjects(projectRoot, projectName);
-
-  if (detected.length > 0) {
-    log('Detected:');
-    for (const d of detected) {
-      log(d);
-    }
-    log();
-  }
-
-  if (projects.length === 0) {
-    log('No Script/, Source/, Content/, or Config/ directories found.');
-    log('Please check the path and try again.');
-    rl.close();
-    process.exit(1);
-  }
-
-  // Allow adding extra AngelScript directories
-  log('Add additional AngelScript script directories? (e.g. Plugins/Shared/Script)');
-  log('Enter paths one at a time, or press Enter to continue.');
-  let extraCount = 0;
   while (true) {
-    const extra = await ask('  Additional script path (empty to continue): ');
-    const trimmed = extra.trim();
-    if (!trimmed) break;
+    // Check service status
+    const port = config?.port || 3847;
+    const serviceCheck = await checkService(port);
+    running = serviceCheck.running;
 
-    const resolved = cleanPath(trimmed);
-    if (!existsSync(resolved)) {
-      log(`    Path does not exist: ${resolved}`);
-      continue;
-    }
+    const statusLine = running
+      ? `● Service running on port ${port}`
+      : `○ Service not running`;
 
-    extraCount++;
-    const extraName = basename(resolved);
+    const configLine = config?.projects?.length
+      ? `${config.projects.length} project(s) configured`
+      : 'No config';
 
-    // Check if there's already an angelscript project we can add the path to,
-    // or create a new one
-    const addToExisting = await ask(`    Name for this project (default: "${extraName}"): `);
-    const name = addToExisting.trim() || extraName;
+    p.log.message(`${statusLine}  |  ${configLine}`);
 
-    projects.push({
-      name,
-      paths: [fwd(resolved)],
-      language: 'angelscript'
-    });
-    log(`    Added: ${name} -> ${resolved}`);
-  }
+    const action = cancelGuard(await p.select({
+      message: 'What would you like to do?',
+      options: [
+        ...(config?.projects?.length
+          ? [{ value: 'view', label: 'View config', hint: 'show current setup' }]
+          : []),
+        { value: 'full', label: 'Full setup', hint: 'configure from scratch' },
+        ...(config?.projects?.length
+          ? [{ value: 'add', label: 'Add paths', hint: 'add to existing config' }]
+          : []),
+        ...(config?.projects?.length
+          ? [{
+              value: 'start',
+              label: running ? 'Service status' : 'Start service',
+              hint: running ? `running on port ${port}` : 'launch the index service',
+            }]
+          : []),
+        { value: 'exit', label: 'Exit' },
+      ],
+    }));
 
-  if (extraCount > 0) log();
+    switch (action) {
+      case 'view':
+        await actionViewConfig(config);
+        break;
 
-  // Ask about engine source
-  const engineRoot = detectEngineRoot(projectRoot);
-  if (engineRoot) {
-    const engineSource = fwd(join(engineRoot, 'Engine', 'Source'));
-    const addEngine = await ask(`Engine source detected at ${engineSource}\nIndex engine C++ headers? (y/N): `);
-    if (addEngine.trim().toLowerCase() === 'y') {
-      projects.push({
-        name: 'Engine',
-        paths: [engineSource],
-        language: 'cpp'
-      });
-      log('  Added Engine C++ project.');
-    }
-  } else {
-    const enginePath = await ask('Engine source path (leave empty to skip): ');
-    const trimmed = enginePath.trim();
-    if (trimmed) {
-      const resolved = cleanPath(trimmed);
-      if (existsSync(resolved)) {
-        projects.push({
-          name: 'Engine',
-          paths: [fwd(resolved)],
-          language: 'cpp'
-        });
-        log('  Added Engine C++ project.');
-      } else {
-        log(`  Warning: Path does not exist: ${resolved}, skipping.`);
+      case 'full': {
+        const newConfig = await actionFullSetup();
+        if (newConfig) config = newConfig;
+        break;
       }
+
+      case 'add': {
+        const updated = await actionAddPaths(config);
+        if (updated) config = updated;
+        break;
+      }
+
+      case 'start':
+        if (running) {
+          if (serviceCheck.status && typeof serviceCheck.status === 'object') {
+            const statusLines = [];
+            for (const [lang, info] of Object.entries(serviceCheck.status)) {
+              const state = info.status || 'unknown';
+              const progress = info.progress ? ` (${info.progress})` : '';
+              statusLines.push(`${lang}: ${state}${progress}`);
+            }
+            if (statusLines.length > 0) {
+              p.note(statusLines.join('\n'), `Service on port ${port}`);
+            } else {
+              p.log.info(`Service is running on port ${port}.`);
+            }
+          } else {
+            p.log.info(`Service is running on port ${port}.`);
+          }
+        } else {
+          await actionStartService(port);
+        }
+        break;
+
+      case 'exit':
+        p.outro('Goodbye!');
+        return;
     }
   }
-
-  log();
-
-  // Build config
-  const config = {
-    port: 3847,
-    projects,
-    exclude: [
-      '**/Intermediate/**',
-      '**/Binaries/**',
-      '**/.git/**',
-      '**/node_modules/**'
-    ]
-  };
-
-  // Show final config
-  log('Final config:');
-  printConfig(config);
-  log();
-
-  const confirm = await ask('Write this config? (Y/n): ');
-  if (confirm.trim().toLowerCase() === 'n') {
-    log('Aborted. No changes made.');
-    rl.close();
-    process.exit(0);
-  }
-
-  // Write config
-  await writeFile(configPath, JSON.stringify(config, null, 2) + '\n');
-  log(`Config written to ${configPath}`);
-
-  // Clear database so fresh index is built
-  const dbPath = join(ROOT, 'data', 'index.db');
-  if (existsSync(dbPath)) {
-    try {
-      unlinkSync(dbPath);
-      log('Cleared existing database (will rebuild on next start).');
-    } catch (err) {
-      log(`Warning: Could not delete database: ${err.message}`);
-    }
-  }
-
-  log();
-  log('Setup complete! Run start.bat or npm start to launch the service.');
-
-  rl.close();
 }
 
 main().catch(err => {
-  console.error('Setup failed:', err);
-  rl.close();
+  p.cancel(`Failed: ${err.message}`);
   process.exit(1);
 });
