@@ -447,7 +447,8 @@ export class IndexDatabase {
   listModules(parent = '', options = {}) {
     const { project = null, language = null, depth = 1 } = options;
 
-    let sql = 'SELECT module FROM files WHERE 1=1';
+    // Use GROUP BY at SQL level for efficiency (avoids fetching all rows)
+    let sql = 'SELECT module, COUNT(*) as file_count FROM files WHERE 1=1';
     const params = [];
 
     if (parent) {
@@ -465,8 +466,11 @@ export class IndexDatabase {
       params.push(language);
     }
 
+    sql += ' GROUP BY module';
+
     const rows = this.db.prepare(sql).all(...params);
 
+    // Truncate modules to requested depth and aggregate counts
     const moduleCounts = new Map();
     const parentDepth = parent ? parent.split('.').length : 0;
     const targetDepth = parentDepth + depth;
@@ -476,7 +480,7 @@ export class IndexDatabase {
       if (parts.length <= parentDepth) continue;
 
       const truncated = parts.slice(0, targetDepth).join('.');
-      moduleCounts.set(truncated, (moduleCounts.get(truncated) || 0) + 1);
+      moduleCounts.set(truncated, (moduleCounts.get(truncated) || 0) + row.file_count);
     }
 
     return Array.from(moduleCounts.entries())
@@ -832,20 +836,37 @@ export class IndexDatabase {
 
     const files = this.db.prepare(sql).all(...params);
 
-    return files.map(f => {
-      const types = this.db.prepare(`
-        SELECT name, kind, line FROM types WHERE file_id = ? LIMIT 10
-      `).all(f.id);
+    if (files.length === 0) {
+      return [];
+    }
 
-      return {
-        file: f.path,
-        project: f.project,
-        module: f.module,
-        language: f.language,
-        score: f.score,
-        types
-      };
-    });
+    // Batch query for all types (avoids N+1 queries)
+    const fileIds = files.map(f => f.id);
+    const placeholders = fileIds.map(() => '?').join(',');
+    const allTypes = this.db.prepare(`
+      SELECT file_id, name, kind, line FROM types WHERE file_id IN (${placeholders})
+    `).all(...fileIds);
+
+    // Group types by file_id
+    const typesByFile = new Map();
+    for (const t of allTypes) {
+      if (!typesByFile.has(t.file_id)) {
+        typesByFile.set(t.file_id, []);
+      }
+      const arr = typesByFile.get(t.file_id);
+      if (arr.length < 10) {  // Limit to 10 types per file
+        arr.push({ name: t.name, kind: t.kind, line: t.line });
+      }
+    }
+
+    return files.map(f => ({
+      file: f.path,
+      project: f.project,
+      module: f.module,
+      language: f.language,
+      score: f.score,
+      types: typesByFile.get(f.id) || []
+    }));
   }
 
   getStats() {
