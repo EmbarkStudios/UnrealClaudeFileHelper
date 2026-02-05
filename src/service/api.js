@@ -2,6 +2,7 @@ import express from 'express';
 import { Worker } from 'worker_threads';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
+import { patternToTrigrams } from './trigram.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -60,7 +61,9 @@ export function createApi(database, indexer) {
       const stats = database.getStats();
       const lastBuild = database.getMetadata('lastBuild');
       const indexStatus = database.getAllIndexStatus();
-      res.json({ ...stats, lastBuild, indexStatus });
+      const trigramStats = database.getTrigramStats();
+      const trigramReady = database.isTrigramIndexReady();
+      res.json({ ...stats, lastBuild, indexStatus, trigram: trigramStats ? { ...trigramStats, ready: trigramReady } : null });
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
@@ -316,35 +319,69 @@ export function createApi(database, indexer) {
       return res.status(400).json({ error: `Invalid regex: ${e.message}` });
     }
 
-    // Get file paths from the database instead of walking the filesystem
-    let dbFiles = database.getAllFiles();
-    if (project) {
-      dbFiles = dbFiles.filter(f => f.project === project);
-      if (dbFiles.length === 0) {
-        return res.status(400).json({ error: `Unknown project: ${project}` });
-      }
-    }
-    if (language && language !== 'all') {
-      dbFiles = dbFiles.filter(f => f.language === language);
-    }
-    // Exclude content/asset files — grep only searches source code
-    dbFiles = dbFiles.filter(f => f.language !== 'content');
-
-    const files = dbFiles.map(f => ({ filePath: f.path, project: f.project, language: f.language }));
-    const literals = extractLiterals(pattern);
-
-    // Spawn worker thread for grep — keeps the main event loop free
     const workerPath = join(__dirname, 'grep-worker.js');
-    const worker = new Worker(workerPath, {
-      workerData: {
-        files,
-        pattern,
-        flags: caseSensitive ? '' : 'i',
-        maxResults,
-        contextLines,
-        literals
+    let worker;
+    const useTrigramIndex = database.isTrigramIndexReady();
+
+    if (useTrigramIndex) {
+      // Trigram path: query candidates from the index (no disk I/O)
+      const trigrams = patternToTrigrams(pattern, true);
+      const candidates = database.queryTrigramCandidates(trigrams, {
+        project: project || null,
+        language: (language && language !== 'all') ? language : null
+      });
+
+      if (project && candidates.length === 0 && trigrams.length > 0) {
+        // Check if the project exists at all
+        const allFiles = database.getAllFiles();
+        if (!allFiles.some(f => f.project === project)) {
+          return res.status(400).json({ error: `Unknown project: ${project}` });
+        }
       }
-    });
+
+      worker = new Worker(workerPath, {
+        workerData: {
+          candidates: candidates.map(c => ({
+            content: c.content,
+            path: c.path,
+            project: c.project,
+            language: c.language
+          })),
+          pattern,
+          flags: caseSensitive ? '' : 'i',
+          maxResults,
+          contextLines,
+          literals: null // trigram index already filtered candidates
+        }
+      });
+    } else {
+      // Fallback: read files from disk (trigram index not ready)
+      let dbFiles = database.getAllFiles();
+      if (project) {
+        dbFiles = dbFiles.filter(f => f.project === project);
+        if (dbFiles.length === 0) {
+          return res.status(400).json({ error: `Unknown project: ${project}` });
+        }
+      }
+      if (language && language !== 'all') {
+        dbFiles = dbFiles.filter(f => f.language === language);
+      }
+      dbFiles = dbFiles.filter(f => f.language !== 'content');
+
+      const files = dbFiles.map(f => ({ filePath: f.path, project: f.project, language: f.language }));
+      const literals = extractLiterals(pattern);
+
+      worker = new Worker(workerPath, {
+        workerData: {
+          files,
+          pattern,
+          flags: caseSensitive ? '' : 'i',
+          maxResults,
+          contextLines,
+          literals
+        }
+      });
+    }
 
     const timeoutId = setTimeout(() => {
       worker.postMessage('abort');

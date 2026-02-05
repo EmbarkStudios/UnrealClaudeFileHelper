@@ -219,6 +219,32 @@ export class IndexDatabase {
         CREATE INDEX idx_members_kind ON members(member_kind);
       `);
     }
+
+    // Trigram index tables for content search
+    const hasFileContentTable = this.db.prepare(`
+      SELECT COUNT(*) as count FROM sqlite_master WHERE type='table' AND name='file_content'
+    `).get().count > 0;
+
+    if (!hasFileContentTable) {
+      this.db.exec(`
+        CREATE TABLE file_content (
+          file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
+          content BLOB NOT NULL,
+          content_hash INTEGER NOT NULL
+        );
+
+        CREATE TABLE trigrams (
+          trigram INTEGER NOT NULL,
+          file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+          PRIMARY KEY (trigram, file_id)
+        ) WITHOUT ROWID;
+
+        CREATE INDEX idx_trigrams_file ON trigrams(file_id);
+      `);
+
+      // Flag that trigram index needs building from existing files
+      this.setMetadata('trigramBuildNeeded', true);
+    }
   }
 
   close() {
@@ -1123,12 +1149,123 @@ export class IndexDatabase {
 
     return { total, byProject, byExtension, byAssetClass, blueprintCount };
   }
+
+  // --- Trigram index methods ---
+
+  upsertFileContent(fileId, compressedContent, hash) {
+    this.db.prepare(`
+      INSERT INTO file_content (file_id, content, content_hash)
+      VALUES (?, ?, ?)
+      ON CONFLICT(file_id) DO UPDATE SET
+        content = excluded.content,
+        content_hash = excluded.content_hash
+    `).run(fileId, compressedContent, hash);
+  }
+
+  getFileContent(fileId) {
+    return this.db.prepare('SELECT content, content_hash FROM file_content WHERE file_id = ?').get(fileId);
+  }
+
+  getFileContentBatch(fileIds) {
+    if (fileIds.length === 0) return new Map();
+    const placeholders = fileIds.map(() => '?').join(',');
+    const rows = this.db.prepare(
+      `SELECT file_id, content, content_hash FROM file_content WHERE file_id IN (${placeholders})`
+    ).all(...fileIds);
+    const map = new Map();
+    for (const row of rows) {
+      map.set(row.file_id, { content: row.content, content_hash: row.content_hash });
+    }
+    return map;
+  }
+
+  clearTrigramsForFile(fileId) {
+    this.db.prepare('DELETE FROM trigrams WHERE file_id = ?').run(fileId);
+  }
+
+  insertTrigrams(fileId, trigrams) {
+    const stmt = this.db.prepare(
+      'INSERT OR IGNORE INTO trigrams (trigram, file_id) VALUES (?, ?)'
+    );
+    const insertMany = this.db.transaction((items) => {
+      for (const tri of items) {
+        stmt.run(tri, fileId);
+      }
+    });
+    insertMany(trigrams);
+  }
+
+  /**
+   * Query trigram index for candidate files matching all given trigrams.
+   * Returns array of { file_id, content, path, project, language }.
+   * Applies project/language filters.
+   */
+  queryTrigramCandidates(trigrams, { project, language } = {}) {
+    if (trigrams.length === 0) {
+      // Unindexable query — return all file content matching filters
+      let sql = `
+        SELECT fc.file_id, fc.content, f.path, f.project, f.language
+        FROM file_content fc
+        JOIN files f ON f.id = fc.file_id
+        WHERE f.language != 'content'
+      `;
+      const params = [];
+      if (project) { sql += ' AND f.project = ?'; params.push(project); }
+      if (language && language !== 'all') { sql += ' AND f.language = ?'; params.push(language); }
+      return this.db.prepare(sql).all(...params);
+    }
+
+    const placeholders = trigrams.map(() => '?').join(',');
+    let sql = `
+      SELECT fc.file_id, fc.content, f.path, f.project, f.language
+      FROM trigrams t
+      JOIN file_content fc ON t.file_id = fc.file_id
+      JOIN files f ON f.id = fc.file_id
+      WHERE t.trigram IN (${placeholders})
+        AND f.language != 'content'
+    `;
+    const params = [...trigrams];
+    if (project) { sql += ' AND f.project = ?'; params.push(project); }
+    if (language && language !== 'all') { sql += ' AND f.language = ?'; params.push(language); }
+    sql += ' GROUP BY t.file_id HAVING COUNT(DISTINCT t.trigram) = ?';
+    params.push(trigrams.length);
+
+    return this.db.prepare(sql).all(...params);
+  }
+
+  isTrigramIndexReady() {
+    const needed = this.getMetadata('trigramBuildNeeded');
+    return needed === false || needed === null;
+  }
+
+  hasTrigramTables() {
+    return this.db.prepare(`
+      SELECT COUNT(*) as count FROM sqlite_master WHERE type='table' AND name='file_content'
+    `).get().count > 0;
+  }
+
+  getTrigramStats() {
+    if (!this.hasTrigramTables()) return null;
+    const fileCount = this.db.prepare('SELECT COUNT(*) as count FROM file_content').get().count;
+    const trigramCount = this.db.prepare('SELECT COUNT(*) as count FROM trigrams').get().count;
+    return { filesWithContent: fileCount, trigramRows: trigramCount };
+  }
+
+  getFilesWithoutContent() {
+    return this.db.prepare(`
+      SELECT f.id, f.path, f.project, f.language
+      FROM files f
+      LEFT JOIN file_content fc ON f.id = fc.file_id
+      WHERE fc.file_id IS NULL AND f.language NOT IN ('content', 'config')
+    `).all();
+  }
 }
 
 // Wrap key methods with slow-query timing
 const methodsToTime = [
   'findTypeByName', 'findChildrenOf', 'findMember', 'findFileByName',
-  'findAssetByName', 'getStats', 'getAssetStats', 'upsertAssetBatch'
+  'findAssetByName', 'getStats', 'getAssetStats', 'upsertAssetBatch',
+  'queryTrigramCandidates'
 ];
 for (const method of methodsToTime) {
   const original = IndexDatabase.prototype[method];

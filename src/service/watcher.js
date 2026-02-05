@@ -1,9 +1,11 @@
 import chokidar from 'chokidar';
 import { relative } from 'path';
 import { stat, readFile } from 'fs/promises';
+import { deflateSync } from 'zlib';
 import { parseFile } from '../parser.js';
 import { parseCppContent } from '../parsers/cpp-parser.js';
 import { parseUAssetHeader } from '../parsers/uasset-parser.js';
+import { extractTrigrams, contentHash } from './trigram.js';
 
 export class FileWatcher {
   constructor(config, database, options = {}) {
@@ -179,11 +181,13 @@ export class FileWatcher {
           }
 
           let parsed;
+          let fileContent;
 
           if (language === 'cpp') {
-            const content = await readFile(filePath, 'utf-8');
-            parsed = parseCppContent(content, filePath);
+            fileContent = await readFile(filePath, 'utf-8');
+            parsed = parseCppContent(fileContent, filePath);
           } else {
+            fileContent = await readFile(filePath, 'utf-8');
             parsed = await parseFile(filePath);
           }
 
@@ -239,6 +243,18 @@ export class FileWatcher {
               }));
 
               this.database.insertMembers(fileId, resolvedMembers);
+            }
+
+            // Update trigram index
+            if (fileContent && fileContent.length <= 500000) {
+              const trigrams = [...extractTrigrams(fileContent)];
+              const compressed = deflateSync(fileContent);
+              const hash = contentHash(fileContent);
+              this.database.upsertFileContent(fileId, compressed, hash);
+              this.database.clearTrigramsForFile(fileId);
+              if (trigrams.length > 0) {
+                this.database.insertTrigrams(fileId, trigrams);
+              }
             }
           });
 

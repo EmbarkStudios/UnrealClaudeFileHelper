@@ -1,7 +1,8 @@
 import { parentPort, workerData } from 'worker_threads';
 import { readFileSync } from 'fs';
+import { inflateSync } from 'zlib';
 
-const { files, pattern, flags, maxResults, contextLines, literals } = workerData;
+const { files, candidates, pattern, flags, maxResults, contextLines, literals } = workerData;
 
 const regex = new RegExp(pattern, flags);
 const results = [];
@@ -13,16 +14,31 @@ parentPort.on('message', (msg) => {
   if (msg === 'abort') aborted = true;
 });
 
-for (const entry of files) {
+// Use pre-fetched candidates (trigram path) or file paths (fallback)
+const entries = candidates || files;
+
+for (const entry of entries) {
   if (aborted || results.length >= maxResults) break;
   filesSearched++;
 
   let content;
-  try {
-    content = readFileSync(entry.filePath, 'utf-8');
-  } catch {
-    continue;
+  if (entry.content) {
+    // Pre-fetched compressed content from trigram index
+    try {
+      content = inflateSync(entry.content).toString('utf-8');
+    } catch {
+      continue;
+    }
+  } else {
+    // Fallback: read from disk
+    try {
+      content = readFileSync(entry.filePath, 'utf-8');
+    } catch {
+      continue;
+    }
   }
+
+  const filePath = entry.path || entry.filePath;
 
   // Fast pre-check: skip files that contain none of the literal terms
   if (literals && !literals.some(lit => content.includes(lit))) continue;
@@ -42,7 +58,7 @@ for (const entry of files) {
       }
 
       results.push({
-        file: entry.filePath,
+        file: filePath,
         project: entry.project,
         language: entry.language,
         line: i + 1,
