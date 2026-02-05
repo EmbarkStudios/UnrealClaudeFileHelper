@@ -91,6 +91,14 @@ export class QueryPool {
     });
   }
 
+  async warmup() {
+    // Dispatch warmup to all workers in parallel to populate their SQLite page caches
+    const results = await Promise.all(
+      this.workers.map((_, i) => this.execute('_warmup', [], 30000))
+    );
+    return results.map(r => r.result);
+  }
+
   execute(method, args, timeoutMs = 5000) {
     return new Promise((resolve, reject) => {
       const id = this.nextId++;

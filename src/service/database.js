@@ -40,6 +40,7 @@ export class IndexDatabase {
     if (readOnly) {
       this.db = new Database(this.dbPath, { readonly: true });
       this.db.pragma('journal_mode = WAL');
+      this.db.pragma('cache_size = -262144'); // 256MB page cache per connection
       this.readOnly = true;
       return this;
     }
@@ -51,6 +52,7 @@ export class IndexDatabase {
 
     this.db = new Database(this.dbPath);
     this.db.pragma('journal_mode = WAL');
+    this.db.pragma('cache_size = -262144'); // 256MB page cache
     this.db.pragma('foreign_keys = ON');
     this.createSchema();
     return this;
