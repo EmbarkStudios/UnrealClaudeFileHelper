@@ -10,29 +10,29 @@ npm install
 
 ## Configuration
 
-Edit `config.json` to specify project paths:
+### Quick start (recommended)
 
-```json
-{
-  "projects": [
-    {
-      "name": "Discovery",
-      "paths": ["D:\\p4\\games\\Games\\Discovery\\Script"]
-    },
-    {
-      "name": "Pioneer",
-      "paths": ["D:\\p4\\games\\Games\\Pioneer\\Script"]
-    },
-    {
-      "name": "Shared",
-      "paths": ["D:\\p4\\games\\Games\\Shared\\Plugins"],
-      "recursive": true
-    }
-  ],
-  "exclude": ["**/Editor/**", "**/*_Test.as"],
-  "cacheFile": "data/index.json"
-}
+Run the interactive setup wizard:
+
+```bash
+npm run setup
 ```
+
+Or on Windows, double-click `setup.bat`.
+
+The wizard will detect your project structure and generate `config.json`.
+
+### Manual configuration
+
+Copy the example config and edit it with your paths:
+
+```bash
+cp config.example.json config.json
+```
+
+Then edit `config.json` to point to your project directories. See `config.example.json` for the full schema with all supported project types.
+
+> **Note:** `config.json` is git-ignored and local to your machine. Each developer runs `npm run setup` (or copies the example) to create their own config.
 
 ## Usage
 
@@ -57,7 +57,7 @@ Add to your `.claude/settings.json`:
   "mcpServers": {
     "unreal-index": {
       "command": "node",
-      "args": ["D:\\p4\\games\\Games\\Tools\\unreal-index\\src\\server.js"]
+      "args": ["<path-to-unreal-index>/src/server.js"]
     }
   }
 }

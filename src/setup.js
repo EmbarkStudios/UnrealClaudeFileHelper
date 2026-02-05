@@ -12,6 +12,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const ROOT = join(__dirname, '..');
 const CONFIG_PATH = join(ROOT, 'config.json');
+const EXAMPLE_PATH = join(ROOT, 'config.example.json');
 const DB_PATH = join(ROOT, 'data', 'index.db');
 
 // ── Utilities ──────────────────────────────────────────────
@@ -544,7 +545,14 @@ async function main() {
   p.intro('Unreal Index Manager');
 
   let config = await loadConfig();
-  if (config) ensureDefaults(config);
+  if (config) {
+    ensureDefaults(config);
+  } else {
+    p.log.warn('No config.json found. Run "Full setup" to create one.');
+    if (existsSync(EXAMPLE_PATH)) {
+      p.log.info('See config.example.json for reference.');
+    }
+  }
 
   let running = false;
 
