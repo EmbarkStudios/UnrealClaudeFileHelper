@@ -1,6 +1,10 @@
 import express from 'express';
-import { readdir, readFile } from 'fs/promises';
-import { join } from 'path';
+import { Worker } from 'worker_threads';
+import { dirname, join } from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 export function createApi(database, indexer) {
   const app = express();
@@ -286,141 +290,100 @@ export function createApi(database, indexer) {
 
   // --- Content search (grep) ---
 
-  async function collectFiles(dir, extensions, excludePatterns) {
-    const results = [];
-    async function walk(d) {
-      let entries;
-      try {
-        entries = await readdir(d, { withFileTypes: true });
-      } catch {
-        return;
-      }
-      for (const entry of entries) {
-        const full = join(d, entry.name);
-        const normalized = full.replace(/\\/g, '/');
-        const excluded = excludePatterns.some(pat => {
-          if (pat.includes('**')) {
-            return new RegExp(pat.replace(/\*\*/g, '.*').replace(/\*/g, '[^/]*')).test(normalized);
-          }
-          return normalized.includes(pat.replace(/\*/g, ''));
-        });
-        if (excluded) continue;
-
-        if (entry.isDirectory()) {
-          await walk(full);
-        } else if (entry.isFile() && extensions.some(ext => entry.name.endsWith(ext))) {
-          results.push(full);
-        }
-      }
-    }
-    await walk(dir);
-    return results;
+  // Extract literal substrings from simple alternation patterns for fast pre-filtering
+  function extractLiterals(pattern) {
+    if (/^[\w|]+$/.test(pattern)) return pattern.split('|').filter(s => s.length > 0);
+    return null;
   }
 
-  app.get('/grep', async (req, res) => {
-    try {
-      const { pattern, project, language, caseSensitive: cs, maxResults: mr, contextLines: cl } = req.query;
+  const GREP_TIMEOUT_MS = 30000;
 
-      if (!pattern) {
-        return res.status(400).json({ error: 'pattern parameter required' });
-      }
+  app.get('/grep', (req, res) => {
+    const { pattern, project, language, caseSensitive: cs, maxResults: mr, contextLines: cl } = req.query;
 
-      const caseSensitive = cs !== 'false';
-      const maxResults = parseInt(mr, 10) || 50;
-      const contextLines = parseInt(cl, 10) || 2;
-
-      let regex;
-      try {
-        regex = new RegExp(pattern, caseSensitive ? '' : 'i');
-      } catch (e) {
-        return res.status(400).json({ error: `Invalid regex: ${e.message}` });
-      }
-
-      const config = indexer.config;
-      if (!config) {
-        return res.status(500).json({ error: 'Config not loaded' });
-      }
-
-      // Determine which projects/extensions to search
-      let projects = config.projects;
-      if (project) {
-        projects = projects.filter(p => p.name === project);
-        if (projects.length === 0) {
-          return res.status(400).json({ error: `Unknown project: ${project}` });
-        }
-      }
-      if (language && language !== 'all') {
-        projects = projects.filter(p => p.language === language);
-      }
-
-      const excludePatterns = config.exclude || [];
-      const results = [];
-      let totalMatches = 0;
-      let filesSearched = 0;
-      let done = false;
-
-      for (const proj of projects) {
-        if (done) break;
-        const extensions = proj.extensions || (proj.language === 'cpp' ? ['.h', '.cpp'] : ['.as']);
-
-        for (const basePath of proj.paths) {
-          if (done) break;
-          const files = await collectFiles(basePath, extensions, excludePatterns);
-
-          for (const filePath of files) {
-            if (done) break;
-            filesSearched++;
-
-            let content;
-            try {
-              content = await readFile(filePath, 'utf-8');
-            } catch {
-              continue;
-            }
-
-            const lines = content.split('\n');
-            for (let i = 0; i < lines.length; i++) {
-              const match = regex.exec(lines[i]);
-              if (!match) continue;
-
-              totalMatches++;
-              if (results.length < maxResults) {
-                const ctxStart = Math.max(0, i - contextLines);
-                const ctxEnd = Math.min(lines.length - 1, i + contextLines);
-                const context = [];
-                for (let c = ctxStart; c <= ctxEnd; c++) {
-                  context.push(lines[c]);
-                }
-
-                results.push({
-                  file: filePath,
-                  project: proj.name,
-                  language: proj.language,
-                  line: i + 1,
-                  column: match.index + 1,
-                  match: lines[i],
-                  context
-                });
-              }
-
-              if (results.length >= maxResults && totalMatches > maxResults * 2) {
-                done = true;
-                break;
-              }
-            }
-          }
-        }
-      }
-
-      res.json({
-        results,
-        totalMatches,
-        truncated: results.length < totalMatches,
-        filesSearched
-      });
-    } catch (err) {
-      res.status(500).json({ error: err.message });
+    if (!pattern) {
+      return res.status(400).json({ error: 'pattern parameter required' });
     }
+
+    const caseSensitive = cs !== 'false';
+    const maxResults = parseInt(mr, 10) || 50;
+    const contextLines = parseInt(cl, 10) || 2;
+
+    // Validate regex before spawning worker
+    try {
+      new RegExp(pattern, caseSensitive ? '' : 'i');
+    } catch (e) {
+      return res.status(400).json({ error: `Invalid regex: ${e.message}` });
+    }
+
+    // Get file paths from the database instead of walking the filesystem
+    let dbFiles = database.getAllFiles();
+    if (project) {
+      dbFiles = dbFiles.filter(f => f.project === project);
+      if (dbFiles.length === 0) {
+        return res.status(400).json({ error: `Unknown project: ${project}` });
+      }
+    }
+    if (language && language !== 'all') {
+      dbFiles = dbFiles.filter(f => f.language === language);
+    }
+    // Exclude content/asset files — grep only searches source code
+    dbFiles = dbFiles.filter(f => f.language !== 'content');
+
+    const files = dbFiles.map(f => ({ filePath: f.path, project: f.project, language: f.language }));
+    const literals = extractLiterals(pattern);
+
+    // Spawn worker thread for grep — keeps the main event loop free
+    const workerPath = join(__dirname, 'grep-worker.js');
+    const worker = new Worker(workerPath, {
+      workerData: {
+        files,
+        pattern,
+        flags: caseSensitive ? '' : 'i',
+        maxResults,
+        contextLines,
+        literals
+      }
+    });
+
+    const timeoutId = setTimeout(() => {
+      worker.postMessage('abort');
+    }, GREP_TIMEOUT_MS);
+
+    let responded = false;
+
+    // Abort worker if client disconnects
+    res.on('close', () => {
+      if (!responded) {
+        worker.postMessage('abort');
+        clearTimeout(timeoutId);
+        worker.terminate();
+      }
+    });
+
+    worker.on('message', (msg) => {
+      if (msg.type === 'complete') {
+        clearTimeout(timeoutId);
+        responded = true;
+        res.json({
+          results: msg.results,
+          totalMatches: msg.totalMatches,
+          truncated: msg.results.length < msg.totalMatches,
+          timedOut: msg.aborted,
+          filesSearched: msg.filesSearched
+        });
+        worker.terminate();
+      }
+    });
+
+    worker.on('error', (err) => {
+      clearTimeout(timeoutId);
+      if (!responded) {
+        responded = true;
+        res.status(500).json({ error: err.message });
+      }
+      worker.terminate();
+    });
   });
 
   return app;
