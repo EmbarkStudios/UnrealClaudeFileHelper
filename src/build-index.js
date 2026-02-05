@@ -10,7 +10,11 @@ const __dirname = dirname(__filename);
 
 async function main() {
   const configPath = join(__dirname, '..', 'config.json');
-  const configContent = await readFile(configPath, 'utf-8');
+  let configContent = await readFile(configPath, 'utf-8');
+  // Strip UTF-8 BOM if present
+  if (configContent.charCodeAt(0) === 0xFEFF) {
+    configContent = configContent.slice(1);
+  }
   const config = JSON.parse(configContent);
 
   console.log('Building index...');
