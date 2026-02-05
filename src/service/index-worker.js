@@ -1,7 +1,9 @@
 import { parentPort, workerData } from 'worker_threads';
 import { readFileSync } from 'fs';
+import { deflateSync } from 'zlib';
 import { parseCppContent } from '../parsers/cpp-parser.js';
 import { parseContent as parseAngelscriptContent } from '../parsers/angelscript-parser.js';
+import { extractTrigrams, contentHash } from './trigram.js';
 
 const { files, language, workerIndex } = workerData;
 
@@ -97,13 +99,21 @@ async function processFiles() {
         }
       }
 
+      // Extract trigrams and compress content for the trigram index
+      const trigrams = [...extractTrigrams(content)];
+      const compressedContent = deflateSync(content);
+      const hash = contentHash(content);
+
       results.push({
         path: file.path,
         project: file.project,
         module: file.module,
         mtime: file.mtime,
         types,
-        members: parsed.members || []
+        members: parsed.members || [],
+        trigrams,
+        compressedContent,
+        contentHash: hash
       });
 
       typesFound += types.length;

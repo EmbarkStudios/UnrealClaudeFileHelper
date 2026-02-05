@@ -76,7 +76,7 @@ export class BackgroundIndexer {
       const insertStart = performance.now();
       console.log(`[Indexer] ${language} workers done: ${totalProcessed} files parsed, inserting into database...`);
 
-      const BATCH_SIZE = 500;
+      const BATCH_SIZE = 100;
       for (let i = 0; i < allFileResults.length; i += BATCH_SIZE) {
         const batch = allFileResults.slice(i, i + BATCH_SIZE);
 
@@ -111,6 +111,15 @@ export class BackgroundIndexer {
               }));
 
               this.database.insertMembers(fileId, resolvedMembers);
+            }
+
+            // Insert compressed content and trigrams for content search
+            if (fileResult.compressedContent) {
+              this.database.upsertFileContent(fileId, fileResult.compressedContent, fileResult.contentHash);
+              this.database.clearTrigramsForFile(fileId);
+              if (fileResult.trigrams && fileResult.trigrams.length > 0) {
+                this.database.insertTrigrams(fileId, fileResult.trigrams);
+              }
             }
           }
         });
