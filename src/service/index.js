@@ -10,6 +10,7 @@ import { IndexDatabase } from './database.js';
 import { createApi } from './api.js';
 import { FileWatcher } from './watcher.js';
 import { BackgroundIndexer } from './background-indexer.js';
+import { QueryPool } from './query-pool.js';
 import { parseFile } from '../parser.js';
 import os from 'os';
 
@@ -43,6 +44,7 @@ class UnrealIndexService {
   constructor() {
     this.config = null;
     this.database = null;
+    this.queryPool = null;
     this.watcher = null;
     this.server = null;
     this.backgroundIndexer = null;
@@ -124,6 +126,13 @@ class UnrealIndexService {
     this.database = new IndexDatabase(dbPath).open();
     console.log(`[Startup] database open: ${(performance.now() - t).toFixed(0)}ms`);
 
+    // Spawn query worker pool early (before chokidar grows RSS)
+    t = performance.now();
+    const workerCount = Math.min(3, Math.max(1, os.cpus().length - 1));
+    this.queryPool = new QueryPool(dbPath, workerCount);
+    await this.queryPool.spawn();
+    console.log(`[Startup] query pool: ${workerCount} workers (${(performance.now() - t).toFixed(0)}ms)`);
+
     this.backgroundIndexer = new BackgroundIndexer(this.database, this.config);
 
     const angelscriptEmpty = this.database.isLanguageEmpty('angelscript');
@@ -144,7 +153,7 @@ class UnrealIndexService {
       console.log(`[Startup] config sync index: ${(performance.now() - t).toFixed(0)}ms`);
     }
 
-    const app = createApi(this.database, this);
+    const app = createApi(this.database, this, this.queryPool);
 
     this.server = app.listen(port, host, () => {
       console.log(`[Startup] server listening at http://${host}:${port} (${((performance.now() - totalStart) / 1000).toFixed(1)}s total)`);
@@ -523,6 +532,10 @@ class UnrealIndexService {
 
   shutdown() {
     console.log('Shutting down...');
+
+    if (this.queryPool) {
+      this.queryPool.shutdown();
+    }
 
     if (this.watcher) {
       this.watcher.stop();

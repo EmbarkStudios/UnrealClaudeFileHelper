@@ -8,9 +8,25 @@ import { patternToTrigrams } from './trigram.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-export function createApi(database, indexer) {
+const SLOW_QUERY_MS = 100;
+
+export function createApi(database, indexer, queryPool = null) {
   const app = express();
   app.use(express.json());
+
+  // Execute a read query via the worker pool (parallel) or fall back to direct (sequential)
+  async function poolQuery(method, args, timeoutMs = 30000) {
+    if (queryPool) {
+      const { result, durationMs } = await queryPool.execute(method, args, timeoutMs);
+      if (durationMs >= SLOW_QUERY_MS) {
+        const resultCount = Array.isArray(result) ? result.length :
+          result?.results ? result.results.length : null;
+        database._logSlowQuery(method, args, durationMs, resultCount);
+      }
+      return result;
+    }
+    return database[method](...args);
+  }
 
   // Request duration logging (skip /health to reduce noise)
   app.use((req, res, next) => {
@@ -97,7 +113,7 @@ export function createApi(database, indexer) {
     }
   });
 
-  app.get('/find-type', (req, res) => {
+  app.get('/find-type', async (req, res) => {
     try {
       const { name, fuzzy, project, language, maxResults } = req.query;
 
@@ -105,21 +121,22 @@ export function createApi(database, indexer) {
         return res.status(400).json({ error: 'name parameter required' });
       }
 
-      const results = database.findTypeByName(name, {
+      const opts = {
         fuzzy: fuzzy === 'true',
         project: project || null,
         language: language || null,
         kind: req.query.kind || null,
         maxResults: parseInt(maxResults, 10) || 10
-      });
+      };
 
+      const results = await poolQuery('findTypeByName', [name, opts]);
       res.json({ results });
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
   });
 
-  app.get('/find-children', (req, res) => {
+  app.get('/find-children', async (req, res) => {
     try {
       const { parent, recursive, project, language, maxResults } = req.query;
 
@@ -127,20 +144,21 @@ export function createApi(database, indexer) {
         return res.status(400).json({ error: 'parent parameter required' });
       }
 
-      const result = database.findChildrenOf(parent, {
+      const opts = {
         recursive: recursive !== 'false',
         project: project || null,
         language: language || null,
         maxResults: parseInt(maxResults, 10) || 50
-      });
+      };
 
+      const result = await poolQuery('findChildrenOf', [parent, opts]);
       res.json(result);
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
   });
 
-  app.get('/browse-module', (req, res) => {
+  app.get('/browse-module', async (req, res) => {
     try {
       const { module, project, language, maxResults } = req.query;
 
@@ -148,19 +166,20 @@ export function createApi(database, indexer) {
         return res.status(400).json({ error: 'module parameter required' });
       }
 
-      const result = database.browseModule(module, {
+      const opts = {
         project: project || null,
         language: language || null,
         maxResults: parseInt(maxResults, 10) || 100
-      });
+      };
 
+      const result = await poolQuery('browseModule', [module, opts]);
       res.json(result);
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
   });
 
-  app.get('/find-file', (req, res) => {
+  app.get('/find-file', async (req, res) => {
     try {
       const { filename, project, language, maxResults } = req.query;
 
@@ -168,12 +187,13 @@ export function createApi(database, indexer) {
         return res.status(400).json({ error: 'filename parameter required' });
       }
 
-      const results = database.findFileByName(filename, {
+      const opts = {
         project: project || null,
         language: language || null,
         maxResults: parseInt(maxResults, 10) || 20
-      });
+      };
 
+      const results = await poolQuery('findFileByName', [filename, opts]);
       res.json({ results });
     } catch (err) {
       res.status(500).json({ error: err.message });
@@ -215,7 +235,7 @@ export function createApi(database, indexer) {
     }
   });
 
-  app.get('/find-member', (req, res) => {
+  app.get('/find-member', async (req, res) => {
     try {
       const { name, fuzzy, containingType, memberKind, project, language, maxResults } = req.query;
 
@@ -223,31 +243,33 @@ export function createApi(database, indexer) {
         return res.status(400).json({ error: 'name parameter required' });
       }
 
-      const results = database.findMember(name, {
+      const opts = {
         fuzzy: fuzzy === 'true',
         containingType: containingType || null,
         memberKind: memberKind || null,
         project: project || null,
         language: language || null,
         maxResults: parseInt(maxResults, 10) || 20
-      });
+      };
 
+      const results = await poolQuery('findMember', [name, opts]);
       res.json({ results });
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
   });
 
-  app.get('/list-modules', (req, res) => {
+  app.get('/list-modules', async (req, res) => {
     try {
       const { parent, project, language, depth } = req.query;
 
-      const results = database.listModules(parent || '', {
+      const opts = {
         project: project || null,
         language: language || null,
         depth: parseInt(depth, 10) || 1
-      });
+      };
 
+      const results = await poolQuery('listModules', [parent || '', opts]);
       res.json({ results });
     } catch (err) {
       res.status(500).json({ error: err.message });
@@ -256,7 +278,7 @@ export function createApi(database, indexer) {
 
   // --- Asset search ---
 
-  app.get('/find-asset', (req, res) => {
+  app.get('/find-asset', async (req, res) => {
     try {
       const { name, fuzzy, project, folder, maxResults } = req.query;
 
@@ -264,13 +286,14 @@ export function createApi(database, indexer) {
         return res.status(400).json({ error: 'name parameter required' });
       }
 
-      const results = database.findAssetByName(name, {
+      const opts = {
         fuzzy: fuzzy === 'true',
         project: project || null,
         folder: folder || null,
         maxResults: parseInt(maxResults, 10) || 20
-      });
+      };
 
+      const results = await poolQuery('findAssetByName', [name, opts]);
       res.json({ results });
     } catch (err) {
       res.status(500).json({ error: err.message });
@@ -449,7 +472,7 @@ export function createApi(database, indexer) {
     return { results, totalMatches, filesSearched };
   }
 
-  app.get('/grep', (req, res) => {
+  app.get('/grep', async (req, res) => {
     const { pattern, project, language, caseSensitive: cs, maxResults: mr, contextLines: cl } = req.query;
 
     if (!pattern) {
@@ -471,26 +494,32 @@ export function createApi(database, indexer) {
       return res.status(400).json({ error: `Unknown project: ${project}` });
     }
 
-    const useTrigramIndex = database.isTrigramIndexReady();
+    try {
+      const useTrigramIndex = database.isTrigramIndexReady();
 
-    if (useTrigramIndex) {
-      const trigrams = patternToTrigrams(pattern, true);
-      const candidates = database.queryTrigramCandidates(trigrams, {
-        project: project || null,
-        language: (language && language !== 'all') ? language : null
-      });
+      if (useTrigramIndex) {
+        const trigrams = patternToTrigrams(pattern, true);
+        const trigramOpts = {
+          project: project || null,
+          language: (language && language !== 'all') ? language : null
+        };
 
-      if (candidates !== null) {
-        // Fast path: decompress and match inline (avoids 9s worker thread startup in large processes)
-        const result = grepCandidates(candidates, regex, maxResults, contextLines);
-        return res.json({
-          results: result.results,
-          totalMatches: result.totalMatches,
-          truncated: result.results.length < result.totalMatches,
-          timedOut: false,
-          filesSearched: result.filesSearched
-        });
+        const candidates = await poolQuery('queryTrigramCandidates', [trigrams, trigramOpts]);
+
+        if (candidates !== null) {
+          // Fast path: decompress and match inline (avoids 9s worker thread startup in large processes)
+          const result = grepCandidates(candidates, regex, maxResults, contextLines);
+          return res.json({
+            results: result.results,
+            totalMatches: result.totalMatches,
+            truncated: result.results.length < result.totalMatches,
+            timedOut: false,
+            filesSearched: result.filesSearched
+          });
+        }
       }
+    } catch (err) {
+      return res.status(500).json({ error: err.message });
     }
 
     // Fallback: read files from disk via worker (trigram index not ready or unindexable pattern)

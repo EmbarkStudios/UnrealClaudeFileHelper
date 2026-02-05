@@ -32,9 +32,17 @@ export class IndexDatabase {
   constructor(dbPath) {
     this.dbPath = dbPath || join(__dirname, '..', '..', 'data', 'index.db');
     this.db = null;
+    this.readOnly = false;
   }
 
-  open() {
+  open(readOnly = false) {
+    if (readOnly) {
+      this.db = new Database(this.dbPath, { readonly: true });
+      this.db.pragma('journal_mode = WAL');
+      this.readOnly = true;
+      return this;
+    }
+
     const dataDir = dirname(this.dbPath);
     if (!existsSync(dataDir)) {
       mkdirSync(dataDir, { recursive: true });
@@ -1682,10 +1690,12 @@ for (const method of methodsToTime) {
       const arg0 = typeof args[0] === 'string' ? `"${args[0]}"` : Array.isArray(args[0]) ? `[${args[0].length} items]` : '';
       console.log(`[${new Date().toISOString()}] [DB] ${method}(${arg0}) — ${ms.toFixed(1)}ms`);
 
-      // Log to analytics table
-      const resultCount = Array.isArray(result) ? result.length :
-        result?.results ? result.results.length : null;
-      this._logSlowQuery(method, args, ms, resultCount);
+      // Log to analytics table (skip on read-only connections)
+      if (!this.readOnly) {
+        const resultCount = Array.isArray(result) ? result.length :
+          result?.results ? result.results.length : null;
+        this._logSlowQuery(method, args, ms, resultCount);
+      }
     }
     return result;
   };
