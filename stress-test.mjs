@@ -31,6 +31,14 @@ async function testHealth() {
   const { data, ms } = await query('/health');
   record('health', 'Health endpoint responds', data.status === 'ok', ms);
 
+  // Zoekt status in health
+  const hasZoekt = data.zoekt && typeof data.zoekt === 'object';
+  record('health', 'Health includes Zoekt status', hasZoekt, 0,
+    hasZoekt ? `available=${data.zoekt.available}, indexing=${data.zoekt.indexing}, port=${data.zoekt.port}` : 'missing');
+  if (hasZoekt) {
+    record('health', 'Zoekt is available', data.zoekt.available === true, 0);
+  }
+
   const { data: stats, ms: ms2 } = await query('/stats');
   record('health', 'Stats endpoint responds', !!stats && !stats.error, ms2,
     `${stats.totalFiles || '?'} files`);

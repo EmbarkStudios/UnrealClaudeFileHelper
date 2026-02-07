@@ -208,16 +208,16 @@ class UnrealIndexService {
         }
         const started = await this.zoektManager.start();
         if (started) {
-          // Create client immediately — index may fail but existing shards are usable
           this.zoektClient = new ZoektClient(this.zoektManager.getPort(), {
             timeoutMs: zoektConfig.searchTimeoutMs || 10000
           });
-          try {
-            await this.zoektManager.runIndex(this.zoektMirror.getMirrorRoot());
-          } catch (indexErr) {
+          console.log(`[Startup] Zoekt webserver ready (${((performance.now() - t) / 1000).toFixed(1)}s), index build running in background...`);
+          // Run index in background — existing shards are already usable
+          this.zoektManager.runIndex(this.zoektMirror.getMirrorRoot()).then(() => {
+            console.log('[Startup] Zoekt index build complete');
+          }).catch(indexErr => {
             console.warn(`[Startup] Zoekt index failed (using existing shards): ${indexErr.message}`);
-          }
-          console.log(`[Startup] Zoekt ready (${((performance.now() - t) / 1000).toFixed(1)}s)`);
+          });
         } else {
           console.warn('[Startup] Zoekt webserver failed to start, grep will use trigram fallback');
         }
@@ -227,7 +227,10 @@ class UnrealIndexService {
       }
     }
 
-    const app = createApi(this.database, this, this.queryPool, { zoektClient: this.zoektClient });
+    const app = createApi(this.database, this, this.queryPool, {
+      zoektClient: this.zoektClient,
+      zoektManager: this.zoektManager
+    });
 
     this.server = app.listen(port, host, () => {
       console.log(`[Startup] server listening at http://${host}:${port} (${((performance.now() - totalStart) / 1000).toFixed(1)}s total)`);

@@ -22,6 +22,8 @@ export class ZoektManager {
     this.restartAttempts = 0;
     this.maxRestartAttempts = 5;
     this._restartPending = false;
+    this.lastIndexCompleteTime = null;
+    this.lastIndexDurationS = null;
     this.zoektIndexPath = null;
     this.zoektWebPath = null;
     this.useWsl = false; // Whether to run Zoekt via WSL2
@@ -424,6 +426,8 @@ export class ZoektManager {
         const durationS = ((performance.now() - startMs) / 1000).toFixed(1);
 
         if (code === 0) {
+          this.lastIndexCompleteTime = new Date().toISOString();
+          this.lastIndexDurationS = parseFloat(durationS);
           console.log(`[ZoektManager] Index complete (${durationS}s)`);
           resolve();
         } else {
@@ -463,6 +467,18 @@ export class ZoektManager {
 
   getPort() {
     return this.webPort;
+  }
+
+  getStatus() {
+    return {
+      available: this.isAvailable(),
+      port: this.webPort,
+      indexing: this.indexProcess !== null,
+      lastIndexTime: this.lastIndexCompleteTime,
+      lastIndexDurationS: this.lastIndexDurationS,
+      restartAttempts: this.restartAttempts,
+      useWsl: this.useWsl
+    };
   }
 
   async stop() {

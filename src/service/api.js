@@ -2,7 +2,7 @@ import express from 'express';
 
 const SLOW_QUERY_MS = 100;
 
-export function createApi(database, indexer, queryPool = null, { zoektClient = null } = {}) {
+export function createApi(database, indexer, queryPool = null, { zoektClient = null, zoektManager = null } = {}) {
   const app = express();
   app.use(express.json());
 
@@ -57,7 +57,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
 
   app.get('/health', (req, res) => {
     const mem = process.memoryUsage();
-    res.json({
+    const response = {
       status: 'ok',
       timestamp: new Date().toISOString(),
       uptimeSeconds: Math.round(process.uptime()),
@@ -66,7 +66,11 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
         heapTotal: Math.round(mem.heapTotal / 1024 / 1024),
         rss: Math.round(mem.rss / 1024 / 1024)
       }
-    });
+    };
+    if (zoektManager) {
+      response.zoekt = zoektManager.getStatus();
+    }
+    res.json(response);
   });
 
   app.get('/status', (req, res) => {
