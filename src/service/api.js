@@ -1,5 +1,4 @@
 import express from 'express';
-import { patternToTrigrams } from './trigram.js';
 
 const SLOW_QUERY_MS = 100;
 
@@ -459,33 +458,21 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
     }
 
     try {
-      // Source search via Zoekt + asset search via grepInline — in parallel
-      const trigrams = database.isTrigramIndexReady() ? patternToTrigrams(pattern, true) : [];
-      const assetOpts = trigrams.length > 0
-        ? { project: project || null, language: 'asset', trigrams }
-        : null;
-
-      const searchPromises = [
+      // Source + asset search via Zoekt in parallel
+      const [sourceResult, assetResult] = await Promise.all([
         zoektClient.search(pattern, {
           project: project || null,
           language: (language && language !== 'all') ? language : null,
           caseSensitive,
           maxResults,
           contextLines
+        }),
+        zoektClient.searchAssets(pattern, {
+          project: project || null,
+          caseSensitive,
+          maxResults: 20
         })
-      ];
-
-      // Asset search via existing grepInline (assets are synthetic SQLite entries)
-      if (assetOpts) {
-        searchPromises.push(
-          poolQuery('grepInline', [pattern, caseSensitive ? '' : 'i', 20, 0, assetOpts])
-            .catch(() => null)
-        );
-      } else {
-        searchPromises.push(Promise.resolve(null));
-      }
-
-      const [sourceResult, assetResult] = await Promise.all(searchPromises);
+      ]);
 
       const response = {
         results: sourceResult.results.map(r => ({ ...r, file: cleanPath(r.file) })),
@@ -496,8 +483,8 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
         searchEngine: 'zoekt',
         zoektDurationMs: sourceResult.zoektDurationMs
       };
-      if (assetResult && assetResult.results && assetResult.results.length > 0) {
-        response.assets = assetResult.results.map(r => ({ ...r, file: cleanPath(r.file) }));
+      if (assetResult.results.length > 0) {
+        response.assets = assetResult.results;
       }
       return res.json(response);
     } catch (err) {

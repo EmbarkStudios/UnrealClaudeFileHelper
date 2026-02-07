@@ -19,8 +19,42 @@ export class ZoektClient {
   async search(pattern, options = {}) {
     const { project, language, caseSensitive = true, maxResults = 50, contextLines = 2 } = options;
 
-    const query = this._buildQuery(pattern, { project, language, caseSensitive });
+    // Source query: exclude _assets/ paths to avoid mixing with asset results
+    const query = this._buildQuery(pattern, { project, language, caseSensitive, excludeAssets: true });
 
+    return this._executeQuery(query, maxResults, contextLines);
+  }
+
+  async searchAssets(pattern, options = {}) {
+    const { project, caseSensitive = true, maxResults = 20 } = options;
+
+    // Asset query: only _assets/ paths, no language filter, no context lines
+    const parts = [caseSensitive ? 'case:yes' : 'case:no'];
+    if (project) parts.push(`file:${project}/`);
+    parts.push('file:^_assets/');
+    if (this._hasRegexMeta(pattern)) {
+      parts.push(`regex:${pattern}`);
+    } else {
+      parts.push(pattern);
+    }
+
+    const result = await this._executeQuery(parts.join(' '), maxResults, 0);
+
+    // Map asset paths back to original content paths
+    // Mirror adds .uasset extension to avoid file/directory collisions — strip it
+    result.results = result.results.map(r => {
+      let file = '/' + r.file.replace(/^_assets\//, '');
+      file = file.replace(/\.uasset$/, '');
+      // Extract project from /Game/<ProjectName>/... path
+      const m = file.match(/^\/Game\/([^/]+)\//);
+      const project = m ? m[1] : r.project;
+      return { ...r, file, project, language: 'asset' };
+    });
+
+    return result;
+  }
+
+  async _executeQuery(query, maxResults, contextLines) {
     const body = {
       Q: query,
       Opts: {
@@ -64,17 +98,25 @@ export class ZoektClient {
     return this._mapResponse(data, durationMs);
   }
 
-  _buildQuery(pattern, { project, language, caseSensitive }) {
+  _buildQuery(pattern, { project, language, caseSensitive, excludeAssets = false }) {
     const parts = [];
 
-    // Case sensitivity
+    // Case sensitivity — Zoekt auto-detects (all-lowercase = case-insensitive),
+    // so we must be explicit in both directions
     if (!caseSensitive) {
       parts.push('case:no');
+    } else {
+      parts.push('case:yes');
     }
 
     // Language filter via file extension
     if (language && language !== 'all' && LANGUAGE_EXTENSIONS[language]) {
       parts.push(`file:${LANGUAGE_EXTENSIONS[language]}`);
+    }
+
+    // Exclude asset files from source searches
+    if (excludeAssets) {
+      parts.push('-file:^_assets/');
     }
 
     // Project filter via path prefix

@@ -193,12 +193,30 @@ class UnrealIndexService {
           zoektBin: zoektConfig.zoektBin || null
         });
 
+        // Init → sync → start: sync must complete BEFORE webserver starts,
+        // as concurrent WSL processes cause zoekt-webserver to exit
+        if (!this.zoektManager.init()) {
+          throw new Error('Zoekt binaries not found');
+        }
+        if (process.env.SKIP_SYNC !== '1') {
+          await this.zoektManager.syncMirror(this.zoektMirror.getMirrorRoot());
+        } else {
+          // Set effective mirror path to WSL-native dir so runIndex skips sync too
+          this.zoektManager._effectiveMirrorPath = this.zoektManager.wslMirrorDir || this.zoektMirror.getMirrorRoot();
+          this.zoektManager.mirrorRoot = this.zoektMirror.getMirrorRoot();
+          console.log('[Startup] WSL mirror sync skipped (SKIP_SYNC=1)');
+        }
         const started = await this.zoektManager.start();
         if (started) {
-          await this.zoektManager.runIndex(this.zoektMirror.getMirrorRoot());
+          // Create client immediately — index may fail but existing shards are usable
           this.zoektClient = new ZoektClient(this.zoektManager.getPort(), {
-            timeoutMs: zoektConfig.searchTimeoutMs || 3000
+            timeoutMs: zoektConfig.searchTimeoutMs || 10000
           });
+          try {
+            await this.zoektManager.runIndex(this.zoektMirror.getMirrorRoot());
+          } catch (indexErr) {
+            console.warn(`[Startup] Zoekt index failed (using existing shards): ${indexErr.message}`);
+          }
           console.log(`[Startup] Zoekt ready (${((performance.now() - t) / 1000).toFixed(1)}s)`);
         } else {
           console.warn('[Startup] Zoekt webserver failed to start, grep will use trigram fallback');
@@ -228,9 +246,13 @@ class UnrealIndexService {
     });
     // Defer watcher start: chokidar's directory enumeration on slow P4 drives
     // blocks the event loop for 10-20s. Delay so initial requests aren't affected.
-    setTimeout(() => {
-      this.watcher.start();
-    }, 60000);
+    if (process.env.NO_WATCHER !== '1') {
+      setTimeout(() => {
+        this.watcher.start();
+      }, 60000);
+    } else {
+      console.log('[Startup] Watcher disabled (NO_WATCHER=1)');
+    }
 
     if (cppEmpty) {
       console.log('Starting C++ indexing in background...');

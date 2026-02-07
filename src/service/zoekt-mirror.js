@@ -43,21 +43,26 @@ export class ZoektMirror {
 
     // Fetch all source file content from SQLite
     const rows = database.db.prepare(
-      `SELECT fc.content, f.path FROM file_content fc
+      `SELECT fc.content, f.path, f.language FROM file_content fc
        JOIN files f ON f.id = fc.file_id
-       WHERE f.language NOT IN ('content', 'asset')`
+       WHERE f.language NOT IN ('content')`
     ).all();
 
     let written = 0;
+    let assetCount = 0;
     let errors = 0;
     for (const row of rows) {
       try {
         const content = inflateSync(row.content);
-        const relativePath = this._toRelativePath(row.path);
+        const isAsset = row.language === 'asset';
+        const relativePath = isAsset
+          ? this._toAssetMirrorPath(row.path)
+          : this._toRelativePath(row.path);
         const fullPath = join(this.mirrorDir, relativePath);
         mkdirSync(dirname(fullPath), { recursive: true });
         writeFileSync(fullPath, content);
         written++;
+        if (isAsset) assetCount++;
       } catch (err) {
         errors++;
         if (errors <= 5) {
@@ -70,11 +75,12 @@ export class ZoektMirror {
     writeFileSync(this.markerPath, JSON.stringify({
       timestamp: new Date().toISOString(),
       fileCount: written,
+      assetCount,
       pathPrefix: this.pathPrefix
     }));
 
     const durationS = ((performance.now() - startMs) / 1000).toFixed(1);
-    console.log(`[ZoektMirror] Bootstrap complete: ${written} files written, ${errors} errors (${durationS}s)`);
+    console.log(`[ZoektMirror] Bootstrap complete: ${written} files written (${assetCount} assets), ${errors} errors (${durationS}s)`);
     return written;
   }
 
@@ -135,11 +141,44 @@ export class ZoektMirror {
     return this.pathPrefix;
   }
 
+  updateAsset(contentPath, content) {
+    try {
+      const relativePath = this._toAssetMirrorPath(contentPath);
+      const fullPath = join(this.mirrorDir, relativePath);
+      mkdirSync(dirname(fullPath), { recursive: true });
+      writeFileSync(fullPath, content, 'utf-8');
+    } catch (err) {
+      console.warn(`[ZoektMirror] Error updating asset ${contentPath}: ${err.message}`);
+    }
+  }
+
+  deleteAsset(contentPath) {
+    try {
+      const relativePath = this._toAssetMirrorPath(contentPath);
+      const fullPath = join(this.mirrorDir, relativePath);
+      if (existsSync(fullPath)) {
+        unlinkSync(fullPath);
+      }
+    } catch {}
+  }
+
   _toRelativePath(fullPath) {
     const normalized = fullPath.replace(/\\/g, '/');
     if (this.pathPrefix && normalized.startsWith(this.pathPrefix)) {
       return normalized.slice(this.pathPrefix.length);
     }
     return normalized;
+  }
+
+  _toAssetMirrorPath(contentPath) {
+    // Asset content paths like /Game/Discovery/MyAsset or /Game/Discovery/MyAsset.uasset
+    // → _assets/Game/Discovery/MyAsset.uasset
+    // Always append .uasset if no extension — avoids file/directory name collisions
+    // (e.g., "Weapon_AR" can be both a leaf asset and a directory for child assets)
+    let normalized = contentPath.replace(/\\/g, '/').replace(/^\//, '');
+    if (!normalized.includes('.')) {
+      normalized += '.uasset';
+    }
+    return `_assets/${normalized}`;
   }
 }

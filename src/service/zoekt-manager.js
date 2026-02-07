@@ -21,6 +21,7 @@ export class ZoektManager {
     this.available = false;
     this.restartAttempts = 0;
     this.maxRestartAttempts = 5;
+    this._restartPending = false;
     this.zoektIndexPath = null;
     this.zoektWebPath = null;
     this.useWsl = false; // Whether to run Zoekt via WSL2
@@ -137,7 +138,10 @@ export class ZoektManager {
     });
   }
 
-  async start() {
+  /**
+   * Initialize binaries and directories. Must be called before syncMirror() or start().
+   */
+  init() {
     if (!this._findBinaries()) {
       console.warn('[ZoektManager] Zoekt binaries not found. Install with: go install github.com/sourcegraph/zoekt/cmd/...@latest');
       return false;
@@ -147,7 +151,6 @@ export class ZoektManager {
     console.log(`[ZoektManager] Found binaries (${mode}): ${this.zoektIndexPath}`);
 
     if (this.useWsl && this.wslIndexDir) {
-      // Create directories on WSL-native filesystem (fast ext4)
       try {
         execSync(`wsl -d Ubuntu -- bash -c "mkdir -p '${this.wslIndexDir}' '${this.wslMirrorDir}'"`, { stdio: 'ignore', timeout: 5000 });
         console.log(`[ZoektManager] Using WSL-native dirs: index=${this.wslIndexDir}, mirror=${this.wslMirrorDir}`);
@@ -162,7 +165,50 @@ export class ZoektManager {
       mkdirSync(this.indexDir, { recursive: true });
     }
 
+    return true;
+  }
+
+  async start() {
+    // Kill any stale Zoekt webservers from previous runs (only on initial startup)
+    this._killStaleWebservers();
+    await this._waitForPortFree(10000);
+
     return this._startWebserver();
+  }
+
+  _killStaleWebservers() {
+    try {
+      if (this.useWsl) {
+        execSync(`wsl -d Ubuntu -- bash -c "pkill -9 -f zoekt-webserver 2>/dev/null; pkill -9 -f zoekt-web 2>/dev/null"`,
+          { stdio: 'ignore', timeout: 5000 });
+      } else {
+        const result = execSync(`netstat -ano | findstr ":${this.webPort}.*LISTENING"`, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+        const pids = [...new Set(result.split('\n').map(l => l.trim().split(/\s+/).pop()).filter(Boolean))];
+        for (const pid of pids) {
+          try { execSync(`taskkill /PID ${pid} /F`, { stdio: 'ignore' }); } catch {}
+        }
+      }
+    } catch {}
+  }
+
+  /**
+   * Wait until the webserver port is actually free (not just killed).
+   * WSL port forwarding can take several seconds to release.
+   */
+  async _waitForPortFree(timeoutMs = 10000) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      try {
+        const resp = await fetch(`http://127.0.0.1:${this.webPort}/`, { signal: AbortSignal.timeout(1000) });
+        // Port still in use — wait and retry
+        await new Promise(r => setTimeout(r, 500));
+      } catch {
+        // Connection refused = port is free
+        return true;
+      }
+    }
+    console.warn(`[ZoektManager] Port ${this.webPort} still in use after ${timeoutMs}ms`);
+    return false;
   }
 
   /**
@@ -177,6 +223,9 @@ export class ZoektManager {
   }
 
   async _startWebserver() {
+    // Prevent concurrent restart attempts
+    if (this._restartPending) return Promise.resolve(false);
+
     return new Promise((resolve) => {
       const args = [
         '-index', this._getIndexDirArg(),
@@ -186,6 +235,10 @@ export class ZoektManager {
 
       console.log(`[ZoektManager] Starting webserver on port ${this.webPort}...`);
       this.webProcess = this._spawn(this.zoektWebPath, args);
+
+      // Track the specific process we spawned so health checks verify the right one
+      const thisProcess = this.webProcess;
+      let resolved = false;
 
       this.webProcess.stdout.on('data', (data) => {
         const line = data.toString().trim();
@@ -198,23 +251,53 @@ export class ZoektManager {
       });
 
       this.webProcess.on('exit', (code, signal) => {
+        // Only handle exit if this is still OUR current process
+        if (this.webProcess !== thisProcess && this.webProcess !== null) return;
+
         console.log(`[ZoektManager] Webserver exited (code=${code}, signal=${signal})`);
         this.available = false;
         this.webProcess = null;
 
-        if (this.restartAttempts < this.maxRestartAttempts) {
-          const delay = Math.min(1000 * Math.pow(2, this.restartAttempts), 30000);
+        if (!resolved) {
+          resolved = true;
+          resolve(false);
+        }
+
+        // Schedule restart if under max attempts and no restart already pending
+        if (!this._restartPending && this.restartAttempts < this.maxRestartAttempts) {
+          this._restartPending = true;
           this.restartAttempts++;
+          const delay = Math.min(1000 * Math.pow(2, this.restartAttempts - 1), 30000);
           console.log(`[ZoektManager] Restarting in ${delay}ms (attempt ${this.restartAttempts}/${this.maxRestartAttempts})...`);
-          setTimeout(() => this._startWebserver(), delay);
+          setTimeout(async () => {
+            this._restartPending = false;
+            // Wait for port to be free (no pkill — our process already exited)
+            await this._waitForPortFree(5000);
+            this._startWebserver();
+          }, delay);
+        } else if (this.restartAttempts >= this.maxRestartAttempts) {
+          console.error(`[ZoektManager] Max restart attempts (${this.maxRestartAttempts}) reached, giving up`);
         }
       });
 
-      // Wait for health check
+      // Health check — verify OUR process is actually serving
       this._waitForHealthy(10000).then((healthy) => {
+        if (resolved) return; // process already exited
+        // Verify the process that passed health check is still our current process
+        if (this.webProcess !== thisProcess) {
+          if (!resolved) { resolved = true; resolve(false); }
+          return;
+        }
+        resolved = true;
         if (healthy) {
           this.available = true;
-          this.restartAttempts = 0;
+          // Don't reset restartAttempts immediately — wait for stability
+          // Reset after 10s of continuous uptime
+          setTimeout(() => {
+            if (this.webProcess === thisProcess) {
+              this.restartAttempts = 0;
+            }
+          }, 10000);
           console.log(`[ZoektManager] Webserver ready on port ${this.webPort}`);
         } else {
           console.warn('[ZoektManager] Webserver failed health check');
@@ -260,28 +343,11 @@ export class ZoektManager {
     } catch {}
 
     if (existingCount > 1000) {
-      // Incremental sync with rsync (fast for small changes)
-      console.log(`[ZoektManager] Incremental sync (${existingCount} existing files)...`);
-      return new Promise((resolve) => {
-        const rsyncCmd = `rsync -a --delete '${wslMirrorSrc}/' '${this.wslMirrorDir}/'`;
-        const proc = spawn('wsl', ['-d', 'Ubuntu', '--', 'bash', '-c', rsyncCmd], {
-          stdio: ['ignore', 'pipe', 'pipe'],
-          windowsHide: true
-        });
-        let stderr = '';
-        proc.stderr.on('data', d => { stderr += d.toString(); });
-        proc.on('exit', (code) => {
-          const durationS = ((performance.now() - startMs) / 1000).toFixed(1);
-          if (code === 0) {
-            console.log(`[ZoektManager] Incremental sync complete (${durationS}s)`);
-            resolve(this.wslMirrorDir);
-          } else {
-            console.warn(`[ZoektManager] Sync failed, using /mnt/c/: ${stderr.slice(0, 100)}`);
-            resolve(wslMirrorSrc);
-          }
-        });
-        proc.on('error', () => resolve(wslMirrorSrc));
-      });
+      // WSL mirror already has files — use it directly
+      // Rsync through 9P bridge is too slow for 400K+ files (30+ min just for stat checks)
+      // The mirror is kept in sync by the watcher + tar pipe for initial setup
+      console.log(`[ZoektManager] WSL mirror has ${existingCount} files, using directly (skipping rsync)`);
+      return this.wslMirrorDir;
     }
 
     // Initial bulk copy: tar pipe is 10x+ faster than individual file copies through 9P
@@ -309,6 +375,16 @@ export class ZoektManager {
     });
   }
 
+  /**
+   * Sync mirror to WSL-native filesystem before starting Zoekt.
+   * Must be called before start() to avoid concurrent WSL process issues.
+   */
+  async syncMirror(mirrorRoot) {
+    this.mirrorRoot = mirrorRoot;
+    this._effectiveMirrorPath = await this._syncMirrorToWsl(mirrorRoot);
+    return this._effectiveMirrorPath;
+  }
+
   async runIndex(mirrorRoot) {
     this.mirrorRoot = mirrorRoot;
 
@@ -317,8 +393,8 @@ export class ZoektManager {
       return;
     }
 
-    // Sync mirror to WSL-native filesystem for fast reads
-    const effectiveMirrorPath = await this._syncMirrorToWsl(mirrorRoot);
+    // Use pre-synced path if available, otherwise sync now
+    const effectiveMirrorPath = this._effectiveMirrorPath || await this._syncMirrorToWsl(mirrorRoot);
 
     return new Promise((resolve, reject) => {
       const startMs = performance.now();
