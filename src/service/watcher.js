@@ -16,6 +16,8 @@ export class FileWatcher {
     this.pendingUpdates = new Map();
     this.debounceTimer = null;
     this.onUpdate = options.onUpdate || (() => {});
+    this.zoektMirror = options.zoektMirror || null;
+    this.zoektManager = options.zoektManager || null;
   }
 
   start() {
@@ -115,6 +117,10 @@ export class FileWatcher {
           if (this.database.deleteAsset(filePath)) deleted++;
         } else {
           if (this.database.deleteFile(filePath)) deleted++;
+          // Remove from Zoekt mirror
+          if (this.zoektMirror) {
+            this.zoektMirror.deleteFile(filePath);
+          }
         }
       } else {
         ioTasks.push({ filePath, eventType, project, language });
@@ -147,6 +153,11 @@ export class FileWatcher {
       const ms = (performance.now() - watcherStart).toFixed(1);
       console.log(`[Watcher] +${added} ~${changed} -${deleted} (${updates.size} files) — ${ms}ms`);
       this.onUpdate({ added, changed, deleted });
+
+      // Trigger Zoekt re-indexing (debounced)
+      if (this.zoektManager) {
+        this.zoektManager.triggerReindex();
+      }
     }
   }
 
@@ -286,6 +297,11 @@ export class FileWatcher {
         this.database.clearTrigramsForFile(fileId);
         if (trigrams.length > 0) {
           this.database.insertTrigrams(fileId, trigrams);
+        }
+
+        // Update Zoekt mirror with the raw file content
+        if (this.zoektMirror) {
+          this.zoektMirror.updateFile(filePath, fileContent);
         }
       }
     });

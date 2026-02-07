@@ -1,18 +1,34 @@
 import express from 'express';
-import { Worker } from 'worker_threads';
-import { dirname, join } from 'path';
-import { fileURLToPath } from 'url';
-import { inflateSync } from 'zlib';
 import { patternToTrigrams } from './trigram.js';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
 
 const SLOW_QUERY_MS = 100;
 
-export function createApi(database, indexer, queryPool = null) {
+export function createApi(database, indexer, queryPool = null, { zoektClient = null } = {}) {
   const app = express();
   app.use(express.json());
+
+  // Compute common path prefix for all indexed files (strip from responses)
+  let pathPrefix = '';
+  try {
+    const sample = database.db.prepare(
+      "SELECT path FROM files WHERE language != 'asset' LIMIT 100"
+    ).all().map(r => r.path.replace(/\\/g, '/'));
+    if (sample.length > 0) {
+      pathPrefix = sample[0];
+      for (const p of sample) {
+        while (pathPrefix && !p.startsWith(pathPrefix)) {
+          pathPrefix = pathPrefix.slice(0, pathPrefix.lastIndexOf('/'));
+        }
+      }
+      if (pathPrefix && !pathPrefix.endsWith('/')) pathPrefix += '/';
+    }
+  } catch {}
+
+  function cleanPath(v) {
+    if (typeof v !== 'string') return v;
+    const normalized = v.replace(/\\/g, '/');
+    return pathPrefix && normalized.startsWith(pathPrefix) ? normalized.slice(pathPrefix.length) : normalized;
+  }
 
   // Execute a read query via the worker pool (parallel) or fall back to direct (sequential)
   async function poolQuery(method, args, timeoutMs = 30000) {
@@ -417,61 +433,6 @@ export function createApi(database, indexer, queryPool = null) {
 
   // --- Content search (grep) ---
 
-  // Extract literal substrings from simple alternation patterns for fast pre-filtering
-  function extractLiterals(pattern) {
-    if (/^[\w|]+$/.test(pattern)) return pattern.split('|').filter(s => s.length > 0);
-    return null;
-  }
-
-  const GREP_TIMEOUT_MS = 30000;
-
-  // Inline grep matching for trigram candidates (avoids worker thread overhead)
-  function grepCandidates(candidates, regex, maxResults, contextLines) {
-    const results = [];
-    let totalMatches = 0;
-    let filesSearched = 0;
-
-    for (const entry of candidates) {
-      if (results.length >= maxResults) break;
-      filesSearched++;
-
-      let content;
-      try {
-        content = inflateSync(entry.content).toString('utf-8');
-      } catch {
-        continue;
-      }
-
-      const lines = content.split('\n');
-      for (let i = 0; i < lines.length; i++) {
-        const match = regex.exec(lines[i]);
-        if (!match) continue;
-
-        totalMatches++;
-        if (results.length < maxResults) {
-          const ctxStart = Math.max(0, i - contextLines);
-          const ctxEnd = Math.min(lines.length - 1, i + contextLines);
-          const context = [];
-          for (let c = ctxStart; c <= ctxEnd; c++) {
-            context.push(lines[c]);
-          }
-          results.push({
-            file: entry.path,
-            project: entry.project,
-            language: entry.language,
-            line: i + 1,
-            column: match.index + 1,
-            match: lines[i],
-            context
-          });
-        }
-        if (results.length >= maxResults) break;
-      }
-    }
-
-    return { results, totalMatches, filesSearched };
-  }
-
   app.get('/grep', async (req, res) => {
     const { pattern, project, language, caseSensitive: cs, maxResults: mr, contextLines: cl } = req.query;
 
@@ -479,13 +440,16 @@ export function createApi(database, indexer, queryPool = null) {
       return res.status(400).json({ error: 'pattern parameter required' });
     }
 
+    if (!zoektClient) {
+      return res.status(503).json({ error: 'Search not available (Zoekt not running)' });
+    }
+
     const caseSensitive = cs !== 'false';
     const maxResults = parseInt(mr, 10) || 50;
     const contextLines = parseInt(cl, 10) || 2;
 
-    let regex;
     try {
-      regex = new RegExp(pattern, caseSensitive ? '' : 'i');
+      new RegExp(pattern, caseSensitive ? '' : 'i');
     } catch (e) {
       return res.status(400).json({ error: `Invalid regex: ${e.message}` });
     }
@@ -495,95 +459,50 @@ export function createApi(database, indexer, queryPool = null) {
     }
 
     try {
-      const useTrigramIndex = database.isTrigramIndexReady();
+      // Source search via Zoekt + asset search via grepInline — in parallel
+      const trigrams = database.isTrigramIndexReady() ? patternToTrigrams(pattern, true) : [];
+      const assetOpts = trigrams.length > 0
+        ? { project: project || null, language: 'asset', trigrams }
+        : null;
 
-      if (useTrigramIndex) {
-        const trigrams = patternToTrigrams(pattern, true);
+      const searchPromises = [
+        zoektClient.search(pattern, {
+          project: project || null,
+          language: (language && language !== 'all') ? language : null,
+          caseSensitive,
+          maxResults,
+          contextLines
+        })
+      ];
 
-        if (trigrams.length > 0) {
-          // Full grep pipeline offloaded to workers: source code + asset search in parallel
-          const sourceOpts = {
-            project: project || null,
-            language: (language && language !== 'all') ? language : null,
-            trigrams
-          };
-          const assetOpts = {
-            project: project || null,
-            language: 'asset',
-            trigrams
-          };
-
-          const [sourceResult, assetResult] = await Promise.all([
-            poolQuery('grepInline', [pattern, caseSensitive ? '' : 'i', maxResults, contextLines, sourceOpts]),
-            poolQuery('grepInline', [pattern, caseSensitive ? '' : 'i', 20, 0, assetOpts])
-          ]);
-
-          if (sourceResult !== null) {
-            const response = {
-              results: sourceResult.results,
-              totalMatches: sourceResult.totalMatches,
-              truncated: sourceResult.results.length < sourceResult.totalMatches,
-              timedOut: false,
-              filesSearched: sourceResult.filesSearched
-            };
-            if (assetResult && assetResult.results && assetResult.results.length > 0) {
-              response.assets = assetResult.results;
-            }
-            return res.json(response);
-          }
-        }
+      // Asset search via existing grepInline (assets are synthetic SQLite entries)
+      if (assetOpts) {
+        searchPromises.push(
+          poolQuery('grepInline', [pattern, caseSensitive ? '' : 'i', 20, 0, assetOpts])
+            .catch(() => null)
+        );
+      } else {
+        searchPromises.push(Promise.resolve(null));
       }
+
+      const [sourceResult, assetResult] = await Promise.all(searchPromises);
+
+      const response = {
+        results: sourceResult.results.map(r => ({ ...r, file: cleanPath(r.file) })),
+        totalMatches: sourceResult.totalMatches,
+        truncated: sourceResult.results.length < sourceResult.totalMatches,
+        timedOut: false,
+        filesSearched: sourceResult.filesSearched,
+        searchEngine: 'zoekt',
+        zoektDurationMs: sourceResult.zoektDurationMs
+      };
+      if (assetResult && assetResult.results && assetResult.results.length > 0) {
+        response.assets = assetResult.results.map(r => ({ ...r, file: cleanPath(r.file) }));
+      }
+      return res.json(response);
     } catch (err) {
       return res.status(500).json({ error: err.message });
     }
-
-    // Fallback: read files from disk via worker (trigram index not ready or unindexable pattern)
-    const workerPath = join(__dirname, 'grep-worker.js');
-    const dbFiles = database.getFilteredFiles(project || null, language || null);
-    const files = dbFiles.map(f => ({ filePath: f.path, project: f.project, language: f.language }));
-    const literals = extractLiterals(pattern);
-
-    const worker = new Worker(workerPath, {
-      workerData: { files, pattern, flags: caseSensitive ? '' : 'i', maxResults, contextLines, literals }
-    });
-
-    const timeoutId = setTimeout(() => {
-      worker.postMessage('abort');
-    }, GREP_TIMEOUT_MS);
-
-    let responded = false;
-
-    res.on('close', () => {
-      if (!responded) {
-        worker.postMessage('abort');
-        clearTimeout(timeoutId);
-        worker.terminate();
-      }
-    });
-
-    worker.on('message', (msg) => {
-      if (msg.type === 'complete') {
-        clearTimeout(timeoutId);
-        responded = true;
-        res.json({
-          results: msg.results,
-          totalMatches: msg.totalMatches,
-          truncated: msg.results.length < msg.totalMatches,
-          timedOut: msg.aborted,
-          filesSearched: msg.filesSearched
-        });
-        worker.terminate();
-      }
-    });
-
-    worker.on('error', (err) => {
-      clearTimeout(timeoutId);
-      if (!responded) {
-        responded = true;
-        res.status(500).json({ error: err.message });
-      }
-      worker.terminate();
-    });
   });
 
   return app;
