@@ -120,7 +120,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
           if (zoektMirror && zoektManager) {
             try {
               const relativePath = zoektMirror._toRelativePath(filePath);
-              zoektManager.deleteWslMirrorFile(relativePath);
+              zoektManager.deleteMirrorFile(relativePath);
             } catch {}
           }
         } catch (err) {
@@ -162,7 +162,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
               if (zoektMirror && zoektManager) {
                 try {
                   const relativePath = zoektMirror._toRelativePath(file.path);
-                  zoektManager.updateWslMirrorFile(relativePath, file.content);
+                  zoektManager.updateMirrorFile(relativePath, file.content);
                 } catch {}
               }
             }

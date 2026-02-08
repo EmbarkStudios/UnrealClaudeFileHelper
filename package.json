@@ -7,6 +7,7 @@
   "scripts": {
     "setup": "node src/setup.js",
     "start": "node src/service/index.js",
+    "watcher": "node src/watcher/watcher-client.js",
     "bridge": "node src/bridge/mcp-bridge.js",
     "legacy": "node src/server.js",
     "test": "node --test src/*.test.js",
@@ -27,7 +28,6 @@
     "better-sqlite3": "^11.0.0",
     "chokidar": "^4.0.0",
     "express": "^4.21.0",
-    "tar-stream": "^3.1.7",
-    "undici": "^7.21.0"
+"undici": "^7.21.0"
   }
 }

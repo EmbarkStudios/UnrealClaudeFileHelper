@@ -1,7 +1,6 @@
-import { mkdirSync, writeFileSync, existsSync, readFileSync } from 'fs';
-import { join } from 'path';
+import { mkdirSync, writeFileSync, existsSync, readFileSync, unlinkSync } from 'fs';
+import { join, dirname } from 'path';
 import { inflateSync } from 'zlib';
-import tarStream from 'tar-stream';
 
 export class ZoektMirror {
   constructor(mirrorDir) {
@@ -19,12 +18,12 @@ export class ZoektMirror {
   }
 
   /**
-   * Stream all mirror files as a tar archive to a writable stream.
-   * Used for direct-to-WSL bootstrap, skipping the Windows filesystem.
+   * Rebuild the mirror directory from database file_content.
+   * Used when mirror is missing/corrupt but DB has compressed content.
    */
-  async bootstrapToStream(database, outputStream, onProgress = null) {
+  bootstrapFromDatabase(database, onProgress = null) {
     const startMs = performance.now();
-    console.log('[ZoektMirror] Streaming bootstrap to tar...');
+    console.log('[ZoektMirror] Bootstrapping mirror from database...');
 
     this._computePathPrefix(database);
 
@@ -39,13 +38,6 @@ export class ZoektMirror {
     let assetCount = 0;
     let errors = 0;
 
-    const pack = tarStream.pack();
-    // Suppress 'Writable stream closed prematurely' — the receiving tar process
-    // may exit after consuming all data before the pack stream fully finalizes.
-    pack.on('error', () => {});
-    outputStream.on('error', () => {});
-    pack.pipe(outputStream);
-
     for (const row of rows) {
       try {
         const content = inflateSync(row.content);
@@ -54,14 +46,9 @@ export class ZoektMirror {
           ? this._toAssetMirrorPath(row.path)
           : this._toRelativePath(row.path);
 
-        // Write tar entry — use a promise to handle backpressure
-        await new Promise((resolve, reject) => {
-          const entry = pack.entry({ name: relativePath, size: content.length }, (err) => {
-            if (err) reject(err);
-            else resolve();
-          });
-          entry.end(content);
-        });
+        const fullPath = join(this.mirrorDir, relativePath);
+        mkdirSync(dirname(fullPath), { recursive: true });
+        writeFileSync(fullPath, content);
 
         written++;
         if (isAsset) assetCount++;
@@ -74,16 +61,12 @@ export class ZoektMirror {
       } catch (err) {
         errors++;
         if (errors <= 5) {
-          console.warn(`[ZoektMirror] Error streaming ${row.path}: ${err.message}`);
+          console.warn(`[ZoektMirror] Error writing ${row.path}: ${err.message}`);
         }
       }
     }
 
-    // Finalize the tar archive
-    pack.finalize();
-
-    // Write marker file to Windows mirror dir (for integrity checks)
-    mkdirSync(this.mirrorDir, { recursive: true });
+    // Write marker file
     writeFileSync(this.markerPath, JSON.stringify({
       timestamp: new Date().toISOString(),
       fileCount: written,
@@ -92,8 +75,26 @@ export class ZoektMirror {
     }));
 
     const durationS = ((performance.now() - startMs) / 1000).toFixed(1);
-    console.log(`[ZoektMirror] Tar stream complete: ${written} files (${assetCount} assets), ${errors} errors (${durationS}s)`);
+    console.log(`[ZoektMirror] Bootstrap complete: ${written} files (${assetCount} assets), ${errors} errors (${durationS}s)`);
     return written;
+  }
+
+  /**
+   * Write a single file to the mirror directory.
+   */
+  updateFile(relativePath, content) {
+    const fullPath = join(this.mirrorDir, relativePath);
+    mkdirSync(dirname(fullPath), { recursive: true });
+    writeFileSync(fullPath, content, 'utf-8');
+  }
+
+  /**
+   * Delete a single file from the mirror directory.
+   */
+  deleteFile(relativePath) {
+    try {
+      unlinkSync(join(this.mirrorDir, relativePath));
+    } catch {}
   }
 
   /**
@@ -169,7 +170,6 @@ export class ZoektMirror {
     // Asset content paths like /Game/Discovery/MyAsset or /Game/Discovery/MyAsset.uasset
     // → _assets/Game/Discovery/MyAsset.uasset
     // Always append .uasset if no extension — avoids file/directory name collisions
-    // (e.g., "Weapon_AR" can be both a leaf asset and a directory for child assets)
     let normalized = contentPath.replace(/\\/g, '/').replace(/^\//, '');
     if (!normalized.includes('.')) {
       normalized += '.uasset';
