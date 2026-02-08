@@ -249,7 +249,7 @@ class UnrealIndexService {
           this.zoektClient = new ZoektClient(this.zoektManager.getPort(), {
             timeoutMs: zoektConfig.searchTimeoutMs || 10000
           });
-          console.log(`[Startup] Zoekt webserver ready (${((performance.now() - t) / 1000).toFixed(1)}s), index build running in background...`);
+          console.log(`[Startup] Zoekt ready (${((performance.now() - t) / 1000).toFixed(1)}s) — grep search available`);
           // Run index in background — existing shards are already usable
           this.zoektManager.runIndex(this.zoektMirror.getMirrorRoot()).then(() => {
             console.log('[Startup] Zoekt index build complete');
@@ -257,11 +257,11 @@ class UnrealIndexService {
             console.warn(`[Startup] Zoekt index failed (using existing shards): ${indexErr.message}`);
           });
         } else {
-          console.warn('[Startup] Zoekt webserver failed to start, grep will use trigram fallback');
+          console.warn('[Startup] Zoekt unavailable — grep search will not work until Zoekt starts');
         }
       } catch (err) {
         console.warn(`[Startup] Zoekt initialization failed: ${err.message}`);
-        console.warn('[Startup] Grep will use trigram fallback');
+        console.warn('[Startup] Zoekt unavailable — grep search will not work until Zoekt starts');
       }
     }
 

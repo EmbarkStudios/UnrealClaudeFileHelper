@@ -492,8 +492,8 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       return res.status(400).json({ error: 'pattern parameter required' });
     }
 
-    if (!zoektClient) {
-      return res.status(503).json({ error: 'Search not available (Zoekt not running)' });
+    if (!zoektClient || !zoektManager?.isAvailable()) {
+      return res.status(503).json({ error: 'Search not available (Zoekt not running). It may be restarting — retry in a few seconds.' });
     }
 
     const caseSensitive = cs !== 'false';
@@ -509,6 +509,8 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
     if (project && !database.projectExists(project)) {
       return res.status(400).json({ error: `Unknown project: ${project}` });
     }
+
+    const grepStartMs = performance.now();
 
     try {
       // Source + asset search via Zoekt in parallel
@@ -530,10 +532,13 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       // Clean paths and rank results
       let results = sourceResult.results.map(r => ({ ...r, file: cleanPath(r.file) }));
 
-      // Fetch mtime metadata for ranking
       const uniquePaths = [...new Set(results.map(r => r.file))];
       const mtimeMap = database.getFilesMtime(uniquePaths);
       results = rankResults(results, mtimeMap);
+
+      const durationMs = Math.round(performance.now() - grepStartMs);
+      const logFn = durationMs > 1000 ? console.warn : console.log;
+      logFn(`[Grep] "${pattern.slice(0, 60)}" -> ${results.length} results (zoekt, ${durationMs}ms)`);
 
       if (grouped === 'true') {
         return res.json({
@@ -563,6 +568,8 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       }
       return res.json(response);
     } catch (err) {
+      const durationMs = Math.round(performance.now() - grepStartMs);
+      console.warn(`[Grep] "${pattern.slice(0, 60)}" -> error (${durationMs}ms): ${err.message}`);
       return res.status(500).json({ error: err.message });
     }
   });

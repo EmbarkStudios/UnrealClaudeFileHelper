@@ -6,6 +6,7 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { ZoektClient } from './service/zoekt-client.js';
+import { rankResults } from './service/search-ranking.js';
 
 // ============================================================
 // ZoektClient Connection Pooling
@@ -168,23 +169,13 @@ describe('ZoektClient response mapping', () => {
     assert.equal(client._inferProject('singlefile.cpp'), '');
   });
 
-  it('should rank header files higher', () => {
-    const data = {
-      Result: {
-        Files: [
-          {
-            FileName: 'Proj/Source/Actor.cpp',
-            LineMatches: [{ LineNumber: 0, Line: Buffer.from('match').toString('base64') }]
-          },
-          {
-            FileName: 'Proj/Source/Actor.h',
-            LineMatches: [{ LineNumber: 0, Line: Buffer.from('match').toString('base64') }]
-          }
-        ],
-        Stats: {}
-      }
-    };
-    const result = client._mapResponse(data, 1);
-    assert.equal(result.results[0].file, 'Proj/Source/Actor.h', 'header file should rank first');
+  it('should rank header files higher via rankResults', () => {
+    // Ranking happens in search-ranking.js, not in _mapResponse
+    const results = [
+      { file: 'Proj/Source/Actor.cpp', project: 'Proj', language: 'cpp', line: 1, match: 'match' },
+      { file: 'Proj/Source/Actor.h', project: 'Proj', language: 'cpp', line: 1, match: 'match' }
+    ];
+    const ranked = rankResults(results, new Map());
+    assert.equal(ranked[0].file, 'Proj/Source/Actor.h', 'header file should rank first');
   });
 });

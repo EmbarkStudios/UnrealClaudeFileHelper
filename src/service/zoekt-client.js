@@ -113,37 +113,53 @@ export class ZoektClient {
     };
 
     const startMs = performance.now();
+    const maxAttempts = 2;
 
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
 
-    let resp;
-    try {
-      resp = await fetch(`${this.baseUrl}/api/search`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-        signal: controller.signal,
-        dispatcher: this.dispatcher
-      });
-    } catch (err) {
-      if (err.name === 'AbortError') {
-        throw new Error(`Zoekt search timed out after ${this.timeoutMs}ms`);
+      try {
+        const resp = await fetch(`${this.baseUrl}/api/search`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+          signal: controller.signal,
+          dispatcher: this.dispatcher
+        });
+
+        clearTimeout(timeout);
+
+        if (!resp.ok) {
+          const text = await resp.text().catch(() => '');
+          // Retry on 5xx (server error), fail immediately on 4xx
+          if (resp.status >= 500 && attempt < maxAttempts) {
+            await new Promise(r => setTimeout(r, 500));
+            continue;
+          }
+          throw new Error(`Zoekt returned ${resp.status}: ${text.slice(0, 200)}`);
+        }
+
+        const data = await resp.json();
+        const durationMs = performance.now() - startMs;
+        return this._mapResponse(data, durationMs);
+      } catch (err) {
+        clearTimeout(timeout);
+
+        // Don't retry on abort timeout or non-transient errors
+        const isTransient = err.code === 'ECONNREFUSED' || err.code === 'ECONNRESET' ||
+          err.code === 'UND_ERR_CONNECT_TIMEOUT' || err.message?.includes('fetch failed');
+        if (attempt < maxAttempts && isTransient) {
+          await new Promise(r => setTimeout(r, 500));
+          continue;
+        }
+
+        if (err.name === 'AbortError') {
+          throw new Error(`Zoekt search timed out after ${this.timeoutMs}ms`);
+        }
+        throw new Error(`Zoekt search failed: ${err.message}`);
       }
-      throw new Error(`Zoekt search failed: ${err.message}`);
-    } finally {
-      clearTimeout(timeout);
     }
-
-    if (!resp.ok) {
-      const text = await resp.text().catch(() => '');
-      throw new Error(`Zoekt returned ${resp.status}: ${text.slice(0, 200)}`);
-    }
-
-    const data = await resp.json();
-    const durationMs = performance.now() - startMs;
-
-    return this._mapResponse(data, durationMs);
   }
 
   _buildQuery(pattern, { project, language, caseSensitive, excludeAssets = false }) {
