@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync, existsSync, readFileSync, unlinkSync } from 'fs';
+import { mkdirSync, writeFileSync, existsSync, readFileSync, unlinkSync, rmSync, readdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { inflateSync } from 'zlib';
 
@@ -25,10 +25,14 @@ export class ZoektMirror {
     const startMs = performance.now();
     console.log('[ZoektMirror] Bootstrapping mirror from database...');
 
-    this._computePathPrefix(database);
+    // Clean mirror to remove stale files from old path schemes
+    this._cleanMirror();
+
+    // Compute per-project path prefixes (matches watcher's project/relativePath convention)
+    const projectPrefixes = this._computeProjectPrefixes(database);
 
     const rows = database.db.prepare(
-      `SELECT fc.content, f.path, f.language FROM file_content fc
+      `SELECT fc.content, f.path, f.language, f.project FROM file_content fc
        JOIN files f ON f.id = fc.file_id
        WHERE f.language NOT IN ('content')`
     ).all();
@@ -44,7 +48,7 @@ export class ZoektMirror {
         const isAsset = row.language === 'asset';
         const relativePath = isAsset
           ? this._toAssetMirrorPath(row.path)
-          : this._toRelativePath(row.path);
+          : this._toProjectRelativePath(row.path, row.project, projectPrefixes);
 
         const fullPath = join(this.mirrorDir, relativePath);
         mkdirSync(dirname(fullPath), { recursive: true });
@@ -156,6 +160,62 @@ export class ZoektMirror {
 
   getPathPrefix() {
     return this.pathPrefix;
+  }
+
+  /**
+   * Clean mirror directory contents (preserve the directory itself).
+   */
+  _cleanMirror() {
+    try {
+      for (const entry of readdirSync(this.mirrorDir)) {
+        if (entry === '.zoekt-mirror-marker') continue;
+        const entryPath = join(this.mirrorDir, entry);
+        rmSync(entryPath, { recursive: true, force: true });
+      }
+    } catch {}
+  }
+
+  /**
+   * Compute per-project path prefixes from DB file paths.
+   * Returns { projectName: prefix } map where prefix is the base directory for that project.
+   */
+  _computeProjectPrefixes(database) {
+    // Use MIN and MAX paths per project — their common prefix is always the broadest
+    const rows = database.db.prepare(
+      `SELECT project, MIN(path) as min_path, MAX(path) as max_path
+       FROM files WHERE language NOT IN ('content', 'asset')
+       GROUP BY project`
+    ).all();
+
+    const prefixes = {};
+    for (const row of rows) {
+      const a = row.min_path.replace(/\\/g, '/');
+      const b = row.max_path.replace(/\\/g, '/');
+      let prefix = a;
+      while (prefix && !b.startsWith(prefix)) {
+        prefix = prefix.slice(0, prefix.lastIndexOf('/'));
+      }
+      if (prefix && !prefix.endsWith('/')) prefix += '/';
+      prefixes[row.project] = prefix;
+    }
+    return prefixes;
+  }
+
+  /**
+   * Convert a full file path to project/relativePath mirror path.
+   * Matches the watcher's convention: project + '/' + relativePath.
+   */
+  _toProjectRelativePath(fullPath, project, projectPrefixes) {
+    const normalized = fullPath.replace(/\\/g, '/');
+    const prefix = projectPrefixes[project];
+    if (prefix && normalized.startsWith(prefix)) {
+      return project + '/' + normalized.slice(prefix.length);
+    }
+    // Fallback: use global prefix
+    if (this.pathPrefix && normalized.startsWith(this.pathPrefix)) {
+      return normalized.slice(this.pathPrefix.length);
+    }
+    return normalized;
   }
 
   _toRelativePath(fullPath) {

@@ -310,6 +310,32 @@ export function parseCppContent(content, filePath = '') {
             }
             pendingUProperty = null;
           }
+
+          // Non-macro member functions: virtual, *_API exported, or regular methods
+          // Captures important methods like BeginPlay, Tick, etc. that lack UFUNCTION
+          const nonMacroFunc = trimmed.match(
+            /^(?:[\w]+_API\s+)?(?:virtual\s+)?(?:static\s+)?(?:const\s+)?(\w[\w<>:,\s*&]*?)\s+(\w+)\s*\(/
+          );
+          if (nonMacroFunc && !trimmed.startsWith('if') && !trimmed.startsWith('for') &&
+              !trimmed.startsWith('while') && !trimmed.startsWith('switch') &&
+              !trimmed.startsWith('return') && !trimmed.startsWith('typedef') &&
+              !trimmed.startsWith('using') && !trimmed.startsWith('operator')) {
+            const funcName = nonMacroFunc[2];
+            // Skip constructors/destructors, macros, and single-char names
+            if (funcName.length > 1 && funcName !== currentType.name &&
+                funcName[0] === funcName[0].toUpperCase() && funcName !== 'GENERATED_BODY' &&
+                funcName !== 'GENERATED_UCLASS_BODY' && !funcName.startsWith('DECLARE_') &&
+                !funcName.startsWith('IMPLEMENT_')) {
+              result.members.push({
+                name: funcName,
+                memberKind: 'function',
+                line: lineNum,
+                isStatic: /\bstatic\b/.test(trimmed),
+                specifiers: /\bvirtual\b/.test(trimmed) ? 'virtual' : '',
+                ownerName: currentType.name
+              });
+            }
+          }
         }
       }
     }

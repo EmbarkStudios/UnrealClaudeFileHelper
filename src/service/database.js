@@ -470,7 +470,7 @@ export class IndexDatabase {
 
     if (!fuzzy) {
       let sql = `
-        SELECT m.*, t.name as type_name, t.kind as type_kind, f.path, f.project, f.module, f.language
+        SELECT m.id, m.name, m.member_kind, m.line, m.specifiers, t.name as type_name, t.kind as type_kind, f.path, f.project, f.module
         FROM members m
         LEFT JOIN types t ON m.type_id = t.id
         JOIN files f ON m.file_id = f.id
@@ -498,7 +498,7 @@ export class IndexDatabase {
       sql += ' LIMIT ?';
       params.push(maxResults);
 
-      return this.db.prepare(sql).all(...params);
+      return this.db.prepare(sql).all(...params).map(({ id, ...rest }) => rest);
     }
 
     const nameLower = name.toLowerCase();
@@ -506,7 +506,7 @@ export class IndexDatabase {
 
     // Step 1: prefix match (fast, uses index)
     let sql = `
-      SELECT m.*, t.name as type_name, t.kind as type_kind, f.path, f.project, f.module, f.language
+      SELECT m.id, m.name, m.member_kind, m.line, m.specifiers, t.name as type_name, t.kind as type_kind, f.path, f.project, f.module
       FROM members m
       LEFT JOIN types t ON m.type_id = t.id
       JOIN files f ON m.file_id = f.id
@@ -544,7 +544,7 @@ export class IndexDatabase {
           if (newIds.length > 0) {
             const idPlaceholders = newIds.map(() => '?').join(',');
             let trigramMemberSql = `
-              SELECT m.*, t.name as type_name, t.kind as type_kind, f.path, f.project, f.module, f.language
+              SELECT m.id, m.name, m.member_kind, m.line, m.specifiers, t.name as type_name, t.kind as type_kind, f.path, f.project, f.module
               FROM members m
               LEFT JOIN types t ON m.type_id = t.id
               JOIN files f ON m.file_id = f.id
@@ -576,7 +576,7 @@ export class IndexDatabase {
     });
 
     scored.sort((a, b) => b.score - a.score);
-    return scored.slice(0, maxResults);
+    return scored.slice(0, maxResults).map(({ id, ...rest }) => rest);
   }
 
   listModules(parent = '', options = {}) {
@@ -624,17 +624,20 @@ export class IndexDatabase {
   }
 
   findTypeByName(name, options = {}) {
-    const { fuzzy = false, project = null, language = null, kind = null, maxResults = 10 } = options;
+    const { fuzzy = false, project = null, language = null, kind = null, maxResults = 10, includeAssets } = options;
 
     const includeSourceTypes = !language || language === 'all' || language === 'angelscript' || language === 'cpp';
-    const includeBlueprints = !language || language === 'all' || language === 'blueprint';
+    // For fuzzy mode, assets are opt-in (default false). For exact mode, default true.
+    const assetsDefault = !fuzzy;
+    const includeBlueprints = (includeAssets !== undefined ? includeAssets : assetsDefault)
+      && (!language || language === 'all' || language === 'blueprint');
 
     if (!fuzzy) {
       let results = [];
 
       if (includeSourceTypes) {
         let sql = `
-          SELECT t.*, f.path, f.project, f.module, f.language
+          SELECT t.name, t.kind, t.parent, t.line, f.path, f.project, f.module
           FROM types t
           JOIN files f ON t.file_id = f.id
           WHERE t.name = ?
@@ -670,7 +673,7 @@ export class IndexDatabase {
           if (candidates.size > 0) {
             const placeholders = [...candidates].map(() => '?').join(',');
             let batchSql = `
-              SELECT t.*, f.path, f.project, f.module, f.language
+              SELECT t.name, t.kind, t.parent, t.line, f.path, f.project, f.module
               FROM types t
               JOIN files f ON t.file_id = f.id
               WHERE t.name IN (${placeholders})
@@ -726,7 +729,7 @@ export class IndexDatabase {
 
       // Step 1: Try prefix match (fast, uses idx_types_name_lower)
       let sql = `
-        SELECT t.*, f.path, f.project, f.module, f.language
+        SELECT t.id, t.name, t.kind, t.parent, t.line, f.path, f.project, f.module
         FROM types t
         JOIN files f ON t.file_id = f.id
         WHERE lower(t.name) LIKE ?
@@ -769,7 +772,7 @@ export class IndexDatabase {
             if (newIds.length > 0) {
               const idPlaceholders = newIds.map(() => '?').join(',');
               let trigramTypeSql = `
-                SELECT t.*, f.path, f.project, f.module, f.language
+                SELECT t.id, t.name, t.kind, t.parent, t.line, f.path, f.project, f.module
                 FROM types t
                 JOIN files f ON t.file_id = f.id
                 WHERE t.id IN (${idPlaceholders})
@@ -794,7 +797,7 @@ export class IndexDatabase {
         const existingIds = new Set(candidates.map(c => c.id));
         const notInClause = existingIds.size > 0 ? [...existingIds].map(() => '?').join(',') : '-1';
         let substringsSql = `
-          SELECT t.*, f.path, f.project, f.module, f.language
+          SELECT t.id, t.name, t.kind, t.parent, t.line, f.path, f.project, f.module
           FROM types t
           JOIN files f ON t.file_id = f.id
           WHERE lower(t.name) LIKE ? AND t.id NOT IN (${notInClause})
@@ -857,7 +860,7 @@ export class IndexDatabase {
     // Filter out low-quality trigram matches
     const filtered = scored.filter(r => r.score >= 0.4);
     filtered.sort((a, b) => b.score - a.score);
-    return dedupTypes(filtered).slice(0, maxResults);
+    return dedupTypes(filtered).slice(0, maxResults).map(({ id, file_id, ...rest }) => rest);
   }
 
   findChildrenOf(parentClass, options = {}) {
@@ -876,7 +879,7 @@ export class IndexDatabase {
 
       if (includeSourceTypes) {
         let sql = `
-          SELECT t.*, f.path, f.project, f.module, f.language
+          SELECT t.name, t.kind, t.parent, t.line, f.path, f.project, f.module
           FROM types t
           JOIN files f ON t.file_id = f.id
           WHERE t.parent = ? AND t.kind IN ('class', 'struct', 'interface')
@@ -951,7 +954,7 @@ export class IndexDatabase {
     if (includeSourceTypes) {
       const placeholders = names.map(() => '?').join(',');
       let sql = `
-        SELECT t.*, f.path, f.project, f.module, f.language
+        SELECT t.name, t.kind, t.parent, t.line, f.path, f.project, f.module
         FROM types t
         JOIN files f ON t.file_id = f.id
         WHERE t.name IN (${placeholders})
@@ -992,7 +995,7 @@ export class IndexDatabase {
     const { project = null, language = null, maxResults = 100 } = options;
 
     let sql = `
-      SELECT t.*, f.path, f.project, f.module, f.language
+      SELECT t.name, t.kind, t.parent, t.line, f.path, f.project, f.module
       FROM types t
       JOIN files f ON t.file_id = f.id
       WHERE (f.module = ? OR f.module LIKE ?)
@@ -1035,7 +1038,7 @@ export class IndexDatabase {
     const containsPattern = `%${filenameLower}%`;
 
     let sql = `
-      SELECT f.*,
+      SELECT f.id, f.path, f.project, f.module, f.language,
         CASE
           WHEN lower(f.path) LIKE ? THEN 1.0
           WHEN lower(f.path) LIKE ? THEN 0.85
@@ -1339,8 +1342,10 @@ export class IndexDatabase {
   findAssetByName(name, options = {}) {
     const { fuzzy = false, project = null, folder = null, maxResults = 20 } = options;
 
+    const assetCols = 'name, content_path, project, asset_class, parent_class';
+
     if (!fuzzy) {
-      let sql = 'SELECT * FROM assets WHERE name = ?';
+      let sql = `SELECT ${assetCols} FROM assets WHERE name = ?`;
       const params = [name];
 
       if (project) { sql += ' AND project = ?'; params.push(project); }
@@ -1352,7 +1357,7 @@ export class IndexDatabase {
 
       if (results.length === 0) {
         // Try case-insensitive exact match
-        sql = 'SELECT * FROM assets WHERE lower(name) = lower(?)';
+        sql = `SELECT ${assetCols} FROM assets WHERE lower(name) = lower(?)`;
         const params2 = [name];
         if (project) { sql += ' AND project = ?'; params2.push(project); }
         if (folder) { sql += ' AND folder LIKE ?'; params2.push(folder + '%'); }
@@ -1366,7 +1371,7 @@ export class IndexDatabase {
 
     const nameLower = name.toLowerCase();
     let sql = `
-      SELECT *,
+      SELECT ${assetCols},
         CASE
           WHEN lower(name) = ? THEN 1.0
           WHEN lower(name) LIKE ? THEN 0.95
@@ -1397,7 +1402,7 @@ export class IndexDatabase {
   browseAssetFolder(folder, options = {}) {
     const { project = null, maxResults = 100 } = options;
 
-    let sql = 'SELECT * FROM assets WHERE folder = ?';
+    let sql = 'SELECT name, content_path, project, asset_class, parent_class FROM assets WHERE folder = ?';
     const params = [folder];
 
     if (project) { sql += ' AND project = ?'; params.push(project); }

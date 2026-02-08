@@ -2,6 +2,7 @@ import express from 'express';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { deflateSync } from 'zlib';
+import { writeFileSync } from 'fs';
 import { rankResults, groupResultsByFile } from './search-ranking.js';
 import { contentHash } from './trigram.js';
 
@@ -245,6 +246,22 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
         zoektManager.triggerReindex(processed, affectedProjects);
       }
 
+      // Update mirror marker so bootstrapFromDatabase doesn't run on restart
+      if (zoektMirror && processed > 0) {
+        try {
+          const fileCount = database.db.prepare(
+            "SELECT COUNT(*) as c FROM file_content"
+          ).get().c;
+          if (zoektMirror.markerPath) {
+            writeFileSync(zoektMirror.markerPath, JSON.stringify({
+              timestamp: new Date().toISOString(),
+              fileCount,
+              source: 'ingest'
+            }));
+          }
+        } catch {}
+      }
+
       res.json({ processed, errors: errors.length > 0 ? errors : undefined });
     } catch (err) {
       res.status(500).json({ error: err.message });
@@ -312,7 +329,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
 
   app.get('/find-type', async (req, res) => {
     try {
-      const { name, fuzzy, project, language, maxResults } = req.query;
+      const { name, fuzzy, project, language, maxResults, includeAssets } = req.query;
 
       if (!name) {
         return res.status(400).json({ error: 'name parameter required' });
@@ -325,11 +342,12 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
         project: project || null,
         language: language || null,
         kind: req.query.kind || null,
-        maxResults: mr
+        maxResults: mr,
+        includeAssets: includeAssets === 'true' ? true : includeAssets === 'false' ? false : undefined
       };
 
       const results = await poolQuery('findTypeByName', [name, opts]);
-      res.json({ results, source: 'database' });
+      res.json({ results });
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
@@ -454,7 +472,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       };
 
       const results = await poolQuery('findMember', [name, opts]);
-      res.json({ results, source: 'database' });
+      res.json({ results });
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
@@ -631,7 +649,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
 
     const caseSensitive = cs !== 'false';
     const maxResults = parseInt(mr, 10) || 50;
-    const contextLines = parseInt(cl, 10) || 2;
+    const contextLines = cl !== undefined ? parseInt(cl, 10) : 0;
 
     try {
       new RegExp(pattern, caseSensitive ? '' : 'i');
@@ -674,27 +692,20 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       logFn(`[Grep] "${pattern.slice(0, 60)}" -> ${results.length} results (zoekt, ${durationMs}ms)`);
 
       if (grouped === 'true') {
-        return res.json({
+        const groupedResponse = {
           results: groupResultsByFile(results),
           totalMatches: sourceResult.totalMatches,
           truncated: sourceResult.results.length < sourceResult.totalMatches,
-          timedOut: false,
-          filesSearched: sourceResult.filesSearched,
-          searchEngine: 'zoekt',
-          zoektDurationMs: sourceResult.zoektDurationMs,
-          grouped: true,
-          assets: assetResult.results.length > 0 ? assetResult.results : undefined
-        });
+          grouped: true
+        };
+        if (assetResult.results.length > 0) groupedResponse.assets = assetResult.results;
+        return res.json(groupedResponse);
       }
 
       const response = {
         results,
         totalMatches: sourceResult.totalMatches,
-        truncated: sourceResult.results.length < sourceResult.totalMatches,
-        timedOut: false,
-        filesSearched: sourceResult.filesSearched,
-        searchEngine: 'zoekt',
-        zoektDurationMs: sourceResult.zoektDurationMs
+        truncated: sourceResult.results.length < sourceResult.totalMatches
       };
       if (assetResult.results.length > 0) {
         response.assets = assetResult.results;

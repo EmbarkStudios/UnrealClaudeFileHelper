@@ -105,6 +105,10 @@ class UnrealIndexBridge {
                   type: 'number',
                   default: 10,
                   description: 'Maximum results to return'
+                },
+                includeAssets: {
+                  type: 'boolean',
+                  description: 'Include blueprint/asset types in results. Default: true for exact match, false for fuzzy.'
                 }
               },
               required: ['name']
@@ -375,7 +379,8 @@ class UnrealIndexBridge {
               project: args.project,
               language: args.language,
               kind: args.kind,
-              maxResults: args.maxResults
+              maxResults: args.maxResults,
+              includeAssets: args.includeAssets
             });
             return {
               content: [{ type: 'text', text: JSON.stringify(result, null, 2) }]
