@@ -413,7 +413,7 @@ export class ZoektManager {
 
   /**
    * Index a single project's directory into its own Zoekt shard.
-   * Uses -incremental to skip unchanged files and -shard_prefix for per-project shards.
+   * Each project subdirectory naturally gets its own shard file based on source path.
    */
   async _runIndexForProject(projectName, effectiveMirrorPath) {
     return new Promise((resolve, reject) => {
@@ -421,8 +421,6 @@ export class ZoektManager {
       const projectDir = `${effectiveMirrorPath}/${projectName}`;
       const args = [
         '-index', this._getIndexDirArg(),
-        '-incremental',
-        '-shard_prefix', projectName,
         '-parallelism', String(Math.max(1, Math.floor(this.parallelism / 2))),
         '-file_limit', String(this.fileLimitBytes),
         projectDir
