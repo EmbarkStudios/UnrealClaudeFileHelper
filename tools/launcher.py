@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import subprocess
 import sys
 from enum import Enum, auto
 from pathlib import Path
@@ -239,22 +241,31 @@ class InstallWorker(QThread):
     log_output = Signal(str)
     all_done = Signal(bool)
 
-    def __init__(self, config: dict) -> None:
+    def __init__(self, config: dict, skip_wsl_pull: bool = False, skip_npm: bool = False) -> None:
         super().__init__()
         self._config = config
+        self._skip_wsl_pull = skip_wsl_pull
+        self._skip_npm = skip_npm
 
     def run(self) -> None:
         all_ok = True
 
         # Step 0: npm install (Windows-side for watcher)
-        self.step_started.emit(0, "Installing Node.js dependencies...")
-        ok, msg = install_node_deps(lambda o: self.log_output.emit(o))
-        self.step_completed.emit(0, ok, msg)
-        if not ok:
-            all_ok = False
+        if self._skip_npm:
+            self.step_started.emit(0, "Skipping npm install (local changes preserved)...")
+            self.step_completed.emit(0, True, "Skipped (local changes)")
+        else:
+            self.step_started.emit(0, "Installing Node.js dependencies...")
+            ok, msg = install_node_deps(lambda o: self.log_output.emit(o))
+            self.step_completed.emit(0, ok, msg)
+            if not ok:
+                all_ok = False
 
         # Step 1: Clone/update repo in WSL
-        if sys.platform == "win32":
+        if self._skip_wsl_pull:
+            self.step_started.emit(1, "Skipping WSL clone/pull (local changes preserved)...")
+            self.step_completed.emit(1, True, "Skipped (local changes)")
+        elif sys.platform == "win32":
             self.step_started.emit(1, "Cloning/updating repo in WSL...")
             ok, msg = clone_or_pull_wsl(lambda o: self.log_output.emit(o))
             self.step_completed.emit(1, ok, msg)
@@ -264,7 +275,10 @@ class InstallWorker(QThread):
             self.step_completed.emit(1, True, "Skipped (not Windows)")
 
         # Step 2: WSL npm install
-        if sys.platform == "win32":
+        if self._skip_wsl_pull and self._skip_npm:
+            self.step_started.emit(2, "Skipping WSL npm install (local changes preserved)...")
+            self.step_completed.emit(2, True, "Skipped (local changes)")
+        elif sys.platform == "win32":
             self.step_started.emit(2, "Installing WSL Node.js dependencies...")
             ok, msg = install_deps_wsl(lambda o: self.log_output.emit(o))
             self.step_completed.emit(2, ok, msg)
@@ -325,9 +339,11 @@ class InstallWorker(QThread):
 class InstallView(QWidget):
     install_complete = Signal()
 
-    def __init__(self, config: dict, parent=None) -> None:
+    def __init__(self, config: dict, skip_wsl_pull: bool = False, skip_npm: bool = False, parent=None) -> None:
         super().__init__(parent)
         self._config = config
+        self._skip_wsl_pull = skip_wsl_pull
+        self._skip_npm = skip_npm
         self._worker: InstallWorker | None = None
 
         scroll = QScrollArea()
@@ -427,7 +443,7 @@ class InstallView(QWidget):
         for step in self._steps:
             step.set_pending()
 
-        self._worker = InstallWorker(self._config)
+        self._worker = InstallWorker(self._config, self._skip_wsl_pull, self._skip_npm)
         self._worker.step_started.connect(self._on_step_started)
         self._worker.step_completed.connect(self._on_step_completed)
         self._worker.log_output.connect(self._on_log)
@@ -462,6 +478,230 @@ class InstallView(QWidget):
             self._log.append("\nSome steps failed. Fix the issues and click Retry.")
             self._retry_btn.setVisible(True)
             self._continue_btn.setVisible(True)
+
+
+# ── Prerequisites View ─────────────────────────────────────
+
+_PREREQS = [
+    {"name": "node", "display": "Node.js", "cmd": ["node", "--version"], "required": True,
+     "help": "Install from https://nodejs.org/ or via winget: winget install OpenJS.NodeJS"},
+    {"name": "npm", "display": "npm", "cmd": ["npm", "--version"], "required": True,
+     "help": "Installed with Node.js"},
+    {"name": "git", "display": "Git", "cmd": ["git", "--version"], "required": True,
+     "help": "Install from https://git-scm.com/ or via winget: winget install Git.Git"},
+    {"name": "go", "display": "Go (for Zoekt)", "cmd": ["go", "version"], "required": False,
+     "help": "Install from https://go.dev/ or via winget: winget install GoLang.Go"},
+]
+
+if sys.platform == "win32":
+    _PREREQS.append({
+        "name": "wsl", "display": "WSL", "cmd": ["wsl", "--status"], "required": True,
+        "help": "Install via: wsl --install",
+    })
+
+
+class PrereqCheckWorker(QThread):
+    """Check all prerequisites in a background thread."""
+    result_ready = Signal(list)  # list of (name, display, found, version, required, help)
+
+    def run(self) -> None:
+        results = []
+        for p in _PREREQS:
+            found = False
+            version = ""
+            try:
+                kwargs = {"capture_output": True, "text": True, "timeout": 10}
+                if sys.platform == "win32":
+                    kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+                # npm needs shell=True on Windows
+                if p["name"] == "npm" and sys.platform == "win32":
+                    kwargs["shell"] = True
+                result = subprocess.run(p["cmd"], **kwargs)
+                if result.returncode == 0:
+                    found = True
+                    version = result.stdout.strip().split("\n")[0][:40]
+            except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+                pass
+
+            # Fallback: check shutil.which
+            if not found and p["name"] not in ("wsl", "npm"):
+                exe = shutil.which(p["name"])
+                if exe:
+                    found = True
+                    version = f"found at {exe}"
+
+            results.append({
+                "name": p["name"],
+                "display": p["display"],
+                "found": found,
+                "version": version,
+                "required": p["required"],
+                "help": p["help"],
+            })
+        self.result_ready.emit(results)
+
+
+class PrereqRow(QFrame):
+    """Single prerequisite status row."""
+
+    def __init__(self, info: dict, parent=None) -> None:
+        super().__init__(parent)
+        self.info = info
+        self.setFrameShape(QFrame.Shape.NoFrame)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(4, 2, 4, 2)
+
+        self._icon = QLabel()
+        self._icon.setFixedWidth(20)
+        self._icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self._icon)
+
+        self._name = QLabel(info["display"])
+        self._name.setMinimumWidth(160)
+        self._name.setStyleSheet(f"color: {COLORS['fg']};")
+        layout.addWidget(self._name)
+
+        self._version = QLabel()
+        self._version.setMinimumWidth(200)
+        layout.addWidget(self._version)
+
+        tag = QLabel("required" if info["required"] else "optional")
+        tag.setFixedWidth(60)
+        tag.setStyleSheet(
+            f"color: {COLORS['warning'] if info['required'] else COLORS['muted']}; font-size: 8pt;"
+        )
+        layout.addWidget(tag)
+
+        layout.addStretch()
+        self.update_status(info)
+
+    def update_status(self, info: dict) -> None:
+        self.info = info
+        if info["found"]:
+            self._icon.setText("\u2714")
+            self._icon.setStyleSheet(f"color: {COLORS['success']}; font-size: 12pt;")
+            self._version.setText(info["version"])
+            self._version.setStyleSheet(f"color: {COLORS['success']}; font-size: 9pt;")
+        else:
+            self._icon.setText("\u2718")
+            self._icon.setStyleSheet(f"color: {COLORS['error']}; font-size: 12pt;")
+            self._version.setText(info["help"])
+            self._version.setStyleSheet(f"color: {COLORS['muted']}; font-size: 9pt;")
+            self._version.setWordWrap(True)
+
+
+class PrerequisitesView(QWidget):
+    prereqs_ok = Signal()
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._worker: PrereqCheckWorker | None = None
+        self._rows: list[PrereqRow] = []
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(8)
+
+        title = QLabel("Prerequisites")
+        title.setStyleSheet(f"color: {COLORS['info']}; font-size: 16pt; font-weight: bold;")
+        layout.addWidget(title)
+
+        subtitle = QLabel("Checking for required tools...")
+        subtitle.setStyleSheet(f"color: {COLORS['muted']}; font-size: 10pt;")
+        layout.addWidget(subtitle)
+        self._subtitle = subtitle
+
+        layout.addSpacing(8)
+
+        self._rows_layout = QVBoxLayout()
+        layout.addLayout(self._rows_layout)
+
+        layout.addSpacing(8)
+
+        self._status_label = QLabel()
+        self._status_label.setWordWrap(True)
+        self._status_label.setVisible(False)
+        layout.addWidget(self._status_label)
+
+        # Buttons
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+
+        self._recheck_btn = QPushButton("Re-check")
+        self._recheck_btn.setFixedWidth(100)
+        self._recheck_btn.setVisible(False)
+        self._recheck_btn.clicked.connect(self._start_check)
+        btn_row.addWidget(self._recheck_btn)
+
+        self._continue_btn = QPushButton("Continue to Setup")
+        self._continue_btn.setFixedWidth(180)
+        self._continue_btn.setVisible(False)
+        self._continue_btn.setStyleSheet(
+            f"QPushButton {{ background: {COLORS['accent']}; color: {COLORS['bg']}; "
+            f"font-weight: bold; border: none; padding: 8px 20px; border-radius: 4px; }}"
+            f"QPushButton:hover {{ background: #caa4ff; }}"
+        )
+        self._continue_btn.clicked.connect(lambda: self.prereqs_ok.emit())
+        btn_row.addWidget(self._continue_btn)
+
+        layout.addLayout(btn_row)
+        layout.addStretch()
+
+        QTimer.singleShot(200, self._start_check)
+
+    def _start_check(self) -> None:
+        self._recheck_btn.setVisible(False)
+        self._continue_btn.setVisible(False)
+        self._status_label.setVisible(False)
+        self._subtitle.setText("Checking for required tools...")
+
+        for row in self._rows:
+            row.setParent(None)
+            row.deleteLater()
+        self._rows.clear()
+
+        self._worker = PrereqCheckWorker()
+        self._worker.result_ready.connect(self._on_results)
+        self._worker.start()
+
+    def _on_results(self, results: list) -> None:
+        for info in results:
+            row = PrereqRow(info)
+            self._rows.append(row)
+            self._rows_layout.addWidget(row)
+
+        missing_required = [r for r in results if r["required"] and not r["found"]]
+        missing_optional = [r for r in results if not r["required"] and not r["found"]]
+
+        self._recheck_btn.setVisible(True)
+
+        if missing_required:
+            names = ", ".join(r["display"] for r in missing_required)
+            err_color = COLORS["error"]
+            muted_color = COLORS["muted"]
+            self._subtitle.setText("Some required tools are missing.")
+            self._status_label.setText(
+                f"<span style='color:{err_color}'>Missing required: {names}</span><br>"
+                f"<span style='color:{muted_color}'>Install the missing tools and click Re-check, "
+                f"or Continue anyway (some install steps may fail).</span>"
+            )
+            self._status_label.setTextFormat(Qt.TextFormat.RichText)
+            self._status_label.setVisible(True)
+            self._continue_btn.setVisible(True)
+            self._continue_btn.setText("Continue Anyway")
+        else:
+            self._subtitle.setText("All required tools found!")
+            if missing_optional:
+                names = ", ".join(r["display"] for r in missing_optional)
+                warn_color = COLORS["warning"]
+                self._status_label.setText(
+                    f"<span style='color:{warn_color}'>Optional missing: {names}</span>"
+                )
+                self._status_label.setTextFormat(Qt.TextFormat.RichText)
+                self._status_label.setVisible(True)
+            self._continue_btn.setVisible(True)
+            self._continue_btn.setText("Continue to Setup")
 
 
 # ── Setup View ─────────────────────────────────────────────
@@ -615,6 +855,26 @@ class SetupView(QWidget):
         settings_layout.addLayout(zoekt_row)
 
         self._layout.addWidget(settings_group)
+
+        # --- Install Options ---
+        options_group = QGroupBox("Install Options")
+        options_layout = QVBoxLayout(options_group)
+
+        self._skip_npm_cb = QCheckBox("Skip npm install (preserve local node_modules)")
+        self._skip_npm_cb.setToolTip(
+            "Check this if you have local changes to node_modules or package-lock.json "
+            "that you don't want overwritten."
+        )
+        options_layout.addWidget(self._skip_npm_cb)
+
+        self._skip_wsl_pull_cb = QCheckBox("Skip WSL clone/pull (preserve local WSL repo changes)")
+        self._skip_wsl_pull_cb.setToolTip(
+            "Check this if the WSL repo at ~/repos/unreal-index has local changes "
+            "that differ from the remote and you want to keep them."
+        )
+        options_layout.addWidget(self._skip_wsl_pull_cb)
+
+        self._layout.addWidget(options_group)
 
         # --- Config Preview ---
         preview_group = QGroupBox("Config Preview")
@@ -844,7 +1104,12 @@ class SetupView(QWidget):
 
     def _save_and_start(self) -> None:
         config = self._build_config()
-        self.setup_complete.emit(config)
+        options = {
+            "config": config,
+            "skip_wsl_pull": self._skip_wsl_pull_cb.isChecked(),
+            "skip_npm": self._skip_npm_cb.isChecked(),
+        }
+        self.setup_complete.emit(options)
 
 
 # ── Launcher View ──────────────────────────────────────────
@@ -996,17 +1261,33 @@ class UnrealIndexApp(QMainWindow):
         self._stack = QStackedWidget()
         self.setCentralWidget(self._stack)
 
-        self._setup_view = SetupView()
-        self._setup_view.setup_complete.connect(self._on_setup_done)
-        self._stack.addWidget(self._setup_view)
-
+        self._prereqs_view: PrerequisitesView | None = None
+        self._setup_view: SetupView | None = None
         self._install_view: InstallView | None = None
         self._launcher_view: LauncherView | None = None
 
         if config_exists():
             self._show_launcher()
         else:
-            self._stack.setCurrentWidget(self._setup_view)
+            self._show_prereqs()
+
+    def _show_prereqs(self) -> None:
+        if self._prereqs_view is not None:
+            self._prereqs_view.setParent(None)
+            self._prereqs_view.deleteLater()
+        self._prereqs_view = PrerequisitesView()
+        self._prereqs_view.prereqs_ok.connect(self._show_setup)
+        self._stack.addWidget(self._prereqs_view)
+        self._stack.setCurrentWidget(self._prereqs_view)
+
+    def _show_setup(self) -> None:
+        if self._setup_view is not None:
+            self._setup_view.setParent(None)
+            self._setup_view.deleteLater()
+        self._setup_view = SetupView()
+        self._setup_view.setup_complete.connect(self._on_setup_done)
+        self._stack.addWidget(self._setup_view)
+        self._stack.setCurrentWidget(self._setup_view)
 
     def _show_launcher(self) -> None:
         if self._launcher_view is not None:
@@ -1016,23 +1297,25 @@ class UnrealIndexApp(QMainWindow):
         self._stack.addWidget(self._launcher_view)
         self._stack.setCurrentWidget(self._launcher_view)
 
-    def _show_install(self, config: dict) -> None:
+    def _show_install(self, options: dict) -> None:
         if self._install_view is not None:
             self._install_view.setParent(None)
             self._install_view.deleteLater()
-        self._install_view = InstallView(config)
+        self._install_view = InstallView(
+            config=options["config"],
+            skip_wsl_pull=options.get("skip_wsl_pull", False),
+            skip_npm=options.get("skip_npm", False),
+        )
         self._install_view.install_complete.connect(self._show_launcher)
         self._stack.addWidget(self._install_view)
         self._stack.setCurrentWidget(self._install_view)
 
     def show_setup(self) -> None:
-        self._setup_view = SetupView()
-        self._setup_view.setup_complete.connect(self._on_setup_done)
-        self._stack.addWidget(self._setup_view)
-        self._stack.setCurrentWidget(self._setup_view)
+        """Called from LauncherView reconfigure button."""
+        self._show_prereqs()
 
-    def _on_setup_done(self, config: dict) -> None:
-        self._show_install(config)
+    def _on_setup_done(self, options: dict) -> None:
+        self._show_install(options)
 
 
 def main() -> None:
