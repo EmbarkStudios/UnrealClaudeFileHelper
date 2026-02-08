@@ -255,7 +255,7 @@ test('group has correct shape', () => {
   const groups = groupResultsByFile(results);
   assertEq(groups[0].file, 'a.cpp', 'file');
   assertEq(groups[0].project, 'MyProject', 'project');
-  assertEq(groups[0].language, 'cpp', 'language');
+  assertEq(groups[0].language, undefined, 'language removed from grouped output');
   assert(Array.isArray(groups[0].matches), 'matches is array');
 });
 

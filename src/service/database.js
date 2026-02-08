@@ -470,7 +470,7 @@ export class IndexDatabase {
 
     if (!fuzzy) {
       let sql = `
-        SELECT m.id, m.name, m.member_kind, m.line, m.specifiers, t.name as type_name, t.kind as type_kind, f.path, f.project, f.module
+        SELECT m.id, m.name, m.member_kind, m.line, m.specifiers, t.name as type_name, t.kind as type_kind, f.path, f.project
         FROM members m
         LEFT JOIN types t ON m.type_id = t.id
         JOIN files f ON m.file_id = f.id
@@ -506,7 +506,7 @@ export class IndexDatabase {
 
     // Step 1: prefix match (fast, uses index)
     let sql = `
-      SELECT m.id, m.name, m.member_kind, m.line, m.specifiers, t.name as type_name, t.kind as type_kind, f.path, f.project, f.module
+      SELECT m.id, m.name, m.member_kind, m.line, m.specifiers, t.name as type_name, t.kind as type_kind, f.path, f.project
       FROM members m
       LEFT JOIN types t ON m.type_id = t.id
       JOIN files f ON m.file_id = f.id
@@ -544,7 +544,7 @@ export class IndexDatabase {
           if (newIds.length > 0) {
             const idPlaceholders = newIds.map(() => '?').join(',');
             let trigramMemberSql = `
-              SELECT m.id, m.name, m.member_kind, m.line, m.specifiers, t.name as type_name, t.kind as type_kind, f.path, f.project, f.module
+              SELECT m.id, m.name, m.member_kind, m.line, m.specifiers, t.name as type_name, t.kind as type_kind, f.path, f.project
               FROM members m
               LEFT JOIN types t ON m.type_id = t.id
               JOIN files f ON m.file_id = f.id
@@ -637,7 +637,7 @@ export class IndexDatabase {
 
       if (includeSourceTypes) {
         let sql = `
-          SELECT t.name, t.kind, t.parent, t.line, f.path, f.project, f.module
+          SELECT t.name, t.kind, t.parent, t.line, f.path, f.project
           FROM types t
           JOIN files f ON t.file_id = f.id
           WHERE t.name = ?
@@ -673,7 +673,7 @@ export class IndexDatabase {
           if (candidates.size > 0) {
             const placeholders = [...candidates].map(() => '?').join(',');
             let batchSql = `
-              SELECT t.name, t.kind, t.parent, t.line, f.path, f.project, f.module
+              SELECT t.name, t.kind, t.parent, t.line, f.path, f.project
               FROM types t
               JOIN files f ON t.file_id = f.id
               WHERE t.name IN (${placeholders})
@@ -729,7 +729,7 @@ export class IndexDatabase {
 
       // Step 1: Try prefix match (fast, uses idx_types_name_lower)
       let sql = `
-        SELECT t.id, t.name, t.kind, t.parent, t.line, f.path, f.project, f.module
+        SELECT t.id, t.name, t.kind, t.parent, t.line, f.path, f.project
         FROM types t
         JOIN files f ON t.file_id = f.id
         WHERE lower(t.name) LIKE ?
@@ -772,7 +772,7 @@ export class IndexDatabase {
             if (newIds.length > 0) {
               const idPlaceholders = newIds.map(() => '?').join(',');
               let trigramTypeSql = `
-                SELECT t.id, t.name, t.kind, t.parent, t.line, f.path, f.project, f.module
+                SELECT t.id, t.name, t.kind, t.parent, t.line, f.path, f.project
                 FROM types t
                 JOIN files f ON t.file_id = f.id
                 WHERE t.id IN (${idPlaceholders})
@@ -797,7 +797,7 @@ export class IndexDatabase {
         const existingIds = new Set(candidates.map(c => c.id));
         const notInClause = existingIds.size > 0 ? [...existingIds].map(() => '?').join(',') : '-1';
         let substringsSql = `
-          SELECT t.id, t.name, t.kind, t.parent, t.line, f.path, f.project, f.module
+          SELECT t.id, t.name, t.kind, t.parent, t.line, f.path, f.project
           FROM types t
           JOIN files f ON t.file_id = f.id
           WHERE lower(t.name) LIKE ? AND t.id NOT IN (${notInClause})
@@ -879,7 +879,7 @@ export class IndexDatabase {
 
       if (includeSourceTypes) {
         let sql = `
-          SELECT t.name, t.kind, t.parent, t.line, f.path, f.project, f.module
+          SELECT t.name, t.kind, t.parent, t.line, f.path, f.project
           FROM types t
           JOIN files f ON t.file_id = f.id
           WHERE t.parent = ? AND t.kind IN ('class', 'struct', 'interface')
@@ -954,7 +954,7 @@ export class IndexDatabase {
     if (includeSourceTypes) {
       const placeholders = names.map(() => '?').join(',');
       let sql = `
-        SELECT t.name, t.kind, t.parent, t.line, f.path, f.project, f.module
+        SELECT t.name, t.kind, t.parent, t.line, f.path, f.project
         FROM types t
         JOIN files f ON t.file_id = f.id
         WHERE t.name IN (${placeholders})
@@ -1038,7 +1038,7 @@ export class IndexDatabase {
     const containsPattern = `%${filenameLower}%`;
 
     let sql = `
-      SELECT f.id, f.path, f.project, f.module, f.language,
+      SELECT f.id, f.path, f.project, f.language,
         CASE
           WHEN lower(f.path) LIKE ? THEN 1.0
           WHEN lower(f.path) LIKE ? THEN 0.85
@@ -1095,7 +1095,6 @@ export class IndexDatabase {
     return files.map(f => ({
       file: f.path,
       project: f.project,
-      module: f.module,
       language: f.language,
       score: f.score,
       types: typesByFile.get(f.id) || []

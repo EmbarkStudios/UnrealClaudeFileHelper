@@ -93,7 +93,7 @@ export function rankResults(results, mtimeMap) {
  * Group flat grep results by file.
  *
  * @param {Array} results - Flat grep results [{file, project, language, line, match, context?}]
- * @returns {Array} Grouped results [{file, project, language, matches: [{line, match, context?}]}]
+ * @returns {Array} Grouped results [{file, project, matches: [{line, match, context?}]}]
  */
 export function groupResultsByFile(results) {
   if (!results || results.length === 0) return [];
@@ -104,7 +104,6 @@ export function groupResultsByFile(results) {
       fileMap.set(r.file, {
         file: r.file,
         project: r.project,
-        language: r.language,
         matches: []
       });
     }

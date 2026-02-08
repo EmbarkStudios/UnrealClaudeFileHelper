@@ -220,6 +220,7 @@ export class ZoektClient {
   }
 
   _mapResponse(data, durationMs) {
+    const MAX_LINE = 200;
     const results = [];
     let totalMatches = 0;
     let matchedFiles = 0;
@@ -243,12 +244,15 @@ export class ZoektClient {
       for (const lm of lineMatches) {
         totalMatches++;
 
+        let match = this._decodeBytes(lm.Line).trim();
+        if (match.length > MAX_LINE) match = match.slice(0, MAX_LINE) + '...';
+
         const result = {
           file: filePath,
           project: fileProject,
           language: fileLanguage,
           line: (lm.LineNumber || 0) + 1, // Zoekt uses 0-based line numbers
-          match: this._decodeBytes(lm.Line).trim()
+          match
         };
 
         // Context lines (Before/After are []byte → single base64 string containing multiple lines)
@@ -257,13 +261,17 @@ export class ZoektClient {
           if (lm.Before) {
             const lines = this._decodeBytes(lm.Before).split(/\r?\n/);
             for (const line of lines) {
-              if (line || result.context.length > 0) result.context.push(line.trim());
+              let t = line.trim();
+              if (t.length > MAX_LINE) t = t.slice(0, MAX_LINE) + '...';
+              if (t || result.context.length > 0) result.context.push(t);
             }
           }
           if (lm.After) {
             const lines = this._decodeBytes(lm.After).split(/\r?\n/);
             for (const line of lines) {
-              result.context.push(line.trim());
+              let t = line.trim();
+              if (t.length > MAX_LINE) t = t.slice(0, MAX_LINE) + '...';
+              result.context.push(t);
             }
           }
           // Remove trailing empty lines
@@ -285,14 +293,15 @@ export class ZoektClient {
         for (const range of (cm.Ranges || [])) {
           totalMatches++;
           const lineIdx = (range.Start?.LineNumber || 0) - startLine;
-          const matchLine = lines[lineIdx] || '';
+          let matchLine = (lines[lineIdx] || '').trim();
+          if (matchLine.length > MAX_LINE) matchLine = matchLine.slice(0, MAX_LINE) + '...';
 
           results.push({
             file: filePath,
             project: fileProject,
             language: fileLanguage,
             line: (range.Start?.LineNumber || 0) + 1,
-            match: matchLine.trimEnd()
+            match: matchLine
           });
         }
       }

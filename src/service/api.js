@@ -17,15 +17,15 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
   // Compute common path prefix for all indexed files (strip from responses)
   let pathPrefix = '';
   try {
-    const sample = database.db.prepare(
-      "SELECT path FROM files WHERE language != 'asset' LIMIT 100"
-    ).all().map(r => r.path.replace(/\\/g, '/'));
-    if (sample.length > 0) {
-      pathPrefix = sample[0];
-      for (const p of sample) {
-        while (pathPrefix && !p.startsWith(pathPrefix)) {
-          pathPrefix = pathPrefix.slice(0, pathPrefix.lastIndexOf('/'));
-        }
+    const row = database.db.prepare(
+      "SELECT MIN(path) as min_path, MAX(path) as max_path FROM files WHERE language NOT IN ('content', 'asset')"
+    ).get();
+    if (row && row.min_path && row.max_path) {
+      const a = row.min_path.replace(/\\/g, '/');
+      const b = row.max_path.replace(/\\/g, '/');
+      pathPrefix = a;
+      while (pathPrefix && !b.startsWith(pathPrefix)) {
+        pathPrefix = pathPrefix.slice(0, pathPrefix.lastIndexOf('/'));
       }
       if (pathPrefix && !pathPrefix.endsWith('/')) pathPrefix += '/';
     }
@@ -35,6 +35,14 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
     if (typeof v !== 'string') return v;
     const normalized = v.replace(/\\/g, '/');
     return pathPrefix && normalized.startsWith(pathPrefix) ? normalized.slice(pathPrefix.length) : normalized;
+  }
+
+  function hasRegexMeta(s) {
+    for (let i = 0; i < s.length; i++) {
+      if (s[i] === '\\') { i++; continue; }
+      if ('.+*?^${}()|[]'.includes(s[i])) return true;
+    }
+    return false;
   }
 
   // Execute a read query via the worker pool (parallel) or fall back to direct (sequential)
@@ -347,6 +355,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       };
 
       const results = await poolQuery('findTypeByName', [name, opts]);
+      results.forEach(r => { if (r.path) r.path = cleanPath(r.path); });
       res.json({ results });
     } catch (err) {
       res.status(500).json({ error: err.message });
@@ -369,6 +378,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       };
 
       const result = await poolQuery('findChildrenOf', [parent, opts]);
+      if (result.results) result.results.forEach(r => { if (r.path) r.path = cleanPath(r.path); });
       res.json(result);
     } catch (err) {
       res.status(500).json({ error: err.message });
@@ -390,6 +400,8 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       };
 
       const result = await poolQuery('browseModule', [module, opts]);
+      if (result.types) result.types.forEach(r => { if (r.path) r.path = cleanPath(r.path); });
+      if (result.files) result.files = result.files.map(f => cleanPath(f));
       res.json(result);
     } catch (err) {
       res.status(500).json({ error: err.message });
@@ -411,6 +423,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       };
 
       const results = await poolQuery('findFileByName', [filename, opts]);
+      results.forEach(r => { if (r.file) r.file = cleanPath(r.file); });
       res.json({ results });
     } catch (err) {
       res.status(500).json({ error: err.message });
@@ -472,6 +485,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       };
 
       const results = await poolQuery('findMember', [name, opts]);
+      results.forEach(r => { if (r.path) r.path = cleanPath(r.path); });
       res.json({ results });
     } catch (err) {
       res.status(500).json({ error: err.message });
@@ -648,7 +662,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
     }
 
     const caseSensitive = cs !== 'false';
-    const maxResults = parseInt(mr, 10) || 50;
+    const maxResults = parseInt(mr, 10) || 20;
     const contextLines = cl !== undefined ? parseInt(cl, 10) : 0;
 
     try {
@@ -683,6 +697,17 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       // Clean paths and rank results
       let results = sourceResult.results.map(r => ({ ...r, file: cleanPath(r.file) }));
 
+      // Post-filter: Zoekt tokenizes multi-word queries, so "class Foo" matches
+      // lines with "class" OR "Foo" separately. For literal patterns, require the
+      // full string to appear in the match line.
+      if (!hasRegexMeta(pattern)) {
+        const needle = caseSensitive ? pattern : pattern.toLowerCase();
+        results = results.filter(r => {
+          const hay = caseSensitive ? r.match : r.match.toLowerCase();
+          return hay.includes(needle);
+        });
+      }
+
       const uniquePaths = [...new Set(results.map(r => r.file))];
       const mtimeMap = database.getFilesMtime(uniquePaths);
       results = rankResults(results, mtimeMap);
@@ -692,7 +717,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       const logFn = durationMs > 1000 ? console.warn : console.log;
       logFn(`[Grep] "${pattern.slice(0, 60)}" -> ${results.length} results (zoekt, ${durationMs}ms)`);
 
-      if (grouped === 'true') {
+      if (grouped !== 'false') {
         const groupedResponse = {
           results: groupResultsByFile(results),
           totalMatches: sourceResult.totalMatches,
