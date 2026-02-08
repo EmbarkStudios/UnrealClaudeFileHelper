@@ -101,23 +101,53 @@ function collectFiles(dirPath, projectName, extensions, language) {
 
 // --- HTTP helpers ---
 
-async function fetchJson(url) {
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-  return res.json();
+async function fetchJson(url, retries = 3) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+      return res.json();
+    } catch (err) {
+      if (attempt < retries && (err.code === 'ECONNRESET' || err.code === 'ECONNREFUSED' || err.message.includes('ECONNRESET'))) {
+        const delay = attempt * 2000;
+        console.warn(`[Watcher] GET failed (${err.code || err.message}), retry ${attempt}/${retries} in ${delay}ms...`);
+        await new Promise(r => setTimeout(r, delay));
+        continue;
+      }
+      throw err;
+    }
+  }
 }
 
-async function postJson(url, body) {
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new Error(`${res.status} ${res.statusText}: ${text.slice(0, 200)}`);
+async function postJson(url, body, retries = 3) {
+  const payload = JSON.stringify(body);
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: payload
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        throw new Error(`${res.status} ${res.statusText}: ${text.slice(0, 200)}`);
+      }
+      return res.json();
+    } catch (err) {
+      if (attempt < retries && (err.code === 'ECONNRESET' || err.code === 'ECONNREFUSED' || err.code === 'UND_ERR_SOCKET' || err.message.includes('ECONNRESET'))) {
+        const delay = attempt * 2000;
+        console.warn(`[Watcher] POST failed (${err.code || err.message}), retry ${attempt}/${retries} in ${delay}ms...`);
+        await new Promise(r => setTimeout(r, delay));
+        // If service crashed, wait for it to come back
+        try { await fetchJson(`${url.replace(/\/internal\/.*/, '')}/health`); } catch {
+          console.log(`[Watcher] Service unavailable, waiting...`);
+          await waitForService();
+        }
+        continue;
+      }
+      throw err;
+    }
   }
-  return res.json();
 }
 
 // --- File reading + parsing ---
@@ -199,6 +229,100 @@ async function waitForService() {
       return status;
     } catch {
       await new Promise(r => setTimeout(r, 2000));
+    }
+  }
+}
+
+// --- Reconciliation (warm restart) ---
+
+async function reconcile(project) {
+  const language = project.language;
+  const extensions = project.extensions || (language === 'cpp' ? ['.h', '.cpp'] : ['.as']);
+
+  for (const basePath of project.paths) {
+    // Step 1: Get stored mtimes from service
+    const endpoint = language === 'content'
+      ? `${SERVICE_URL}/internal/asset-mtimes?project=${encodeURIComponent(project.name)}`
+      : `${SERVICE_URL}/internal/file-mtimes?language=${encodeURIComponent(language)}&project=${encodeURIComponent(project.name)}`;
+
+    const storedMtimes = await fetchJson(endpoint);
+
+    // Step 2: Scan disk (stat only, no reads)
+    const collectStart = performance.now();
+    const diskFiles = collectFiles(basePath, project.name, extensions, language);
+    const diskMap = new Map(diskFiles.map(f => [f.path, f]));
+    const collectMs = (performance.now() - collectStart).toFixed(0);
+
+    // Step 3: Diff
+    const changed = [];
+    const deleted = [];
+
+    for (const f of diskFiles) {
+      const storedMtime = storedMtimes[f.path];
+      if (storedMtime === undefined || storedMtime !== f.mtime) {
+        changed.push(f);
+      }
+    }
+
+    for (const storedPath of Object.keys(storedMtimes)) {
+      if (!diskMap.has(storedPath)) {
+        deleted.push(storedPath);
+      }
+    }
+
+    if (changed.length === 0 && deleted.length === 0) {
+      console.log(`[Watcher] ${project.name}: up to date (${diskFiles.length} files, scan ${collectMs}ms)`);
+      continue;
+    }
+
+    console.log(`[Watcher] ${project.name}: ${changed.length} changed, ${deleted.length} deleted (of ${diskFiles.length} on disk, scan ${collectMs}ms)`);
+
+    // Step 4: Send deletes
+    if (deleted.length > 0) {
+      for (let i = 0; i < deleted.length; i += BATCH_SIZE) {
+        const batch = deleted.slice(i, i + BATCH_SIZE);
+        await postJson(`${SERVICE_URL}/internal/ingest`, { deletes: batch });
+      }
+    }
+
+    // Step 5: Re-ingest changed files
+    if (language === 'content') {
+      for (let i = 0; i < changed.length; i += BATCH_SIZE * 10) {
+        const batch = changed.slice(i, i + BATCH_SIZE * 10);
+        const assets = [];
+        for (const f of batch) {
+          try { assets.push(parseAsset(f.path, project)); } catch {}
+        }
+        if (assets.length > 0) {
+          await postJson(`${SERVICE_URL}/internal/ingest`, { assets });
+        }
+        if ((i + batch.length) % 5000 < BATCH_SIZE * 10) {
+          console.log(`[Watcher] ${project.name}: ${i + batch.length}/${changed.length} assets reconciled`);
+        }
+      }
+    } else {
+      for (let i = 0; i < changed.length; i += BATCH_SIZE) {
+        const batch = changed.slice(i, i + BATCH_SIZE);
+        const parsed = [];
+        for (let j = 0; j < batch.length; j += MAX_CONCURRENT) {
+          const concurrent = batch.slice(j, j + MAX_CONCURRENT);
+          const results = await Promise.all(concurrent.map(async (f) => {
+            try {
+              return await readAndParseSource(f.path, project, language);
+            } catch (err) {
+              console.warn(`[Watcher] Error parsing ${f.path}: ${err.message}`);
+              return null;
+            }
+          }));
+          parsed.push(...results.filter(Boolean));
+        }
+        if (parsed.length > 0) {
+          await postJson(`${SERVICE_URL}/internal/ingest`, { files: parsed });
+        }
+        if ((i + batch.length) % 500 < BATCH_SIZE) {
+          console.log(`[Watcher] ${project.name}: ${i + batch.length}/${changed.length} files reconciled`);
+        }
+      }
     }
   }
 }
@@ -364,14 +488,29 @@ async function main() {
 
   const status = await waitForService();
 
-  // Determine which languages need full scan
+  // Determine which languages need full scan vs reconciliation
   const configuredLanguages = [...new Set(config.projects.map(p => p.language))];
   const emptyLanguages = configuredLanguages.filter(lang => !status.counts[lang]);
+  const populatedLanguages = configuredLanguages.filter(lang => status.counts[lang]);
 
   if (emptyLanguages.length > 0) {
     await fullScan(emptyLanguages);
-  } else {
-    console.log('[Watcher] All languages populated, skipping full scan');
+  }
+
+  // Reconcile populated languages: compare disk mtimes vs DB, re-ingest only changes
+  if (populatedLanguages.length > 0) {
+    console.log(`[Watcher] Reconciling populated languages: ${populatedLanguages.join(', ')}`);
+    const reconcileStart = performance.now();
+    for (const project of config.projects) {
+      if (!populatedLanguages.includes(project.language)) continue;
+      try {
+        await reconcile(project);
+      } catch (err) {
+        console.error(`[Watcher] Reconcile failed for ${project.name}: ${err.message}`);
+      }
+    }
+    const reconcileS = ((performance.now() - reconcileStart) / 1000).toFixed(1);
+    console.log(`[Watcher] Reconciliation complete (${reconcileS}s)`);
   }
 
   startWatcher();

@@ -16,6 +16,23 @@ export class BackgroundIndexer {
     this.abortController = null;
   }
 
+  async fullRebuild() {
+    const languages = [...new Set(
+      this.config.projects.filter(p => p.language !== 'content').map(p => p.language)
+    )];
+
+    const stats = {};
+    for (const language of languages) {
+      await this.indexLanguageAsync(language);
+      stats[language] = this.database.getIndexStatus(language);
+    }
+
+    await this.indexAssets();
+    stats.content = this.database.getIndexStatus('content');
+
+    return stats;
+  }
+
   async indexLanguageAsync(language) {
     if (this.isIndexing) {
       console.log(`Already indexing, skipping ${language}`);

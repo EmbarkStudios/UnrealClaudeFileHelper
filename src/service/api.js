@@ -93,7 +93,51 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
         counts[row.language] = row.count;
         total += row.count;
       }
+      // Include asset counts so watcher knows content is populated
+      const assetCount = database.db.prepare("SELECT COUNT(*) as count FROM assets").get().count;
+      if (assetCount > 0) {
+        counts['content'] = assetCount;
+        total += assetCount;
+      }
       res.json({ counts, isEmpty: total === 0 });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get('/internal/file-mtimes', (req, res) => {
+    try {
+      const { language, project } = req.query;
+      if (!language || !project) {
+        return res.status(400).json({ error: 'language and project parameters required' });
+      }
+      const rows = database.db.prepare(
+        "SELECT path, mtime FROM files WHERE language = ? AND project = ?"
+      ).all(language, project);
+      const mtimes = {};
+      for (const row of rows) {
+        mtimes[row.path] = row.mtime;
+      }
+      res.json(mtimes);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get('/internal/asset-mtimes', (req, res) => {
+    try {
+      const { project } = req.query;
+      if (!project) {
+        return res.status(400).json({ error: 'project parameter required' });
+      }
+      const rows = database.db.prepare(
+        "SELECT path, mtime FROM assets WHERE project = ?"
+      ).all(project);
+      const mtimes = {};
+      for (const row of rows) {
+        mtimes[row.path] = row.mtime;
+      }
+      res.json(mtimes);
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
@@ -131,6 +175,13 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       // Process source files
       for (const file of files) {
         try {
+          // Mtime guard: skip re-processing if file hasn't changed
+          const existing = database.getFileByPath(file.path);
+          if (existing && existing.mtime === file.mtime) {
+            processed++;
+            continue;
+          }
+
           database.transaction(() => {
             const fileId = database.upsertFile(file.path, file.project, file.module, file.mtime, file.language);
             database.clearTypesForFile(fileId);

@@ -205,9 +205,13 @@ export class ZoektManager {
   }
 
   async _runIndexForProject(projectName, mirrorPath) {
+    const projectDir = join(mirrorPath, projectName);
+    // Skip projects with no mirror directory (e.g. config files, _assets)
+    if (!existsSync(projectDir)) {
+      return;
+    }
     return new Promise((resolve, reject) => {
       const startMs = performance.now();
-      const projectDir = join(mirrorPath, projectName);
       const args = [
         '-index', this.indexDir,
         '-parallelism', String(Math.max(1, Math.floor(this.parallelism / 2))),
