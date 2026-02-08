@@ -129,9 +129,13 @@ def check_wsl_screen() -> bool:
 
 
 def start_index_service() -> bool:
-    """Start the index service in WSL via screen."""
+    """Start the index service in WSL via Popen (fire-and-forget).
+
+    Uses Popen instead of screen because screen requires a TTY and
+    subprocess.run exits the wsl.exe process, killing child processes.
+    Popen keeps the wsl.exe process alive so node continues running.
+    """
     if sys.platform != "win32":
-        # Non-WSL: start directly
         try:
             subprocess.Popen(
                 ["node", str(_ROOT / "src" / "service" / "index.js")],
@@ -145,24 +149,34 @@ def start_index_service() -> bool:
 
     wsl_repo = "~/repos/unreal-index"
 
-    # Combine kill + start in a single WSL call so screen sessions share
-    # the same login context (separate wsl invocations can't see each
-    # other's screen sessions).
+    # Kill any existing service first
     try:
-        script = (
-            f"screen -S {_SCREEN_SESSION} -X quit 2>/dev/null; "
-            f"cd {wsl_repo} && "
-            f"screen -dmS {_SCREEN_SESSION} bash -c '"
-            f'export PATH="$HOME/local/node22/bin:$HOME/go/bin:/usr/local/go/bin:$PATH" && '
-            f"node src/service/index.js > /tmp/unreal-index.log 2>&1'"
-        )
-        result = subprocess.run(
-            ["wsl", "-d", _get_wsl_distro(), "--", "bash", "-c", script],
-            capture_output=True, text=True, timeout=15,
+        subprocess.run(
+            ["wsl", "-d", _get_wsl_distro(), "--", "bash", "-c",
+             f"kill $(lsof -ti:{read_port()}) 2>/dev/null; "
+             f"pkill -9 -f zoekt-webserver 2>/dev/null; "
+             f"pkill -9 -f zoekt-index 2>/dev/null"],
+            capture_output=True, timeout=10,
             creationflags=_CREATE_NO_WINDOW,
         )
-        return result.returncode == 0
     except (subprocess.TimeoutExpired, OSError):
+        pass
+
+    # Start via Popen — wsl.exe stays alive, keeping node running
+    try:
+        script = (
+            f"cd {wsl_repo} && "
+            f'export PATH="$HOME/local/node22/bin:$HOME/go/bin:/usr/local/go/bin:$PATH" && '
+            f"exec node src/service/index.js > /tmp/unreal-index.log 2>&1"
+        )
+        subprocess.Popen(
+            ["wsl", "-d", _get_wsl_distro(), "--", "bash", "-c", script],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            creationflags=_CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP,
+        )
+        return True
+    except (OSError, FileNotFoundError):
         return False
 
 
@@ -180,20 +194,32 @@ def stop_index_service() -> bool:
                 pass
         return False
 
-    # WSL: quit screen + kill port + kill zoekt
+    # Kill the node process via port, plus zoekt processes
     try:
-        subprocess.run(
+        subprocess.Popen(
             ["wsl", "-d", _get_wsl_distro(), "--", "bash", "-c",
-             f"screen -S {_SCREEN_SESSION} -X quit 2>/dev/null; "
              f"kill $(lsof -ti:{port}) 2>/dev/null; "
              f"pkill -9 -f zoekt-webserver 2>/dev/null; "
              f"pkill -9 -f zoekt-index 2>/dev/null"],
-            capture_output=True, timeout=10,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
             creationflags=_CREATE_NO_WINDOW,
         )
-        return True
-    except (subprocess.TimeoutExpired, OSError):
-        return False
+    except (OSError, FileNotFoundError):
+        pass
+
+    # Also kill any wsl.exe processes running the index service
+    pid = _find_pid_by_pattern("unreal-index")
+    if pid:
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/F"],
+                capture_output=True, timeout=5,
+                creationflags=_CREATE_NO_WINDOW,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+    return True
 
 
 # --- Watcher (native Windows) ---
