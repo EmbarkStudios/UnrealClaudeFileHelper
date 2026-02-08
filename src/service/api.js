@@ -1,14 +1,16 @@
 import express from 'express';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
+import { deflateSync } from 'zlib';
 import { rankResults, groupResultsByFile } from './search-ranking.js';
+import { contentHash } from './trigram.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SLOW_QUERY_MS = 100;
 
-export function createApi(database, indexer, queryPool = null, { zoektClient = null, zoektManager = null } = {}) {
+export function createApi(database, indexer, queryPool = null, { zoektClient = null, zoektManager = null, zoektMirror = null } = {}) {
   const app = express();
-  app.use(express.json());
+  app.use(express.json({ limit: '50mb' }));
   app.use(express.static(join(__dirname, '..', '..', 'public')));
 
   // Compute common path prefix for all indexed files (strip from responses)
@@ -76,6 +78,124 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       response.zoekt = zoektManager.getStatus();
     }
     res.json(response);
+  });
+
+  // --- Internal endpoints (watcher → service communication) ---
+
+  app.get('/internal/status', (req, res) => {
+    try {
+      const rows = database.db.prepare(
+        "SELECT language, COUNT(*) as count FROM files WHERE language != 'asset' GROUP BY language"
+      ).all();
+      const counts = {};
+      let total = 0;
+      for (const row of rows) {
+        counts[row.language] = row.count;
+        total += row.count;
+      }
+      res.json({ counts, isEmpty: total === 0 });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/internal/ingest', (req, res) => {
+    try {
+      const { files = [], assets = [], deletes = [] } = req.body;
+      const affectedProjects = new Set();
+      let processed = 0;
+      const errors = [];
+
+      // Process deletes
+      for (const filePath of deletes) {
+        try {
+          // Try source file first, then asset
+          if (database.deleteFile(filePath)) {
+            processed++;
+          } else if (database.deleteAsset(filePath)) {
+            affectedProjects.add('_assets');
+            processed++;
+          }
+          // Remove from mirror
+          if (zoektMirror && zoektManager) {
+            try {
+              const relativePath = zoektMirror._toRelativePath(filePath);
+              zoektManager.deleteWslMirrorFile(relativePath);
+            } catch {}
+          }
+        } catch (err) {
+          errors.push({ path: filePath, error: err.message });
+        }
+      }
+
+      // Process source files
+      for (const file of files) {
+        try {
+          database.transaction(() => {
+            const fileId = database.upsertFile(file.path, file.project, file.module, file.mtime, file.language);
+            database.clearTypesForFile(fileId);
+
+            if (file.types && file.types.length > 0) {
+              database.insertTypes(fileId, file.types);
+            }
+
+            if (file.members && file.members.length > 0) {
+              const typeIds = database.getTypeIdsForFile(fileId);
+              const nameToId = new Map(typeIds.map(t => [t.name, t.id]));
+              const resolvedMembers = file.members.map(m => ({
+                typeId: nameToId.get(m.ownerName) || null,
+                name: m.name,
+                memberKind: m.memberKind,
+                line: m.line,
+                isStatic: m.isStatic,
+                specifiers: m.specifiers
+              }));
+              database.insertMembers(fileId, resolvedMembers);
+            }
+
+            if (file.content && file.content.length <= 500000) {
+              const compressed = deflateSync(file.content);
+              const hash = contentHash(file.content);
+              database.upsertFileContent(fileId, compressed, hash);
+
+              // Write to Zoekt mirror
+              if (zoektMirror && zoektManager) {
+                try {
+                  const relativePath = zoektMirror._toRelativePath(file.path);
+                  zoektManager.updateWslMirrorFile(relativePath, file.content);
+                } catch {}
+              }
+            }
+          });
+
+          affectedProjects.add(file.project);
+          processed++;
+        } catch (err) {
+          errors.push({ path: file.path, error: err.message });
+        }
+      }
+
+      // Process assets
+      if (assets.length > 0) {
+        try {
+          database.upsertAssetBatch(assets);
+          database.indexAssetContent(assets);
+          affectedProjects.add('_assets');
+          processed += assets.length;
+        } catch (err) {
+          errors.push({ type: 'assets', error: err.message });
+        }
+      }
+
+      // Trigger Zoekt reindex for affected projects
+      if (zoektManager && affectedProjects.size > 0) {
+        zoektManager.triggerReindex(processed, affectedProjects);
+      }
+
+      res.json({ processed, errors: errors.length > 0 ? errors : undefined });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
   });
 
   app.get('/status', (req, res) => {

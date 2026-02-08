@@ -243,7 +243,8 @@ class UnrealIndexService {
 
     const app = createApi(this.database, this, this.queryPool, {
       zoektClient: this.zoektClient,
-      zoektManager: this.zoektManager
+      zoektManager: this.zoektManager,
+      zoektMirror: this.zoektMirror
     });
 
     this.server = app.listen(port, host, () => {
