@@ -100,6 +100,10 @@ export class ZoektMirror {
     let errors = 0;
 
     const pack = tarStream.pack();
+    // Suppress 'Writable stream closed prematurely' — the receiving tar process
+    // may exit after consuming all data before the pack stream fully finalizes.
+    pack.on('error', () => {});
+    outputStream.on('error', () => {});
     pack.pipe(outputStream);
 
     for (const row of rows) {

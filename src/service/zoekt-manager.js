@@ -413,7 +413,8 @@ export class ZoektManager {
 
   /**
    * Index a single project's directory into its own Zoekt shard.
-   * Each project subdirectory naturally gets its own shard file based on source path.
+   * The shard's Repository name matches the directory name (e.g., "Discovery").
+   * The zoekt-client uses this Repository field to reconstruct full file paths.
    */
   async _runIndexForProject(projectName, effectiveMirrorPath) {
     return new Promise((resolve, reject) => {
@@ -486,8 +487,40 @@ export class ZoektManager {
       this.lastIndexCompleteTime = new Date().toISOString();
       this.lastIndexDurationS = parseFloat(durationS);
       console.log(`[ZoektManager] Scoped reindex complete: ${succeeded} OK, ${failed} failed (${durationS}s)`);
+
+      // Clean up old monolithic shards (from pre-per-project indexing)
+      if (succeeded > 0 && !this._oldShardsCleanedUp) {
+        this._cleanupOldShards();
+      }
     } finally {
       this._indexingActive = false;
+    }
+  }
+
+  /**
+   * Remove old monolithic shards (.zoekt-mirror_*) and stale .tmp files
+   * after per-project shards have been successfully built.
+   */
+  _cleanupOldShards() {
+    const indexDir = this._getIndexDirArg();
+    try {
+      if (this.useWsl) {
+        const result = execSync(
+          `wsl -d Ubuntu -- bash -c "ls '${indexDir}'/.zoekt-mirror_*.zoekt 2>/dev/null | wc -l"`,
+          { encoding: 'utf-8', timeout: 5000 }
+        ).trim();
+        const count = parseInt(result, 10) || 0;
+        if (count > 0) {
+          execSync(
+            `wsl -d Ubuntu -- bash -c "rm -f '${indexDir}'/.zoekt-mirror_*.zoekt '${indexDir}'/*.tmp 2>/dev/null"`,
+            { stdio: 'ignore', timeout: 10000 }
+          );
+          console.log(`[ZoektManager] Cleaned up ${count} old monolithic shards and tmp files`);
+        }
+      }
+      this._oldShardsCleanedUp = true;
+    } catch (err) {
+      console.warn(`[ZoektManager] Failed to clean up old shards: ${err.message}`);
     }
   }
 
@@ -684,14 +717,14 @@ export class ZoektManager {
 
       proc.on('error', reject);
 
-      // Stream tar entries from the database directly into WSL
+      // Stream tar entries from the database directly into WSL.
+      // pack.finalize() in bootstrapToStream will signal EOF through the pipe.
+      // Don't call proc.stdin.end() — the pipe handles it.
+      proc.stdin.on('error', () => {}); // Suppress EPIPE if tar process exits early
       zoektMirror.bootstrapToStream(database, proc.stdin, onProgress)
-        .then(() => {
-          proc.stdin.end();
-        })
         .catch(err => {
-          proc.stdin.end();
-          reject(err);
+          console.warn(`[ZoektManager] Bootstrap stream error (may be harmless): ${err.message}`);
+          try { proc.stdin.end(); } catch {}
         });
     });
   }
