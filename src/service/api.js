@@ -145,12 +145,18 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       if (!language || !project) {
         return res.status(400).json({ error: 'language and project parameters required' });
       }
-      const rows = database.db.prepare(
-        "SELECT path, mtime FROM files WHERE language = ? AND project = ?"
-      ).all(language, project);
+      // For text-searchable languages, report null mtime for files missing content
+      // so the watcher re-ingests them (self-healing for previously content-less files)
+      const needsContent = ['angelscript', 'cpp', 'config'].includes(language);
+      const sql = needsContent
+        ? `SELECT f.path, f.mtime, fc.file_id as has_content
+           FROM files f LEFT JOIN file_content fc ON f.id = fc.file_id
+           WHERE f.language = ? AND f.project = ?`
+        : "SELECT path, mtime FROM files WHERE language = ? AND project = ?";
+      const rows = database.db.prepare(sql).all(language, project);
       const mtimes = {};
       for (const row of rows) {
-        mtimes[row.path] = row.mtime;
+        mtimes[row.path] = (needsContent && !row.has_content) ? null : row.mtime;
       }
       res.json(mtimes);
     } catch (err) {
@@ -210,10 +216,14 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       for (const file of files) {
         try {
           // Mtime guard: skip re-processing if file hasn't changed
+          // Exception: if file has content but no stored content yet, re-process
           const existing = database.getFileByPath(file.path);
           if (existing && existing.mtime === file.mtime) {
-            processed++;
-            continue;
+            const hasStoredContent = file.content ? !!database.getFileContent(existing.id) : true;
+            if (hasStoredContent) {
+              processed++;
+              continue;
+            }
           }
 
           database.transaction(() => {
@@ -238,7 +248,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
               database.insertMembers(fileId, resolvedMembers);
             }
 
-            if (file.content && file.content.length <= 500000) {
+            if (file.content && file.content.length <= 2000000) {
               const compressed = deflateSync(file.content);
               const hash = contentHash(file.content);
               database.upsertFileContent(fileId, compressed, hash);
@@ -699,6 +709,10 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
 
     if (project && !database.projectExists(project)) {
       return res.status(400).json({ error: `Unknown project: ${project}` });
+    }
+
+    if (language === 'blueprint') {
+      return res.status(400).json({ error: 'Blueprint content is binary and not text-searchable. Use find_type or find_asset to search blueprints by name.' });
     }
 
     const grepStartMs = performance.now();

@@ -640,9 +640,9 @@ export class IndexDatabase {
     const { fuzzy = false, project = null, language = null, kind = null, maxResults = 10, includeAssets } = options;
 
     const includeSourceTypes = !language || language === 'all' || language === 'angelscript' || language === 'cpp';
-    // For fuzzy mode, assets are opt-in (default false). For exact mode, default true.
+    // For fuzzy mode, assets are opt-in (default false) UNLESS language is explicitly "blueprint".
     const assetsDefault = !fuzzy;
-    const includeBlueprints = (includeAssets !== undefined ? includeAssets : assetsDefault)
+    const includeBlueprints = (includeAssets !== undefined ? includeAssets : (language === 'blueprint' || assetsDefault))
       && (!language || language === 'all' || language === 'blueprint');
 
     if (!fuzzy) {
@@ -905,21 +905,29 @@ export class IndexDatabase {
         results.push(...this.db.prepare(sql).all(...params));
       }
 
-      if (includeBlueprints && results.length < maxResults) {
+      if (includeBlueprints) {
+        // Build asset lookup names: both prefixed ("AActor") and stripped ("Actor")
+        // because uasset parser stores parent_class without UE type prefix
+        const assetNames = [parentClass];
+        const stripped = parentClass.replace(/^[AUFESI](?=[A-Z])/, '');
+        if (stripped !== parentClass) assetNames.push(stripped);
+        const assetPlaceholders = assetNames.map(() => '?').join(',');
+
         let assetSql = `
           SELECT name, content_path as path, project, parent_class as parent, asset_class,
                  'blueprint' as language, 'class' as kind, folder as module, 0 as line
           FROM assets
-          WHERE parent_class = ? AND asset_class IS NOT NULL
+          WHERE parent_class IN (${assetPlaceholders}) AND asset_class IS NOT NULL
         `;
-        const assetParams = [parentClass];
+        const assetParams = [...assetNames];
         if (project) { assetSql += ' AND project = ?'; assetParams.push(project); }
         assetSql += ' LIMIT ?';
-        assetParams.push(maxResults - results.length);
+        assetParams.push(maxResults);
         results.push(...this.db.prepare(assetSql).all(...assetParams));
       }
 
-      return { results, truncated: false, parentFound };
+      if (results.length > maxResults) results.length = maxResults;
+      return { results, truncated: results.length >= maxResults, parentFound };
     }
 
     // Phase 1: Traverse full inheritance tree WITHOUT project/language filter
@@ -936,9 +944,19 @@ export class IndexDatabase {
         WHERE t.parent IN (${placeholders}) AND t.kind IN ('class', 'struct', 'interface')
       `).all(...frontier);
 
+      // Build asset lookup names: both prefixed and stripped variants
+      // because uasset parser stores parent_class without UE type prefix (e.g., "Actor" not "AActor")
+      const assetNames = [];
+      for (const name of frontier) {
+        assetNames.push(name);
+        const stripped = name.replace(/^[AUFESI](?=[A-Z])/, '');
+        if (stripped !== name) assetNames.push(stripped);
+      }
+      const assetPlaceholders = assetNames.map(() => '?').join(',');
+
       const assetChildren = this.db.prepare(`
-        SELECT name FROM assets WHERE parent_class IN (${placeholders}) AND asset_class IS NOT NULL
-      `).all(...frontier);
+        SELECT name FROM assets WHERE parent_class IN (${assetPlaceholders}) AND asset_class IS NOT NULL
+      `).all(...assetNames);
 
       const nextFrontier = [];
       for (const child of directChildren) {
@@ -983,7 +1001,7 @@ export class IndexDatabase {
       results.push(...this.db.prepare(sql).all(...params));
     }
 
-    if (includeBlueprints && results.length < maxResults) {
+    if (includeBlueprints) {
       const placeholders = names.map(() => '?').join(',');
       let assetSql = `
         SELECT name, content_path as path, project, parent_class as parent, asset_class,
@@ -994,11 +1012,12 @@ export class IndexDatabase {
       const assetParams = [...names];
       if (project) { assetSql += ' AND project = ?'; assetParams.push(project); }
       assetSql += ' LIMIT ?';
-      assetParams.push(maxResults - results.length);
+      assetParams.push(maxResults);
       results.push(...this.db.prepare(assetSql).all(...assetParams));
     }
 
     const totalChildren = children.size;
+    if (results.length > maxResults) results.length = maxResults;
     const truncated = results.length >= maxResults;
 
     return { results, truncated, totalChildren, parentFound };
@@ -1032,6 +1051,24 @@ export class IndexDatabase {
     const truncated = results.length > maxResults;
 
     const files = [...new Set(results.map(r => r.path))];
+
+    // If no types found (e.g., config files have no types), list files directly
+    if (results.length === 0) {
+      let filesSql = "SELECT path, project, language FROM files WHERE (module = ? OR module LIKE ?) AND language != 'asset'";
+      const filesParams = [modulePath, `${modulePath}.%`];
+      if (project) { filesSql += ' AND project = ?'; filesParams.push(project); }
+      if (language && language !== 'all') { filesSql += ' AND language = ?'; filesParams.push(language); }
+      filesSql += ' LIMIT ?';
+      filesParams.push(maxResults + 1);
+      const fileResults = this.db.prepare(filesSql).all(...filesParams);
+      return {
+        module: modulePath,
+        types: [],
+        files: fileResults.slice(0, maxResults).map(f => f.path),
+        truncated: fileResults.length > maxResults,
+        totalFiles: fileResults.length
+      };
+    }
 
     return {
       module: modulePath,

@@ -223,7 +223,7 @@ class UnrealIndexBridge {
           },
           {
             name: 'unreal_find_member',
-            description: 'Find functions, properties, or enum values by name. Search across class/struct members in AngelScript and C++. Use this to find method implementations, property definitions, or enum values.',
+            description: 'Find functions, properties, or enum values by name. Search across class/struct members in AngelScript and C++. Use this to find method implementations, property definitions, or enum values. Note: Blueprint members are not available (binary format) — use unreal_find_type or unreal_find_asset for blueprint classes.',
             inputSchema: {
               type: 'object',
               properties: {

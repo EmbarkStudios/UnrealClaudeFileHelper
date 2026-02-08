@@ -108,7 +108,7 @@ async function fetchJson(url, retries = 3) {
       if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
       return res.json();
     } catch (err) {
-      if (attempt < retries && (err.code === 'ECONNRESET' || err.code === 'ECONNREFUSED' || err.message.includes('ECONNRESET'))) {
+      if (attempt < retries && (err.code === 'ECONNRESET' || err.code === 'ECONNREFUSED' || err.message.includes('ECONNRESET') || err.message.includes('fetch failed'))) {
         const delay = attempt * 2000;
         console.warn(`[Watcher] GET failed (${err.code || err.message}), retry ${attempt}/${retries} in ${delay}ms...`);
         await new Promise(r => setTimeout(r, delay));
@@ -162,7 +162,8 @@ async function readAndParseSource(filePath, project, language) {
   const module = deriveModule(relativePath, project.name);
 
   if (language === 'config') {
-    return { path: filePath, project: project.name, module, mtime, language, relativePath, types: [], members: [] };
+    const content = await readFile(filePath, 'utf-8');
+    return { path: filePath, project: project.name, module, mtime, language, relativePath, content, types: [], members: [] };
   }
 
   const content = await readFile(filePath, 'utf-8');
