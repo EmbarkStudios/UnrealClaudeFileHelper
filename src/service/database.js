@@ -563,6 +563,8 @@ export class IndexDatabase {
       }
     }
 
+    const searchTrigrams = nameLower.length >= 3 ? new Set(extractTrigrams(nameLower)) : null;
+
     const scored = candidates.map(row => {
       const candidateLower = row.name.toLowerCase();
       let score = 0;
@@ -570,13 +572,24 @@ export class IndexDatabase {
       if (candidateLower === nameLower) score = 1.0;
       else if (candidateLower.startsWith(nameLower)) score = 0.95;
       else if (candidateLower.includes(nameLower)) score = 0.85;
-      else score = 0.5;
+      else if (nameLower.includes(candidateLower)) score = 0.8;
+      else if (searchTrigrams) {
+        // Trigram similarity: Jaccard coefficient
+        const candidateTrigrams = new Set(extractTrigrams(candidateLower));
+        let intersection = 0;
+        for (const t of searchTrigrams) {
+          if (candidateTrigrams.has(t)) intersection++;
+        }
+        const union = searchTrigrams.size + candidateTrigrams.size - intersection;
+        score = union > 0 ? (intersection / union) * 0.7 : 0;
+      }
 
       return { ...row, score };
     });
 
     scored.sort((a, b) => b.score - a.score);
-    return scored.slice(0, maxResults).map(({ id, ...rest }) => rest);
+    const MIN_SCORE = 0.15;
+    return scored.filter(r => r.score >= MIN_SCORE).slice(0, maxResults).map(({ id, ...rest }) => rest);
   }
 
   listModules(parent = '', options = {}) {

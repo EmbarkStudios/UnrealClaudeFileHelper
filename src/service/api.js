@@ -14,27 +14,52 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
   app.use(express.json({ limit: '50mb' }));
   app.use(express.static(join(__dirname, '..', '..', 'public')));
 
-  // Compute common path prefix for all indexed files (strip from responses)
-  let pathPrefix = '';
+  // Compute per-project path prefixes (strip from responses to match Zoekt mirror paths)
+  const projectPrefixes = new Map();
+  let globalPrefix = '';
   try {
-    const row = database.db.prepare(
+    const rows = database.db.prepare(
+      "SELECT project, MIN(path) as min_path, MAX(path) as max_path FROM files WHERE language NOT IN ('content', 'asset') GROUP BY project"
+    ).all();
+    for (const row of rows) {
+      if (row.min_path && row.max_path) {
+        const a = row.min_path.replace(/\\/g, '/');
+        const b = row.max_path.replace(/\\/g, '/');
+        let prefix = a;
+        while (prefix && !b.startsWith(prefix)) {
+          prefix = prefix.slice(0, prefix.lastIndexOf('/'));
+        }
+        if (prefix && !prefix.endsWith('/')) prefix += '/';
+        if (prefix) projectPrefixes.set(row.project, prefix);
+      }
+    }
+    // Global fallback: common prefix across all projects
+    const all = database.db.prepare(
       "SELECT MIN(path) as min_path, MAX(path) as max_path FROM files WHERE language NOT IN ('content', 'asset')"
     ).get();
-    if (row && row.min_path && row.max_path) {
-      const a = row.min_path.replace(/\\/g, '/');
-      const b = row.max_path.replace(/\\/g, '/');
-      pathPrefix = a;
-      while (pathPrefix && !b.startsWith(pathPrefix)) {
-        pathPrefix = pathPrefix.slice(0, pathPrefix.lastIndexOf('/'));
+    if (all && all.min_path && all.max_path) {
+      const a = all.min_path.replace(/\\/g, '/');
+      const b = all.max_path.replace(/\\/g, '/');
+      globalPrefix = a;
+      while (globalPrefix && !b.startsWith(globalPrefix)) {
+        globalPrefix = globalPrefix.slice(0, globalPrefix.lastIndexOf('/'));
       }
-      if (pathPrefix && !pathPrefix.endsWith('/')) pathPrefix += '/';
+      if (globalPrefix && !globalPrefix.endsWith('/')) globalPrefix += '/';
     }
   } catch {}
 
-  function cleanPath(v) {
+  function cleanPath(v, project) {
     if (typeof v !== 'string') return v;
     const normalized = v.replace(/\\/g, '/');
-    return pathPrefix && normalized.startsWith(pathPrefix) ? normalized.slice(pathPrefix.length) : normalized;
+    // Per-project prefix: strip and prepend project name to match Zoekt mirror paths
+    if (project) {
+      const prefix = projectPrefixes.get(project);
+      if (prefix && normalized.startsWith(prefix)) {
+        return project + '/' + normalized.slice(prefix.length);
+      }
+    }
+    // Fallback to global prefix
+    return globalPrefix && normalized.startsWith(globalPrefix) ? normalized.slice(globalPrefix.length) : normalized;
   }
 
   function hasRegexMeta(s) {
@@ -355,7 +380,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       };
 
       const results = await poolQuery('findTypeByName', [name, opts]);
-      results.forEach(r => { if (r.path) r.path = cleanPath(r.path); });
+      results.forEach(r => { if (r.path) r.path = cleanPath(r.path, r.project); });
       res.json({ results });
     } catch (err) {
       res.status(500).json({ error: err.message });
@@ -378,7 +403,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       };
 
       const result = await poolQuery('findChildrenOf', [parent, opts]);
-      if (result.results) result.results.forEach(r => { if (r.path) r.path = cleanPath(r.path); });
+      if (result.results) result.results.forEach(r => { if (r.path) r.path = cleanPath(r.path, r.project); });
       res.json(result);
     } catch (err) {
       res.status(500).json({ error: err.message });
@@ -400,7 +425,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       };
 
       const result = await poolQuery('browseModule', [module, opts]);
-      if (result.types) result.types.forEach(r => { if (r.path) r.path = cleanPath(r.path); });
+      if (result.types) result.types.forEach(r => { if (r.path) r.path = cleanPath(r.path, r.project); });
       if (result.files) result.files = result.files.map(f => cleanPath(f));
       res.json(result);
     } catch (err) {
@@ -423,7 +448,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       };
 
       const results = await poolQuery('findFileByName', [filename, opts]);
-      results.forEach(r => { if (r.file) r.file = cleanPath(r.file); });
+      results.forEach(r => { if (r.file) r.file = cleanPath(r.file, r.project); });
       res.json({ results });
     } catch (err) {
       res.status(500).json({ error: err.message });
@@ -485,7 +510,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       };
 
       const results = await poolQuery('findMember', [name, opts]);
-      results.forEach(r => { if (r.path) r.path = cleanPath(r.path); });
+      results.forEach(r => { if (r.path) r.path = cleanPath(r.path, r.project); });
       res.json({ results });
     } catch (err) {
       res.status(500).json({ error: err.message });

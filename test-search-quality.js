@@ -292,7 +292,7 @@ test('searchSymbols builds correct query with sym: prefix', async () => {
   assert(capturedQuery.includes('-file:^_assets/'), 'should exclude assets');
 });
 
-test('searchSymbols applies project filter', async () => {
+test('searchSymbols applies project filter with exact repo match', async () => {
   const client = new ZoektClient(9999);
   let capturedQuery = '';
   client._executeQuery = async (query) => {
@@ -300,7 +300,8 @@ test('searchSymbols applies project filter', async () => {
     return { results: [], totalMatches: 0, matchedFiles: 0, filesSearched: 0, searchEngine: 'zoekt', zoektDurationMs: 0 };
   };
   await client.searchSymbols('Foo', { project: 'MyProject' });
-  assert(capturedQuery.includes('file:MyProject/'), `should have project filter, got: ${capturedQuery}`);
+  assert(capturedQuery.includes('repo:^MyProject$'), `should have exact repo filter, got: ${capturedQuery}`);
+  assert(!capturedQuery.includes('file:MyProject/'), `should not use file: for project filter, got: ${capturedQuery}`);
 });
 
 test('searchSymbols applies language filter', async () => {

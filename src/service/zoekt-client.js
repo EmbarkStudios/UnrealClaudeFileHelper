@@ -37,8 +37,8 @@ export class ZoektClient {
 
     // Asset query: only _assets/ paths or repo, no language filter, no context lines
     const parts = [caseSensitive ? 'case:yes' : 'case:no'];
-    if (project) parts.push(`file:${project}/`);
-    parts.push('(file:^_assets/ or repo:_assets)');
+    if (project) parts.push(`repo:^${project}$`);
+    parts.push('(file:^_assets/ or repo:^_assets$)');
     if (this._hasRegexMeta(pattern)) {
       parts.push(`regex:${pattern}`);
     } else {
@@ -93,9 +93,9 @@ export class ZoektClient {
       parts.push(`file:${LANGUAGE_EXTENSIONS[language]}`);
     }
     parts.push('-file:^_assets/');
-    parts.push('-repo:_assets');
+    parts.push('-repo:^_assets$');
     if (project) {
-      parts.push(`(file:${project}/ or repo:${project})`);
+      parts.push(`repo:^${project}$`);
     }
 
     return this._executeQuery(parts.join(' '), maxResults, 0);
@@ -107,7 +107,7 @@ export class ZoektClient {
       Opts: {
         MaxDocDisplayCount: maxResults,
         NumContextLines: contextLines,
-        TotalMaxMatchCount: maxResults * 10,
+        TotalMaxMatchCount: Math.max(maxResults * 50, 1000),
         ChunkMatches: false
       }
     };
@@ -182,13 +182,13 @@ export class ZoektClient {
     // Supports both monolithic shards (file path prefix) and per-project shards (repo name).
     if (excludeAssets) {
       parts.push('-file:^_assets/');
-      parts.push('-repo:_assets');
+      parts.push('-repo:^_assets$');
     }
 
-    // Project filter — supports both monolithic (file:prefix) and per-project shards (repo:name).
-    // Use OR so it matches either shard type.
+    // Project filter — per-project shards use repo name as project name.
+    // Use exact match to prevent prefix collisions (e.g., Engine vs EnginePlugins).
     if (project) {
-      parts.push(`(file:${project}/ or repo:${project})`);
+      parts.push(`repo:^${project}$`);
     }
 
     // The search pattern itself — use regex if it contains regex metacharacters
