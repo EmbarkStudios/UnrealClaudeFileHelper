@@ -677,6 +677,10 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
 
     const grepStartMs = performance.now();
 
+    // Over-fetch from Zoekt when multi-word post-filter will discard many results
+    const isMultiWord = !hasRegexMeta(pattern) && pattern.includes(' ');
+    const zoektMaxResults = isMultiWord ? Math.max(maxResults * 5, 100) : maxResults;
+
     try {
       // Source + asset search via Zoekt in parallel
       const [sourceResult, assetResult] = await Promise.all([
@@ -684,7 +688,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
           project: project || null,
           language: (language && language !== 'all') ? language : null,
           caseSensitive,
-          maxResults,
+          maxResults: zoektMaxResults,
           contextLines
         }),
         zoektClient.searchAssets(pattern, {
@@ -698,14 +702,18 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       let results = sourceResult.results.map(r => ({ ...r, file: cleanPath(r.file) }));
 
       // Post-filter: Zoekt tokenizes multi-word queries, so "class Foo" matches
-      // lines with "class" OR "Foo" separately. For literal patterns, require the
-      // full string to appear in the match line.
-      if (!hasRegexMeta(pattern)) {
-        const needle = caseSensitive ? pattern : pattern.toLowerCase();
-        results = results.filter(r => {
-          const hay = caseSensitive ? r.match : r.match.toLowerCase();
-          return hay.includes(needle);
-        });
+      // lines with "class" OR "Foo" separately. For multi-word literal patterns,
+      // require ALL words to appear in the match line (not necessarily adjacent,
+      // since "class MYAPI ADiscoveryGameMode" has words in between).
+      if (!hasRegexMeta(pattern) && pattern.includes(' ')) {
+        const words = pattern.split(/\s+/).filter(Boolean);
+        if (words.length > 1) {
+          const needles = words.map(w => caseSensitive ? w : w.toLowerCase());
+          results = results.filter(r => {
+            const hay = caseSensitive ? r.match : r.match.toLowerCase();
+            return needles.every(n => hay.includes(n));
+          });
+        }
       }
 
       const uniquePaths = [...new Set(results.map(r => r.file))];
