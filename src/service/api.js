@@ -651,7 +651,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
   // --- Content search (grep) ---
 
   app.get('/grep', async (req, res) => {
-    const { pattern, project, language, caseSensitive: cs, maxResults: mr, contextLines: cl, grouped } = req.query;
+    const { pattern, project, language, caseSensitive: cs, maxResults: mr, contextLines: cl, grouped, includeAssets: ia } = req.query;
 
     if (!pattern) {
       return res.status(400).json({ error: 'pattern parameter required' });
@@ -664,6 +664,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
     const caseSensitive = cs !== 'false';
     const maxResults = parseInt(mr, 10) || 20;
     const contextLines = cl !== undefined ? parseInt(cl, 10) : 0;
+    const includeAssets = ia === 'true';
 
     try {
       new RegExp(pattern, caseSensitive ? '' : 'i');
@@ -682,21 +683,18 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
     const zoektMaxResults = isMultiWord ? Math.max(maxResults * 5, 100) : maxResults;
 
     try {
-      // Source + asset search via Zoekt in parallel
-      const [sourceResult, assetResult] = await Promise.all([
-        zoektClient.search(pattern, {
-          project: project || null,
-          language: (language && language !== 'all') ? language : null,
-          caseSensitive,
-          maxResults: zoektMaxResults,
-          contextLines
-        }),
-        zoektClient.searchAssets(pattern, {
-          project: project || null,
-          caseSensitive,
-          maxResults: 20
-        })
-      ]);
+      // Source search + optional asset search via Zoekt
+      const sourcePromise = zoektClient.search(pattern, {
+        project: project || null,
+        language: (language && language !== 'all') ? language : null,
+        caseSensitive,
+        maxResults: zoektMaxResults,
+        contextLines
+      });
+      const assetPromise = includeAssets
+        ? zoektClient.searchAssets(pattern, { project: project || null, caseSensitive, maxResults: 20 })
+        : Promise.resolve({ results: [] });
+      const [sourceResult, assetResult] = await Promise.all([sourcePromise, assetPromise]);
 
       // Clean paths and rank results
       let results = sourceResult.results.map(r => ({ ...r, file: cleanPath(r.file) }));
@@ -716,6 +714,8 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
         }
       }
 
+      const postFilterCount = results.length;
+
       const uniquePaths = [...new Set(results.map(r => r.file))];
       const mtimeMap = database.getFilesMtime(uniquePaths);
       results = rankResults(results, mtimeMap);
@@ -728,8 +728,8 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       if (grouped !== 'false') {
         const groupedResponse = {
           results: groupResultsByFile(results),
-          totalMatches: sourceResult.totalMatches,
-          truncated: sourceResult.results.length < sourceResult.totalMatches,
+          totalMatches: postFilterCount,
+          truncated: postFilterCount > maxResults,
           grouped: true
         };
         if (assetResult.results.length > 0) groupedResponse.assets = assetResult.results;
@@ -738,8 +738,8 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
 
       const response = {
         results,
-        totalMatches: sourceResult.totalMatches,
-        truncated: sourceResult.results.length < sourceResult.totalMatches
+        totalMatches: postFilterCount,
+        truncated: postFilterCount > maxResults
       };
       if (assetResult.results.length > 0) {
         response.assets = assetResult.results;

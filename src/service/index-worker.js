@@ -77,14 +77,8 @@ async function processFiles() {
           });
         }
 
-        for (const ns of parsed.namespaces || []) {
-          types.push({
-            name: ns.name,
-            kind: 'namespace',
-            parent: null,
-            line: ns.line
-          });
-        }
+        // Note: AngelScript namespaces are scope qualifiers, not types.
+        // The parser recognizes them for brace tracking but they are not indexed.
       }
 
       // C++ delegates from DECLARE_*DELEGATE* macros

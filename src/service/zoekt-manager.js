@@ -299,15 +299,37 @@ export class ZoektManager {
   }
 
   _cleanupOldShards() {
+    if (!this.mirrorRoot) return;
     try {
+      const validProjects = new Set(this._listMirrorProjects(this.mirrorRoot));
       const files = readdirSync(this.indexDir);
-      const oldShards = files.filter(f => f.startsWith('.zoekt-mirror_') && f.endsWith('.zoekt'));
-      const tmpFiles = files.filter(f => f.endsWith('.tmp'));
-      for (const f of [...oldShards, ...tmpFiles]) {
-        try { unlinkSync(join(this.indexDir, f)); } catch {}
+      let removed = 0;
+
+      for (const f of files) {
+        // Remove tmp files
+        if (f.endsWith('.tmp')) {
+          try { unlinkSync(join(this.indexDir, f)); removed++; } catch {}
+          continue;
+        }
+        // Remove old monolithic shards
+        if (f.startsWith('.zoekt-mirror_') && f.endsWith('.zoekt')) {
+          try { unlinkSync(join(this.indexDir, f)); removed++; } catch {}
+          continue;
+        }
+        // Remove orphaned project shards (project no longer in mirror)
+        if (f.endsWith('.zoekt')) {
+          const m = f.match(/^(.+?)_v\d+\.\d+\.zoekt$/);
+          if (m) {
+            const shardProject = decodeURIComponent(m[1]);
+            if (!validProjects.has(shardProject)) {
+              try { unlinkSync(join(this.indexDir, f)); removed++; } catch {}
+            }
+          }
+        }
       }
-      if (oldShards.length > 0) {
-        console.log(`[ZoektManager] Cleaned up ${oldShards.length} old monolithic shards and ${tmpFiles.length} tmp files`);
+
+      if (removed > 0) {
+        console.log(`[ZoektManager] Cleaned up ${removed} stale/orphaned shard files`);
       }
       this._oldShardsCleanedUp = true;
     } catch (err) {
@@ -321,6 +343,11 @@ export class ZoektManager {
     if (this._indexingActive || this.indexProcess) {
       console.log('[ZoektManager] Index already running, skipping...');
       return;
+    }
+
+    // Remove orphaned shards before indexing
+    if (!this._oldShardsCleanedUp) {
+      this._cleanupOldShards();
     }
 
     const projects = this._listMirrorProjects(mirrorRoot);

@@ -298,7 +298,7 @@ class UnrealIndexBridge {
           },
           {
             name: 'unreal_grep',
-            description: 'Search file contents for a pattern (regex or literal string). Also searches asset names and paths (maps, blueprints, materials, etc.) and returns matches in a separate "assets" section. Scoped to indexed projects. Use for finding usages, string references, variable assignments, asset names, or any content pattern that structural type/member lookups cannot find.',
+            description: 'Search file contents for a pattern (regex or literal string). Scoped to indexed projects. Use for finding usages, string references, variable assignments, or any content pattern that structural type/member lookups cannot find. Set includeAssets=true to also search asset names/paths.',
             inputSchema: {
               type: 'object',
               properties: {
@@ -323,13 +323,18 @@ class UnrealIndexBridge {
                 },
                 maxResults: {
                   type: 'number',
-                  default: 50,
+                  default: 20,
                   description: 'Maximum matching lines to return'
                 },
                 contextLines: {
                   type: 'number',
-                  default: 2,
+                  default: 0,
                   description: 'Lines of context before and after each match'
+                },
+                includeAssets: {
+                  type: 'boolean',
+                  default: false,
+                  description: 'Also search asset names/paths and return matches in an "assets" section'
                 }
               },
               required: ['pattern']
@@ -469,7 +474,8 @@ class UnrealIndexBridge {
               language: args.language,
               caseSensitive: args.caseSensitive,
               maxResults: args.maxResults,
-              contextLines: args.contextLines
+              contextLines: args.contextLines,
+              includeAssets: args.includeAssets
             });
             return {
               content: [{ type: 'text', text: JSON.stringify(result, null, 2) }]
