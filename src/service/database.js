@@ -673,6 +673,51 @@ export class IndexDatabase {
     return [...children];
   }
 
+  _isActorComponentDescendant(typeName) {
+    if (typeName === 'UActorComponent') return true;
+    let current = typeName;
+    const visited = new Set();
+    while (current) {
+      if (visited.has(current)) break;
+      visited.add(current);
+      if (current === 'UActorComponent') return true;
+      const row = this.db.prepare(
+        'SELECT parent FROM types WHERE name = ? AND parent IS NOT NULL LIMIT 1'
+      ).get(current);
+      current = row ? row.parent : null;
+    }
+    return false;
+  }
+
+  _appendSyntheticComponentMethods(results, name, containingType, fuzzy, maxResults) {
+    if (!containingType || results.length >= maxResults) return results;
+    const syntheticMethods = ['Get', 'GetOrCreate'];
+    const nameLower = name.toLowerCase();
+    const existingNames = new Set(results.map(r => r.name));
+    const needed = syntheticMethods.filter(m => {
+      if (existingNames.has(m)) return false;
+      if (!fuzzy && name !== m) return false;
+      if (fuzzy && !m.toLowerCase().startsWith(nameLower)) return false;
+      return true;
+    });
+    if (needed.length > 0 && this._isActorComponentDescendant(containingType)) {
+      for (const methodName of needed) {
+        results.push({
+          name: methodName,
+          member_kind: 'function',
+          line: 0,
+          specifiers: 'static',
+          type_name: containingType,
+          type_kind: 'class',
+          path: null,
+          project: null,
+          matchReason: fuzzy ? 'synthetic-component' : 'exact',
+        });
+      }
+    }
+    return results;
+  }
+
   findMember(name, options = {}) {
     const { fuzzy = false, containingType = null, containingTypeHierarchy = false,
             memberKind = null, project = null, language = null, maxResults = 20 } = options;
@@ -690,11 +735,11 @@ export class IndexDatabase {
       if (containingType && containingTypeHierarchy) {
         const typeNames = [containingType, ...this._getSubtypeNames(containingType)];
         const ph = typeNames.map(() => '?').join(',');
-        sql += ` AND t.name IN (${ph})`;
-        params.push(...typeNames);
+        sql += ` AND (t.name IN (${ph}) OR t.name LIKE ?)`;
+        params.push(...typeNames, `${containingType}MixinLibrary%`);
       } else if (containingType) {
-        sql += ' AND t.name = ?';
-        params.push(containingType);
+        sql += ' AND (t.name = ? OR t.name LIKE ?)';
+        params.push(containingType, `${containingType}MixinLibrary%`);
       }
       if (memberKind) {
         sql += ' AND m.member_kind = ?';
@@ -712,7 +757,9 @@ export class IndexDatabase {
       sql += ' LIMIT ?';
       params.push(maxResults);
 
-      return this.db.prepare(sql).all(...params).map(({ id, ...rest }) => ({ ...rest, matchReason: 'exact' }));
+      let results = this.db.prepare(sql).all(...params).map(({ id, ...rest }) => ({ ...rest, matchReason: 'exact' }));
+      results = this._appendSyntheticComponentMethods(results, name, containingType, false, maxResults);
+      return results;
     }
 
     const nameLower = name.toLowerCase();
@@ -735,9 +782,9 @@ export class IndexDatabase {
 
     if (typeNames) {
       const ph = typeNames.map(() => '?').join(',');
-      sql += ` AND t.name IN (${ph})`; params.push(...typeNames);
+      sql += ` AND (t.name IN (${ph}) OR t.name LIKE ?)`; params.push(...typeNames, `${containingType}MixinLibrary%`);
     } else if (containingType) {
-      sql += ' AND t.name = ?'; params.push(containingType);
+      sql += ' AND (t.name = ? OR t.name LIKE ?)'; params.push(containingType, `${containingType}MixinLibrary%`);
     }
     if (memberKind) { sql += ' AND m.member_kind = ?'; params.push(memberKind); }
     if (project) { sql += ' AND f.project = ?'; params.push(project); }
@@ -778,8 +825,8 @@ export class IndexDatabase {
             const trigramParams = [...newIds];
             if (typeNames) {
               const ph = typeNames.map(() => '?').join(',');
-              trigramMemberSql += ` AND t.name IN (${ph})`; trigramParams.push(...typeNames);
-            } else if (containingType) { trigramMemberSql += ' AND t.name = ?'; trigramParams.push(containingType); }
+              trigramMemberSql += ` AND (t.name IN (${ph}) OR t.name LIKE ?)`; trigramParams.push(...typeNames, `${containingType}MixinLibrary%`);
+            } else if (containingType) { trigramMemberSql += ' AND (t.name = ? OR t.name LIKE ?)'; trigramParams.push(containingType, `${containingType}MixinLibrary%`); }
             if (memberKind) { trigramMemberSql += ' AND m.member_kind = ?'; trigramParams.push(memberKind); }
             if (project) { trigramMemberSql += ' AND f.project = ?'; trigramParams.push(project); }
             if (language && language !== 'all') { trigramMemberSql += ' AND f.language = ?'; trigramParams.push(language); }
@@ -834,7 +881,9 @@ export class IndexDatabase {
 
     scored.sort((a, b) => b.score - a.score);
     const MIN_SCORE = 0.15;
-    return scored.filter(r => r.score >= MIN_SCORE).slice(0, maxResults).map(({ id, ...rest }) => rest);
+    let results = scored.filter(r => r.score >= MIN_SCORE).slice(0, maxResults).map(({ id, ...rest }) => rest);
+    results = this._appendSyntheticComponentMethods(results, name, containingType, true, maxResults);
+    return results;
   }
 
   listModules(parent = '', options = {}) {
