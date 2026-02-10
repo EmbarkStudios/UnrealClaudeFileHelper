@@ -41,17 +41,20 @@ const watcherState = {
 };
 
 /** Validate project parameter, returning a 400 response if invalid. Returns true if invalid (response sent). */
-function validateProject(database, project, res) {
-  if (project && !database.projectExists(project)) {
-    const available = database.getDistinctProjects();
-    res.status(400).json({ error: `Unknown project: ${project}. Available projects: ${available.join(', ')}` });
-    return true;
+function validateProject(database, project, res, memIdx) {
+  if (project) {
+    const exists = (memIdx && memIdx.isLoaded) ? memIdx.projectExists(project) : database.projectExists(project);
+    if (!exists) {
+      const available = (memIdx && memIdx.isLoaded) ? memIdx.getDistinctProjects() : database.getDistinctProjects();
+      res.status(400).json({ error: `Unknown project: ${project}. Available projects: ${available.join(', ')}` });
+      return true;
+    }
   }
   return false;
 }
 
 /** Build hints array for empty search results to guide agents. */
-function buildEmptyResultHints(database, { project, fuzzy, supportsFuzzy = false }) {
+function buildEmptyResultHints(database, { project, fuzzy, supportsFuzzy = false }, memIdx) {
   const hints = [];
   if (project) {
     hints.push(`No results in project '${project}'. Try removing the project filter to search all projects.`);
@@ -59,7 +62,7 @@ function buildEmptyResultHints(database, { project, fuzzy, supportsFuzzy = false
   if (supportsFuzzy && !fuzzy) {
     hints.push('Try fuzzy=true for partial name matching.');
   }
-  const available = database.getDistinctProjects();
+  const available = (memIdx && memIdx.isLoaded) ? memIdx.getDistinctProjects() : database.getDistinctProjects();
   if (available.length > 0) {
     hints.push(`Available projects: ${available.join(', ')}`);
   }
@@ -74,7 +77,7 @@ function extractFilename(input) {
   return input;
 }
 
-export function createApi(database, indexer, queryPool = null, { zoektClient = null, zoektManager = null, zoektMirror = null } = {}) {
+export function createApi(database, indexer, queryPool = null, { zoektClient = null, zoektManager = null, zoektMirror = null, memoryIndex = null } = {}) {
   const app = express();
   app.use(express.json({ limit: '50mb' }));
   app.use(express.static(join(__dirname, '..', '..', 'public')));
@@ -135,8 +138,19 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
     return false;
   }
 
-  // Execute a read query via the worker pool (parallel) or fall back to direct (sequential)
+  // Execute a read query: memory index (sync) → worker pool → direct database
   async function poolQuery(method, args, timeoutMs = 30000) {
+    // Try in-memory index first (synchronous, sub-millisecond)
+    if (memoryIndex && memoryIndex.isLoaded && typeof memoryIndex[method] === 'function') {
+      const start = performance.now();
+      const result = memoryIndex[method](...args);
+      const durationMs = performance.now() - start;
+      const resultCount = Array.isArray(result) ? result.length :
+        result?.results ? result.results.length : null;
+      database._logSlowQuery(method, args, durationMs, resultCount);
+      return result;
+    }
+    // Fall back to worker pool or direct database
     if (queryPool) {
       const { result, durationMs } = await queryPool.execute(method, args, timeoutMs);
       const resultCount = Array.isArray(result) ? result.length :
@@ -174,6 +188,16 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
     if (zoektManager) {
       response.zoekt = zoektManager.getStatus();
     }
+    if (memoryIndex) {
+      response.memoryIndex = {
+        loaded: memoryIndex.isLoaded,
+        files: memoryIndex.filesById.size,
+        types: memoryIndex.typesById.size,
+        members: memoryIndex.membersById.size,
+        assets: memoryIndex.assetsById.size
+      };
+    }
+    response.queryMode = (memoryIndex && memoryIndex.isLoaded) ? 'memory' : (queryPool ? 'worker-pool' : 'direct');
     res.json(response);
   });
 
@@ -295,8 +319,10 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
         try {
           // Try source file first, then asset
           if (database.deleteFile(filePath)) {
+            if (memoryIndex) memoryIndex.removeFileByPath(filePath);
             processed++;
           } else if (database.deleteAsset(filePath)) {
+            if (memoryIndex) memoryIndex.removeAssetByPath(filePath);
             affectedProjects.add('_assets');
             processed++;
           }
@@ -326,8 +352,10 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
             }
           }
 
+          let ingestFileId;
           database.transaction(() => {
             const fileId = database.upsertFile(file.path, file.project, file.module, file.mtime, file.language, file.relativePath || null);
+            ingestFileId = fileId;
             database.clearTypesForFile(fileId);
 
             if (file.types && file.types.length > 0) {
@@ -365,6 +393,40 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
             }
           });
 
+          // Sync memory index after successful transaction
+          if (memoryIndex && ingestFileId) {
+            memoryIndex.removeFile(ingestFileId);
+            const baseLower = file.path.replace(/\\/g, '/');
+            const lastSlash = baseLower.lastIndexOf('/');
+            const fn = lastSlash >= 0 ? baseLower.substring(lastSlash + 1) : baseLower;
+            const dotIdx = fn.lastIndexOf('.');
+            const stem = dotIdx > 0 ? fn.substring(0, dotIdx) : fn;
+            memoryIndex.addFile(ingestFileId, {
+              path: file.path, project: file.project, module: file.module,
+              language: file.language, mtime: file.mtime,
+              basenameLower: stem.toLowerCase(),
+              relativePath: file.relativePath || null
+            });
+
+            // Re-read types and members from DB (they now have correct IDs)
+            const dbTypes = database.getTypeIdsForFile(ingestFileId);
+            if (dbTypes.length > 0) {
+              const typeRows = database.db.prepare(
+                `SELECT id, name, kind, parent, line, depth FROM types WHERE file_id = ?`
+              ).all(ingestFileId);
+              memoryIndex.addTypes(ingestFileId, typeRows.map(t => ({
+                id: t.id, name: t.name, kind: t.kind, parent: t.parent, line: t.line, depth: t.depth
+              })));
+            }
+
+            const memberRows = database.db.prepare(
+              `SELECT id, type_id as typeId, name, member_kind as memberKind, line, is_static as isStatic, specifiers FROM members WHERE file_id = ?`
+            ).all(ingestFileId);
+            if (memberRows.length > 0) {
+              memoryIndex.addMembers(ingestFileId, memberRows);
+            }
+          }
+
           affectedProjects.add(file.project);
           processed++;
         } catch (err) {
@@ -377,6 +439,23 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
         try {
           database.upsertAssetBatch(assets);
           database.indexAssetContent(assets);
+
+          // Sync memory index with newly upserted assets
+          if (memoryIndex) {
+            const assetRows = [];
+            for (const a of assets) {
+              const row = database.db.prepare('SELECT id, path, name, content_path, folder, project, extension, mtime, asset_class, parent_class FROM assets WHERE path = ?').get(a.path);
+              if (row) {
+                assetRows.push({
+                  id: row.id, path: row.path, name: row.name, contentPath: row.content_path,
+                  folder: row.folder, project: row.project, extension: row.extension, mtime: row.mtime,
+                  assetClass: row.asset_class, parentClass: row.parent_class
+                });
+              }
+            }
+            if (assetRows.length > 0) memoryIndex.upsertAssets(assetRows);
+          }
+
           affectedProjects.add('_assets');
           processed += assets.length;
         } catch (err) {
@@ -388,6 +467,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       if (processed > 0) {
         database.setMetadata('depthComputeNeeded', true);
         grepCache.invalidate();
+        if (memoryIndex) memoryIndex.invalidateInheritanceCache();
       }
 
       // Track ingest activity for watcher status
@@ -518,7 +598,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
         console.log(`[Stats] inheritance depth recomputed: ${count} types (${(performance.now() - t).toFixed(0)}ms)`);
       }
 
-      const stats = database.getStats();
+      const stats = (memoryIndex && memoryIndex.isLoaded) ? memoryIndex.getStats() : database.getStats();
       const lastBuild = database.getMetadata('lastBuild');
       const indexStatus = database.getAllIndexStatus();
       const trigramStats = database.getTrigramStats();
@@ -560,7 +640,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       if (!name) {
         return res.status(400).json({ error: 'name parameter required' });
       }
-      if (validateProject(database, project, res)) return;
+      if (validateProject(database, project, res, memoryIndex)) return;
 
       const mr = parseInt(maxResults, 10) || 10;
 
@@ -580,7 +660,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       });
       const response = { results };
       if (results.length === 0) {
-        response.hints = buildEmptyResultHints(database, { project, fuzzy: opts.fuzzy, supportsFuzzy: true });
+        response.hints = buildEmptyResultHints(database, { project, fuzzy: opts.fuzzy, supportsFuzzy: true }, memoryIndex);
       }
       res.json(response);
     } catch (err) {
@@ -595,7 +675,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       if (!parent) {
         return res.status(400).json({ error: 'parent parameter required' });
       }
-      if (validateProject(database, project, res)) return;
+      if (validateProject(database, project, res, memoryIndex)) return;
 
       const opts = {
         recursive: recursive !== 'false',
@@ -607,7 +687,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       const result = await poolQuery('findChildrenOf', [parent, opts]);
       if (result.results) result.results.forEach(r => { if (r.path) r.path = cleanPath(r.path, r.project); });
       if (result.results && result.results.length === 0) {
-        result.hints = buildEmptyResultHints(database, { project });
+        result.hints = buildEmptyResultHints(database, { project }, memoryIndex);
       }
       res.json(result);
     } catch (err) {
@@ -622,7 +702,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       if (!module) {
         return res.status(400).json({ error: 'module parameter required' });
       }
-      if (validateProject(database, project, res)) return;
+      if (validateProject(database, project, res, memoryIndex)) return;
 
       const opts = {
         project: project || null,
@@ -634,7 +714,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       if (result.types) result.types.forEach(r => { if (r.path) r.path = cleanPath(r.path, r.project); });
       if (result.files) result.files = result.files.map(f => cleanPath(f));
       if ((!result.types || result.types.length === 0) && (!result.files || result.files.length === 0)) {
-        result.hints = buildEmptyResultHints(database, { project });
+        result.hints = buildEmptyResultHints(database, { project }, memoryIndex);
       }
       res.json(result);
     } catch (err) {
@@ -649,7 +729,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       if (!rawFilename) {
         return res.status(400).json({ error: 'filename parameter required' });
       }
-      if (validateProject(database, project, res)) return;
+      if (validateProject(database, project, res, memoryIndex)) return;
 
       const filename = extractFilename(rawFilename);
 
@@ -663,7 +743,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       results.forEach(r => { if (r.file) r.file = cleanPath(r.file, r.project); });
       const response = { results };
       if (results.length === 0) {
-        response.hints = buildEmptyResultHints(database, { project });
+        response.hints = buildEmptyResultHints(database, { project }, memoryIndex);
       }
       res.json(response);
     } catch (err) {
@@ -713,7 +793,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       if (!name) {
         return res.status(400).json({ error: 'name parameter required' });
       }
-      if (validateProject(database, project, res)) return;
+      if (validateProject(database, project, res, memoryIndex)) return;
 
       const mr = parseInt(maxResults, 10) || 20;
 
@@ -731,7 +811,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       results.forEach(r => { if (r.path) r.path = cleanPath(r.path, r.project); });
       const response = { results };
       if (results.length === 0) {
-        response.hints = buildEmptyResultHints(database, { project, fuzzy: opts.fuzzy, supportsFuzzy: true });
+        response.hints = buildEmptyResultHints(database, { project, fuzzy: opts.fuzzy, supportsFuzzy: true }, memoryIndex);
       }
       res.json(response);
     } catch (err) {
@@ -765,7 +845,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       if (!name) {
         return res.status(400).json({ error: 'name parameter required' });
       }
-      if (validateProject(database, project, res)) return;
+      if (validateProject(database, project, res, memoryIndex)) return;
 
       const opts = {
         fuzzy: fuzzy === 'true',
@@ -777,7 +857,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       const results = await poolQuery('findAssetByName', [name, opts]);
       const response = { results };
       if (results.length === 0) {
-        response.hints = buildEmptyResultHints(database, { project, fuzzy: opts.fuzzy, supportsFuzzy: true });
+        response.hints = buildEmptyResultHints(database, { project, fuzzy: opts.fuzzy, supportsFuzzy: true }, memoryIndex);
       }
       res.json(response);
     } catch (err) {
@@ -821,7 +901,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
 
   app.get('/asset-stats', (req, res) => {
     try {
-      res.json(database.getAssetStats());
+      res.json((memoryIndex && memoryIndex.isLoaded) ? memoryIndex.getAssetStats() : database.getAssetStats());
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
@@ -935,7 +1015,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       return res.status(400).json({ error: `Invalid regex: ${e.message}` });
     }
 
-    if (validateProject(database, project, res)) return;
+    if (validateProject(database, project, res, memoryIndex)) return;
 
     if (language === 'blueprint') {
       return res.status(400).json({ error: 'Blueprint content is binary and not text-searchable. Use find_type or find_asset to search blueprints by name.' });

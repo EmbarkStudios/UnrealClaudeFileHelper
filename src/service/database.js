@@ -4,6 +4,7 @@ import { fileURLToPath } from 'url';
 import { mkdirSync, existsSync } from 'fs';
 import { deflateSync } from 'zlib';
 import { extractTrigrams, contentHash } from './trigram.js';
+import { SPECIFIER_BOOST, specifierBoost, KIND_WEIGHT, trigramThreshold, splitCamelCase, dedupTypes, scoreEntry } from './scoring.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -19,82 +20,6 @@ function extractBasename(filePath) {
   const dotIdx = filename.lastIndexOf('.');
   const stem = dotIdx > 0 ? filename.substring(0, dotIdx) : filename;
   return stem.toLowerCase();
-}
-
-// --- Search quality helpers ---
-
-const SPECIFIER_BOOST = {
-  'BlueprintCallable': 0.05, 'BlueprintPure': 0.05,
-  'BlueprintReadWrite': 0.04, 'BlueprintReadOnly': 0.04,
-  'BlueprintImplementableEvent': 0.04, 'BlueprintNativeEvent': 0.04,
-  'EditAnywhere': 0.03, 'EditDefaultsOnly': 0.02,
-  'VisibleAnywhere': 0.02, 'Replicated': 0.02,
-};
-const MAX_SPECIFIER_BOOST = 0.08;
-
-function specifierBoost(specifiers) {
-  if (!specifiers) return 0;
-  let boost = 0;
-  for (const [spec, value] of Object.entries(SPECIFIER_BOOST)) {
-    if (specifiers.includes(spec)) boost += value;
-  }
-  return Math.min(boost, MAX_SPECIFIER_BOOST);
-}
-
-const KIND_WEIGHT = {
-  'class': 0.04, 'struct': 0.03, 'interface': 0.03,
-  'enum': 0.02, 'delegate': 0.01, 'event': 0.01,
-};
-
-function trigramThreshold(nameLength) {
-  if (nameLength <= 5) return 0.60;
-  if (nameLength <= 15) return 0.75;
-  return 0.80;
-}
-
-function splitCamelCase(name) {
-  return name.replace(/^[UAFESI](?=[A-Z])/, '')
-    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
-    .replace(/([a-z])([A-Z])/g, '$1 $2')
-    .split(/\s+/).map(w => w.toLowerCase()).filter(w => w.length > 0);
-}
-
-function dedupTypes(results) {
-  const best = new Map();
-  for (const r of results) {
-    const key = `${r.name}:${r.kind}`;
-    const existing = best.get(key);
-    if (!existing) { best.set(key, r); continue; }
-    const existingScore = scoreEntry(existing);
-    const newScore = scoreEntry(r);
-    if (newScore > existingScore) {
-      // New entry is better — preserve old .cpp path as implementationPath
-      if (existing.path && existing.path.endsWith('.cpp')) r.implementationPath = existing.path;
-      best.set(key, r);
-    } else {
-      // Existing is better — store new .cpp path as implementationPath
-      if (r.path && r.path.endsWith('.cpp')) existing.implementationPath = r.path;
-    }
-  }
-  const deduped = [...best.values()];
-  deduped.sort((a, b) => scoreEntry(b) - scoreEntry(a));
-  return deduped;
-}
-
-function scoreEntry(r) {
-  let s = 0;
-  if (r.parent) s += 10;
-  if (r.path && r.path.endsWith('.h')) s += 5;
-  // Path-centrality tiebreakers (max +4, never overrides parent/header signals)
-  if (r.path) {
-    const p = r.path.replace(/\\/g, '/');
-    if (p.includes('/Runtime/')) s += 2;
-    else if (p.includes('/Developer/')) s += 1;
-    if (p.includes('/Public/') || p.includes('/Classes/')) s += 1.5;
-    else if (p.includes('/Private/')) s += 0.5;
-    s += Math.max(0, 0.5 - p.length * 0.004);
-  }
-  return s;
 }
 
 class QueryCache {
@@ -143,6 +68,7 @@ export class IndexDatabase {
       this.db = new Database(this.dbPath, { readonly: true });
       this.db.pragma('journal_mode = WAL');
       this.db.pragma('cache_size = -262144'); // 256MB page cache per connection
+      this.db.pragma('mmap_size = 268435456'); // 256MB memory-mapped I/O
       this.readOnly = true;
       return this;
     }
@@ -155,6 +81,7 @@ export class IndexDatabase {
     this.db = new Database(this.dbPath);
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('cache_size = -262144'); // 256MB page cache
+    this.db.pragma('mmap_size = 268435456'); // 256MB memory-mapped I/O
     this.db.pragma('foreign_keys = ON');
     this.createSchema();
     return this;
@@ -1508,7 +1435,7 @@ export class IndexDatabase {
 
   findFileByName(filename, options = {}) {
     const { project = null, language = null, maxResults = 20 } = options;
-    const filenameLower = filename.toLowerCase().replace(/\.(as|h|cpp)$/, '');
+    const filenameLower = filename.toLowerCase().replace(/\.[^.]+$/, '');
 
     // Use basename_lower for indexed prefix search (avoids full table scan)
     const exactBasename = filenameLower;

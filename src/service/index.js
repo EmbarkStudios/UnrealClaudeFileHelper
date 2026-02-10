@@ -11,6 +11,7 @@ import { QueryPool } from './query-pool.js';
 import { ZoektMirror } from './zoekt-mirror.js';
 import { ZoektManager } from './zoekt-manager.js';
 import { ZoektClient } from './zoekt-client.js';
+import { MemoryIndex } from './memory-index.js';
 import os from 'os';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -32,6 +33,7 @@ class UnrealIndexService {
   constructor() {
     this.config = null;
     this.database = null;
+    this.memoryIndex = null;
     this.queryPool = null;
     this.server = null;
     this.zoektMirror = null;
@@ -106,22 +108,34 @@ class UnrealIndexService {
     this.database = new IndexDatabase(dbPath).open();
     console.log(`[Startup] database open: ${(performance.now() - t).toFixed(0)}ms`);
 
-    // Compute inheritance depth if needed (before spawning workers so they get fresh data)
+    // Compute inheritance depth if needed (before loading memory index)
     if (this.database.getMetadata('depthComputeNeeded')) {
       t = performance.now();
       const depthCount = this.database.computeInheritanceDepth();
       console.log(`[Startup] inheritance depth: ${depthCount} types (${(performance.now() - t).toFixed(0)}ms)`);
     }
 
-    // Spawn query worker pool
-    const workerCount = Math.min(5, Math.max(1, os.cpus().length - 1));
+    // Load in-memory index (replaces worker pool for queries)
+    const useWorkerPool = this.config.service?.useWorkerPool === true;
+
     t = performance.now();
-    this.queryPool = new QueryPool(dbPath, workerCount);
-    await this.queryPool.spawn();
-    const spawnMs = (performance.now() - t).toFixed(0);
-    const warmupResults = await this.queryPool.warmup();
-    const warmupMs = warmupResults.map(r => r.durationMs?.toFixed(0) || '?').join(', ');
-    console.log(`[Startup] query pool: ${workerCount} workers (${spawnMs}ms spawn, warmup: ${warmupMs}ms)`);
+    this.memoryIndex = new MemoryIndex();
+    this.memoryIndex.load(this.database.db);
+    console.log(`[Startup] memory index loaded (${(performance.now() - t).toFixed(0)}ms)`);
+
+    // Worker pool: only spawn if explicitly enabled in config
+    if (useWorkerPool) {
+      const workerCount = Math.min(5, Math.max(1, os.cpus().length - 1));
+      t = performance.now();
+      this.queryPool = new QueryPool(dbPath, workerCount);
+      await this.queryPool.spawn();
+      const spawnMs = (performance.now() - t).toFixed(0);
+      const warmupResults = await this.queryPool.warmup();
+      const warmupMs = warmupResults.map(r => r.durationMs?.toFixed(0) || '?').join(', ');
+      console.log(`[Startup] query pool: ${workerCount} workers (${spawnMs}ms spawn, warmup: ${warmupMs}ms)`);
+    } else {
+      console.log(`[Startup] query pool: disabled (using in-memory index)`);
+    }
 
     // Zoekt initialization
     const zoektConfig = this.config.zoekt || {};
@@ -216,7 +230,8 @@ class UnrealIndexService {
     const app = createApi(this.database, this, this.queryPool, {
       zoektClient: this.zoektClient,
       zoektManager: this.zoektManager,
-      zoektMirror: this.zoektMirror
+      zoektMirror: this.zoektMirror,
+      memoryIndex: this.memoryIndex
     });
 
     this.server = app.listen(port, host, () => {
