@@ -9,6 +9,29 @@ import { contentHash } from './trigram.js';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SLOW_QUERY_MS = 100;
 
+// LRU+TTL cache for /grep results — agents often repeat the same search
+class GrepCache {
+  constructor(maxSize = 200, ttlMs = 30000) {
+    this.maxSize = maxSize;
+    this.ttlMs = ttlMs;
+    this.cache = new Map();
+  }
+  get(key) {
+    const entry = this.cache.get(key);
+    if (!entry) return undefined;
+    if (Date.now() - entry.ts > this.ttlMs) { this.cache.delete(key); return undefined; }
+    this.cache.delete(key); this.cache.set(key, entry); // LRU refresh
+    return entry.data;
+  }
+  set(key, data) {
+    if (this.cache.size >= this.maxSize) this.cache.delete(this.cache.keys().next().value);
+    this.cache.set(key, { data, ts: Date.now() });
+  }
+  invalidate() { this.cache.clear(); }
+}
+
+const grepCache = new GrepCache(200, 30000);
+
 /** Validate project parameter, returning a 400 response if invalid. Returns true if invalid (response sent). */
 function validateProject(database, project, res) {
   if (project && !database.projectExists(project)) {
@@ -321,6 +344,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       // Flag inheritance depth for recomputation after new types are ingested
       if (processed > 0) {
         database.setMetadata('depthComputeNeeded', true);
+        grepCache.invalidate();
       }
 
       // Trigger Zoekt reindex for affected projects
@@ -766,7 +790,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
   // --- Content search (grep) ---
 
   app.get('/grep', async (req, res) => {
-    const { pattern, project, language, caseSensitive: cs, maxResults: mr, contextLines: cl, grouped, includeAssets: ia } = req.query;
+    const { pattern, project, language, caseSensitive: cs, maxResults: mr, contextLines: cl, grouped, includeAssets: ia, symbols: sym } = req.query;
 
     if (!pattern) {
       return res.status(400).json({ error: 'pattern parameter required' });
@@ -780,6 +804,12 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
     const maxResults = parseInt(mr, 10) || 20;
     const contextLines = cl !== undefined ? parseInt(cl, 10) : 0;
     const includeAssets = ia === 'true';
+    const skipSymbols = sym === 'false';
+
+    // Check grep cache
+    const cacheKey = `${pattern}|${project || ''}|${language || ''}|${cs}|${mr}|${cl}|${grouped}|${ia}|${sym}`;
+    const cached = grepCache.get(cacheKey);
+    if (cached) return res.json(cached);
 
     try {
       new RegExp(pattern, caseSensitive ? '' : 'i');
@@ -849,8 +879,14 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       const mtimeMap = database.getFilesMtime(uniquePaths);
 
       // Symbol cross-reference: boost results at known type/member definitions
-      const fileLines = results.map(r => ({ path: r.file, line: r.line }));
-      const symbolMap = database.findSymbolsAtLocations(fileLines);
+      // Skip when symbols=false (e.g. hook queries that don't need ranking precision)
+      let symbolMap;
+      if (skipSymbols) {
+        symbolMap = new Map();
+      } else {
+        const fileLines = results.map(r => ({ path: r.file, line: r.line }));
+        symbolMap = database.findSymbolsAtLocations(fileLines);
+      }
 
       results = rankResults(results, mtimeMap, symbolMap);
       if (results.length > maxResults) results = results.slice(0, maxResults);
@@ -867,6 +903,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
           grouped: true
         };
         if (assetResult.results.length > 0) groupedResponse.assets = assetResult.results;
+        grepCache.set(cacheKey, groupedResponse);
         return res.json(groupedResponse);
       }
 
@@ -878,6 +915,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       if (assetResult.results.length > 0) {
         response.assets = assetResult.results;
       }
+      grepCache.set(cacheKey, response);
       return res.json(response);
     } catch (err) {
       const durationMs = Math.round(performance.now() - grepStartMs);

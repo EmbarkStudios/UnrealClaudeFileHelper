@@ -10,6 +10,17 @@ const __dirname = dirname(__filename);
 
 const SLOW_QUERY_MS = 100;
 
+// Extract lowercase basename without extension from a file path
+// "D:\\foo\\bar\\Actor.h" → "actor", "/home/foo/MyClass.as" → "myclass"
+function extractBasename(filePath) {
+  const normalized = filePath.replace(/\\/g, '/');
+  const lastSlash = normalized.lastIndexOf('/');
+  const filename = lastSlash >= 0 ? normalized.substring(lastSlash + 1) : normalized;
+  const dotIdx = filename.lastIndexOf('.');
+  const stem = dotIdx > 0 ? filename.substring(0, dotIdx) : filename;
+  return stem.toLowerCase();
+}
+
 // --- Search quality helpers ---
 
 const SPECIFIER_BOOST = {
@@ -124,6 +135,7 @@ export class IndexDatabase {
     this.db = null;
     this.readOnly = false;
     this.queryCache = new QueryCache(500, 60000);
+    this.mtimeCache = new QueryCache(200, 30000); // Short TTL for mtime lookups
   }
 
   open(readOnly = false) {
@@ -309,6 +321,36 @@ export class IndexDatabase {
     }
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_files_relative_path ON files(relative_path)`);
 
+    // Migrate files table to include path_lower column for indexed searches
+    const hasPathLowerColumn = this.db.prepare(`
+      SELECT COUNT(*) as count FROM pragma_table_info('files') WHERE name = 'path_lower'
+    `).get().count > 0;
+    if (!hasPathLowerColumn) {
+      this.db.exec(`ALTER TABLE files ADD COLUMN path_lower TEXT`);
+      // Backfill from existing paths
+      this.db.exec(`UPDATE files SET path_lower = replace(lower(path), '\\', '/')`);
+    }
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_files_path_lower ON files(path_lower)`);
+
+    // Migrate files table to include basename_lower for fast filename prefix search
+    const hasBasenameLower = this.db.prepare(`
+      SELECT COUNT(*) as count FROM pragma_table_info('files') WHERE name = 'basename_lower'
+    `).get().count > 0;
+    if (!hasBasenameLower) {
+      this.db.exec(`ALTER TABLE files ADD COLUMN basename_lower TEXT`);
+      // Backfill in JS: extract lowercase filename without extension
+      const allFiles = this.db.prepare('SELECT id, path FROM files').all();
+      const updateStmt = this.db.prepare('UPDATE files SET basename_lower = ? WHERE id = ?');
+      const backfill = this.db.transaction(() => {
+        for (const f of allFiles) {
+          const bn = extractBasename(f.path);
+          updateStmt.run(bn, f.id);
+        }
+      });
+      backfill();
+    }
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_files_basename_lower ON files(basename_lower)`);
+
     const hasMembersTable = this.db.prepare(`
       SELECT COUNT(*) as count FROM sqlite_master WHERE type='table' AND name='members'
     `).get().count > 0;
@@ -443,6 +485,10 @@ export class IndexDatabase {
 
   getFilesMtime(filePaths) {
     if (!filePaths || filePaths.length === 0) return new Map();
+    // Check cache first (key on sorted paths for consistency)
+    const cacheKey = `mtime:${filePaths.slice().sort().join('|')}`;
+    const cached = this.mtimeCache.get(cacheKey);
+    if (cached) return cached;
     // Batch query — SQLite max variable limit is 999, chunk if needed
     const result = new Map();
     const chunkSize = 900;
@@ -456,6 +502,7 @@ export class IndexDatabase {
         result.set(row.path, row.mtime);
       }
     }
+    this.mtimeCache.set(cacheKey, result);
     return result;
   }
 
@@ -535,18 +582,22 @@ export class IndexDatabase {
   }
 
   upsertFile(path, project, module, mtime, language = 'angelscript', relativePath = null) {
+    const pathLower = path.toLowerCase().replace(/\\/g, '/');
+    const basenameLower = extractBasename(path);
     const stmt = this.db.prepare(`
-      INSERT INTO files (path, project, module, mtime, language, relative_path)
-      VALUES (?, ?, ?, ?, ?, ?)
+      INSERT INTO files (path, project, module, mtime, language, relative_path, path_lower, basename_lower)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(path) DO UPDATE SET
         project = excluded.project,
         module = excluded.module,
         mtime = excluded.mtime,
         language = excluded.language,
-        relative_path = COALESCE(excluded.relative_path, relative_path)
+        relative_path = COALESCE(excluded.relative_path, relative_path),
+        path_lower = excluded.path_lower,
+        basename_lower = excluded.basename_lower
       RETURNING id
     `);
-    return stmt.get(path, project, module, mtime, language, relativePath).id;
+    return stmt.get(path, project, module, mtime, language, relativePath, pathLower, basenameLower).id;
   }
 
   deleteFile(path) {
@@ -1056,8 +1107,7 @@ export class IndexDatabase {
       candidates.push(...this.db.prepare(sql).all(...params));
 
       // Step 1.5: UE prefix-expanded search (finds APawn when searching "Pawn")
-      // Split into exact matches first (guaranteed to find AActor for "Actor"),
-      // then prefix LIKE matches separately to avoid LIMIT truncation.
+      // Single combined query: exact name matches + prefix LIKE matches in one round-trip
       {
         const existingIds = new Set(candidates.map(c => c.id));
 
@@ -1072,55 +1122,32 @@ export class IndexDatabase {
           }
         }
 
-        // Sub-step A: Exact name matches (high priority, no LIMIT issue)
-        if (exactNames.size > 0) {
-          const placeholders = [...exactNames].map(() => '?').join(',');
-          let exactSql = `
-            SELECT t.id, t.name, t.kind, t.parent, t.line, t.depth, f.path, f.project
-            FROM types t
-            JOIN files f ON t.file_id = f.id
-            WHERE lower(t.name) IN (${placeholders})
-              AND t.id NOT IN (${existingIds.size > 0 ? [...existingIds].map(() => '?').join(',') : '-1'})
-          `;
-          const exactParams = [...exactNames];
-          if (existingIds.size > 0) exactParams.push(...existingIds);
-          if (kind) { exactSql += ' AND t.kind = ?'; exactParams.push(kind); }
-          if (project) { exactSql += ' AND f.project = ?'; exactParams.push(project); }
-          if (language && language !== 'all' && language !== 'blueprint') {
-            exactSql += ' AND f.language = ?'; exactParams.push(language);
-          }
-          exactSql += ' LIMIT ?';
-          exactParams.push(maxResults);
-          const exactResults = this.db.prepare(exactSql).all(...exactParams);
-          candidates.push(...exactResults);
-          for (const r of exactResults) existingIds.add(r.id);
+        // Prefix LIKE patterns
+        const prefixPatterns = [];
+        for (const p of ['a', 'u', 'f', 'e', 's', 'i']) {
+          prefixPatterns.push(`${p}${nameLower}%`);
         }
 
-        // Sub-step B: Prefix LIKE matches (fills remaining slots)
-        if (candidates.length < maxResults * 3) {
-          const prefixPatterns = [];
-          for (const p of ['a', 'u', 'f', 'e', 's', 'i']) {
-            prefixPatterns.push(`${p}${nameLower}%`);
-          }
-          const likeConditions = prefixPatterns.map(() => 'lower(t.name) LIKE ?').join(' OR ');
-          let likeSql = `
-            SELECT t.id, t.name, t.kind, t.parent, t.line, t.depth, f.path, f.project
-            FROM types t
-            JOIN files f ON t.file_id = f.id
-            WHERE (${likeConditions})
-              AND t.id NOT IN (${existingIds.size > 0 ? [...existingIds].map(() => '?').join(',') : '-1'})
-          `;
-          const likeParams = [...prefixPatterns];
-          if (existingIds.size > 0) likeParams.push(...existingIds);
-          if (kind) { likeSql += ' AND t.kind = ?'; likeParams.push(kind); }
-          if (project) { likeSql += ' AND f.project = ?'; likeParams.push(project); }
-          if (language && language !== 'all' && language !== 'blueprint') {
-            likeSql += ' AND f.language = ?'; likeParams.push(language);
-          }
-          likeSql += ' LIMIT ?';
-          likeParams.push(maxResults * 2);
-          candidates.push(...this.db.prepare(likeSql).all(...likeParams));
+        // Combined query: exact IN + prefix LIKE in one statement
+        const inPlaceholders = [...exactNames].map(() => '?').join(',');
+        const likeConditions = prefixPatterns.map(() => 'lower(t.name) LIKE ?').join(' OR ');
+        let combinedSql = `
+          SELECT t.id, t.name, t.kind, t.parent, t.line, t.depth, f.path, f.project
+          FROM types t
+          JOIN files f ON t.file_id = f.id
+          WHERE (lower(t.name) IN (${inPlaceholders}) OR ${likeConditions})
+            AND t.id NOT IN (${existingIds.size > 0 ? [...existingIds].map(() => '?').join(',') : '-1'})
+        `;
+        const combinedParams = [...exactNames, ...prefixPatterns];
+        if (existingIds.size > 0) combinedParams.push(...existingIds);
+        if (kind) { combinedSql += ' AND t.kind = ?'; combinedParams.push(kind); }
+        if (project) { combinedSql += ' AND f.project = ?'; combinedParams.push(project); }
+        if (language && language !== 'all' && language !== 'blueprint') {
+          combinedSql += ' AND f.language = ?'; combinedParams.push(language);
         }
+        combinedSql += ' LIMIT ?';
+        combinedParams.push(maxResults * 3);
+        candidates.push(...this.db.prepare(combinedSql).all(...combinedParams));
       }
 
       // Step 2: If not enough results and name is long enough for trigrams, use trigram index
@@ -1483,39 +1510,37 @@ export class IndexDatabase {
     const { project = null, language = null, maxResults = 20 } = options;
     const filenameLower = filename.toLowerCase().replace(/\.(as|h|cpp)$/, '');
 
-    const exactFilePattern = `%/${filenameLower}.%`;
-    const startsWithPattern = `%/${filenameLower}%`;
+    // Use basename_lower for indexed prefix search (avoids full table scan)
+    const exactBasename = filenameLower;
+    const prefixPattern = `${filenameLower}%`;
     const containsPattern = `%${filenameLower}%`;
 
-    // Use replace() to normalize backslashes to forward slashes for scoring,
-    // since paths may be stored with either separator depending on the OS.
     let sql = `
       SELECT f.id, f.path, f.project, f.language,
         CASE
-          WHEN replace(lower(f.path), '\\', '/') LIKE ? THEN 1.0
-          WHEN replace(lower(f.path), '\\', '/') LIKE ? THEN 0.85
-          WHEN lower(f.path) LIKE ? THEN 0.7
+          WHEN f.basename_lower = ? THEN 1.0
+          WHEN f.basename_lower LIKE ? THEN 0.85
+          WHEN f.basename_lower LIKE ? THEN 0.7
           ELSE 0.5
-        END + (CASE WHEN lower(f.path) LIKE '%.h' THEN 0.01 ELSE 0 END)
+        END + (CASE WHEN f.path_lower LIKE '%.h' THEN 0.01 ELSE 0 END)
           + (CASE
-              WHEN replace(lower(f.path), '\\', '/') LIKE '%/runtime/%' THEN 0.004
-              WHEN replace(lower(f.path), '\\', '/') LIKE '%/developer/%' THEN 0.002
+              WHEN f.path_lower LIKE '%/runtime/%' THEN 0.004
+              WHEN f.path_lower LIKE '%/developer/%' THEN 0.002
               ELSE 0
             END)
           + (CASE
-              WHEN replace(lower(f.path), '\\', '/') LIKE '%/public/%' THEN 0.003
-              WHEN replace(lower(f.path), '\\', '/') LIKE '%/classes/%' THEN 0.003
-              WHEN replace(lower(f.path), '\\', '/') LIKE '%/private/%' THEN 0.001
+              WHEN f.path_lower LIKE '%/public/%' THEN 0.003
+              WHEN f.path_lower LIKE '%/classes/%' THEN 0.003
+              WHEN f.path_lower LIKE '%/private/%' THEN 0.001
               ELSE 0
             END) as score
       FROM files f
       WHERE f.language != 'asset' AND (
-        replace(lower(f.path), '\\', '/') LIKE ? OR
-        lower(f.path) LIKE ?
+        f.basename_lower LIKE ? OR f.basename_lower LIKE ?
       )
     `;
 
-    const params = [exactFilePattern, startsWithPattern, containsPattern, startsWithPattern, containsPattern];
+    const params = [exactBasename, prefixPattern, containsPattern, prefixPattern, containsPattern];
 
     if (project) {
       sql += ' AND f.project = ?';
@@ -2257,7 +2282,7 @@ for (const method of methodsToTime) {
 }
 
 // Wrap cacheable methods with LRU+TTL caching on read-only (worker) connections
-const cacheableMethods = ['findTypeByName', 'findMember'];
+const cacheableMethods = ['findTypeByName', 'findMember', 'findFileByName'];
 for (const method of cacheableMethods) {
   const original = IndexDatabase.prototype[method];
   IndexDatabase.prototype[method] = function (...args) {
