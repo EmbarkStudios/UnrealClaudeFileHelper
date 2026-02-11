@@ -956,7 +956,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
 
   app.get('/explain-type', async (req, res) => {
     try {
-      const { name, project, language, contextLines: cl, includeMembers: im, includeChildren: ic, maxMembers: mm, maxChildren: mc } = req.query;
+      const { name, project, language, contextLines: cl, includeMembers: im, includeChildren: ic, maxChildren: mc, maxFunctions: mf, maxProperties: mp } = req.query;
 
       if (!name) {
         return res.status(400).json({ error: 'name parameter required' });
@@ -967,7 +967,6 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       const contextLines = cl !== undefined ? parseInt(cl, 10) : 0;
       const includeMembers = im !== 'false';
       const includeChildren = ic !== 'false';
-      const maxMembers = parseInt(mm, 10) || 50;
       const maxChildren = parseInt(mc, 10) || 20;
 
       // Step 1: Find the type
@@ -992,26 +991,28 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
 
       // Step 2: Members — list all members of this type directly
       if (includeMembers) {
+        const maxFunctions = parseInt(mf, 10) || 30;
+        const maxProperties = parseInt(mp, 10) || 30;
         const memberOpts = {
           project: project || null,
           language: language || null,
-          maxResults: maxMembers
+          maxFunctions,
+          maxProperties
         };
-        const members = await poolQuery('listMembersForType', [typeName, memberOpts]);
+        const memberResult = await poolQuery('listMembersForType', [typeName, memberOpts]);
+        const { functions, properties, enumValues, truncated } = memberResult;
+        const allMembers = [...functions, ...properties, ...enumValues];
 
         // Attach signatures for members
         if (contextLines > 0) {
-          attachContextLines(members, contextLines, database, r => resolveFileId(r.path));
+          attachContextLines(allMembers, contextLines, database, r => resolveFileId(r.path));
         } else {
-          attachSignatures(members, database, r => resolveFileId(r.path));
+          attachSignatures(allMembers, database, r => resolveFileId(r.path));
         }
 
-        members.forEach(r => { if (r.path) r.path = cleanPath(r.path, r.project); });
+        allMembers.forEach(r => { if (r.path) r.path = cleanPath(r.path, r.project); });
 
-        const functions = members.filter(m => m.member_kind === 'function');
-        const properties = members.filter(m => m.member_kind === 'property');
-        const enumValues = members.filter(m => m.member_kind === 'enum_value');
-        response.members = { functions, properties, enumValues, count: members.length };
+        response.members = { functions, properties, enumValues, count: allMembers.length, truncated };
       }
 
       // Step 3: Children
@@ -1235,7 +1236,12 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
   // --- Batch query endpoint (S6) ---
 
   const BATCH_ALLOWED_METHODS = new Set([
-    'findTypeByName', 'findMember', 'findChildrenOf', 'findFileByName', 'findAssetByName', 'listModules', 'browseModule'
+    'findTypeByName', 'findMember', 'findChildrenOf', 'findFileByName', 'findAssetByName', 'listModules', 'browseModule', 'listMembersForType'
+  ]);
+
+  // Methods whose results have a .path field that needs cleaning
+  const BATCH_PATH_METHODS = new Set([
+    'findTypeByName', 'findMember', 'findChildrenOf', 'findFileByName', 'listMembersForType'
   ]);
 
   app.post('/batch', async (req, res) => {
@@ -1260,6 +1266,26 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
         try {
           const argArray = Array.isArray(args) ? args : [args];
           const result = await poolQuery(method, argArray);
+
+          // Post-process: attach contextLines/signatures (#36) and clean paths (#37)
+          if (Array.isArray(result)) {
+            const opts = argArray[1] || {};
+            const ctxLines = parseInt(opts.contextLines, 10) || 0;
+
+            if ((method === 'findMember' || method === 'findTypeByName') && ctxLines > 0) {
+              attachContextLines(result, ctxLines, database, r => resolveFileId(r.path));
+            }
+            if (method === 'findMember' && opts.includeSignatures) {
+              attachSignatures(result, database, r => resolveFileId(r.path));
+            }
+            if (BATCH_PATH_METHODS.has(method)) {
+              result.forEach(r => { if (r.path) r.path = cleanPath(r.path, r.project); });
+            }
+          } else if (result && result.results && BATCH_PATH_METHODS.has(method)) {
+            // findChildrenOf returns { results: [...] }
+            result.results.forEach(r => { if (r.path) r.path = cleanPath(r.path, r.project); });
+          }
+
           results.push({ result });
         } catch (err) {
           results.push({ error: err.message });

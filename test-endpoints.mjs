@@ -1,11 +1,15 @@
 #!/usr/bin/env node
 /**
- * Test suite for issue #35 new endpoints and features:
+ * Test suite for issue #35 endpoints and issue #36-40 fixes:
  * - S1: contextLines on find-type and find-member
  * - S2: includeSignatures on find-member
  * - S3: explain-type compound endpoint
  * - S5: MCP tool analytics endpoints
  * - S6: batch query endpoint
+ * - #36: batch contextLines/includeSignatures forwarding
+ * - #37: batch path cleaning
+ * - #39: explain-type split member limits
+ * - #40: findTypeByName header preference
  */
 
 const BASE = 'http://localhost:3847';
@@ -285,10 +289,163 @@ async function testBatchEndpoint() {
   assert(emptyStatus === 400, `Empty queries returns 400 (got ${emptyStatus})`);
 }
 
+// ===== #40: findTypeByName header preference =====
+
+async function testHeaderPreference() {
+  console.log('\n--- #40: findTypeByName header preference ---');
+
+  // C++ types should prefer .h over .cpp
+  const { data } = await fetchJSON('/find-type?name=AActor&language=cpp');
+  assert(data.results && data.results.length > 0, 'find-type returns results for AActor (cpp)');
+  if (data.results.length > 0) {
+    const first = data.results[0];
+    const isHeader = /\.(h|hpp|hxx)$/i.test(first.path);
+    assert(isHeader, `First result is header file: ${first.path}`);
+  }
+
+  // If there are multiple results, headers should come before .cpp
+  if (data.results.length > 1) {
+    let headersDone = false;
+    let sortedCorrectly = true;
+    for (const r of data.results) {
+      const isH = /\.(h|hpp|hxx)$/i.test(r.path);
+      if (headersDone && isH) { sortedCorrectly = false; break; }
+      if (!isH) headersDone = true;
+    }
+    assert(sortedCorrectly, 'Headers sorted before implementation files');
+  }
+}
+
+// ===== #39: explain-type split member limits =====
+
+async function testSplitMemberLimits() {
+  console.log('\n--- #39: explain-type split member limits ---');
+
+  // Default limits (30/30)
+  const { data } = await fetchJSON('/explain-type?name=AActor');
+  assert(data.members !== undefined, 'explain-type includes members');
+  if (data.members) {
+    assert(Array.isArray(data.members.functions), 'members.functions is array');
+    assert(Array.isArray(data.members.properties), 'members.properties is array');
+    assert(data.members.truncated !== undefined, 'members has truncated info');
+    const hasBoth = data.members.functions.length > 0 && data.members.properties.length > 0;
+    assert(hasBoth, `Has both functions (${data.members.functions.length}) and properties (${data.members.properties.length})`);
+  }
+
+  // With small function limit — should still get properties
+  const { data: smallFunc } = await fetchJSON('/explain-type?name=AActor&maxFunctions=2&maxProperties=2');
+  if (smallFunc.members) {
+    assert(smallFunc.members.functions.length <= 2, `maxFunctions=2 respected (got ${smallFunc.members.functions.length})`);
+    assert(smallFunc.members.properties.length <= 2, `maxProperties=2 respected (got ${smallFunc.members.properties.length})`);
+  }
+
+  // With large function limit but small property limit — functions should not be starved
+  const { data: bigFunc } = await fetchJSON('/explain-type?name=AActor&maxFunctions=100&maxProperties=1');
+  if (bigFunc.members) {
+    assert(bigFunc.members.functions.length > 1, `Functions not starved when maxProperties=1 (got ${bigFunc.members.functions.length})`);
+    assert(bigFunc.members.properties.length <= 1, `maxProperties=1 respected (got ${bigFunc.members.properties.length})`);
+  }
+}
+
+// ===== #37: batch endpoint path cleaning =====
+
+async function testBatchPathCleaning() {
+  console.log('\n--- #37: Batch endpoint path cleaning ---');
+
+  const { data } = await postJSON('/batch', {
+    queries: [
+      { method: 'findTypeByName', args: ['AActor', { maxResults: 1 }] },
+      { method: 'findMember', args: ['BeginPlay', { maxResults: 1 }] }
+    ]
+  });
+
+  if (data.results && data.results.length >= 2) {
+    // Check first query result (findTypeByName)
+    const typeResult = data.results[0].result;
+    if (typeResult && typeResult.length > 0) {
+      const path = typeResult[0].path;
+      assert(!path.includes('\\'), `Batch findTypeByName path has no backslashes: ${path}`);
+      assert(!path.match(/^[A-Z]:/), `Batch findTypeByName path is not absolute Windows: ${path}`);
+    }
+
+    // Check second query result (findMember)
+    const memberResult = data.results[1].result;
+    if (memberResult && memberResult.length > 0) {
+      const path = memberResult[0].path;
+      assert(!path.includes('\\'), `Batch findMember path has no backslashes: ${path}`);
+      assert(!path.match(/^[A-Z]:/), `Batch findMember path is not absolute Windows: ${path}`);
+    }
+  }
+}
+
+// ===== #36: batch endpoint context/signatures forwarding =====
+
+async function testBatchContextSignatures() {
+  console.log('\n--- #36: Batch endpoint context/signatures forwarding ---');
+
+  // Test contextLines forwarded for findMember
+  const { data: ctxData } = await postJSON('/batch', {
+    queries: [
+      { method: 'findMember', args: ['BeginPlay', { maxResults: 1, contextLines: 3 }] }
+    ]
+  });
+
+  if (ctxData.results && ctxData.results[0]?.result?.length > 0) {
+    const member = ctxData.results[0].result[0];
+    const hasCtx = member.context && Array.isArray(member.context.lines);
+    assert(hasCtx, 'Batch findMember with contextLines has context');
+    if (hasCtx) {
+      assert(member.context.lines.length > 0, `Batch context has ${member.context.lines.length} lines`);
+      assert(member.context.lines.length <= 7, `Batch context <= 2*3+1=7 lines`);
+    }
+  }
+
+  // Test includeSignatures forwarded for findMember
+  const { data: sigData } = await postJSON('/batch', {
+    queries: [
+      { method: 'findMember', args: ['BeginPlay', { maxResults: 3, includeSignatures: true }] }
+    ]
+  });
+
+  if (sigData.results && sigData.results[0]?.result?.length > 0) {
+    const withSig = sigData.results[0].result.filter(r => r.signature);
+    assert(withSig.length > 0, `Batch findMember with includeSignatures: ${withSig.length} have signatures`);
+    if (withSig.length > 0) {
+      assert(typeof withSig[0].signature === 'string', 'Batch signature is string');
+    }
+  }
+
+  // Test contextLines forwarded for findTypeByName
+  const { data: typeCtx } = await postJSON('/batch', {
+    queries: [
+      { method: 'findTypeByName', args: ['AActor', { maxResults: 1, contextLines: 3 }] }
+    ]
+  });
+
+  if (typeCtx.results && typeCtx.results[0]?.result?.length > 0) {
+    const type = typeCtx.results[0].result[0];
+    const hasCtx = type.context && Array.isArray(type.context.lines);
+    assert(hasCtx, 'Batch findTypeByName with contextLines has context');
+  }
+
+  // Without contextLines/signatures — should NOT have them
+  const { data: noOpts } = await postJSON('/batch', {
+    queries: [
+      { method: 'findMember', args: ['BeginPlay', { maxResults: 1 }] }
+    ]
+  });
+
+  if (noOpts.results && noOpts.results[0]?.result?.length > 0) {
+    const member = noOpts.results[0].result[0];
+    assert(!member.context, 'Batch without contextLines has no context');
+    assert(!member.signature, 'Batch without includeSignatures has no signature');
+  }
+}
+
 // ===== Run all tests =====
 
 async function main() {
-  console.log('Testing issue #35 endpoints...\n');
+  console.log('Testing issue #35 endpoints + #36-40 fixes...\n');
 
   // Health check
   try {
@@ -308,6 +465,12 @@ async function main() {
   await testExplainType();
   await testMcpToolAnalytics();
   await testBatchEndpoint();
+
+  // Issue #36-40 fixes
+  await testHeaderPreference();
+  await testSplitMemberLimits();
+  await testBatchPathCleaning();
+  await testBatchContextSignatures();
 
   console.log(`\n${'='.repeat(50)}`);
   console.log(`Results: ${passed} passed, ${failed} failed`);

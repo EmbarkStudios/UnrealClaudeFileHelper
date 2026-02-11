@@ -310,7 +310,7 @@ export function parseCppContent(content, filePath = '') {
 
           // Property with UPROPERTY
           if (pendingUProperty) {
-            const propMatch = trimmed.match(/^(?:const\s+)?(\w[\w<>:,\s*&]*?)\s+(\w+)\s*(?:[=;{])/);
+            const propMatch = trimmed.match(/^(?:const\s+)?(\w[\w<>:,\s*&]*?)\s+(\w+)\s*(?::\s*\d+\s*)?(?:[=;{])/);
             if (propMatch) {
               result.members.push({
                 name: propMatch[2],

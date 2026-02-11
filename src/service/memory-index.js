@@ -505,7 +505,7 @@ export class MemoryIndex {
       let results = [];
 
       if (includeSourceTypes) {
-        // Exact match
+        // Exact match — collect all, sort headers first, then truncate
         const typeIds = this.typesByName.get(name) || [];
         for (const tid of typeIds) {
           const t = this.typesById.get(tid);
@@ -516,8 +516,15 @@ export class MemoryIndex {
           if (project && f.project !== project) continue;
           if (language && language !== 'all' && language !== 'blueprint' && f.language !== language) continue;
           results.push({ name: t.name, kind: t.kind, parent: t.parent, line: t.line, path: f.path, project: f.project, matchReason: 'exact' });
-          if (results.length >= maxResults) break;
         }
+        if (results.length > 1) {
+          results.sort((a, b) => {
+            const aH = /\.(h|hpp|hxx)$/i.test(a.path) ? 0 : 1;
+            const bH = /\.(h|hpp|hxx)$/i.test(b.path) ? 0 : 1;
+            return aH - bH;
+          });
+        }
+        if (results.length > maxResults) results.length = maxResults;
 
         // UE prefix fallback
         if (results.length === 0) {
@@ -545,10 +552,16 @@ export class MemoryIndex {
               if (project && f.project !== project) continue;
               if (language && language !== 'all' && language !== 'blueprint' && f.language !== language) continue;
               results.push({ name: t.name, kind: t.kind, parent: t.parent, line: t.line, path: f.path, project: f.project, matchReason: 'prefix-variant' });
-              if (results.length >= maxResults) break;
             }
-            if (results.length >= maxResults) break;
           }
+          if (results.length > 1) {
+            results.sort((a, b) => {
+              const aH = /\.(h|hpp|hxx)$/i.test(a.path) ? 0 : 1;
+              const bH = /\.(h|hpp|hxx)$/i.test(b.path) ? 0 : 1;
+              return aH - bH;
+            });
+          }
+          if (results.length > maxResults) results.length = maxResults;
         }
       }
 
@@ -960,10 +973,14 @@ export class MemoryIndex {
   }
 
   listMembersForType(typeName, options = {}) {
-    const { project = null, language = null, maxResults = 50 } = options;
+    const { project = null, language = null, maxFunctions = 30, maxProperties = 30 } = options;
 
-    const results = [];
-    // Find all type IDs for this type name
+    const functions = [];
+    const properties = [];
+    const enumValues = [];
+    let functionsOverflow = false;
+    let propertiesOverflow = false;
+
     const typeIds = this.typesByName.get(typeName) || [];
     for (const tid of typeIds) {
       const t = this.typesById.get(tid);
@@ -977,15 +994,26 @@ export class MemoryIndex {
       for (const mid of memberIds) {
         const m = this.membersById.get(mid);
         if (!m) continue;
-        results.push({
+        const entry = {
           name: m.name, member_kind: m.memberKind, line: m.line,
           specifiers: m.specifiers, type_name: t.name, type_kind: t.kind,
           path: f.path, project: f.project, matchReason: 'type-member'
-        });
-        if (results.length >= maxResults) return results;
+        };
+        if (m.memberKind === 'function') {
+          if (functions.length < maxFunctions) functions.push(entry);
+          else functionsOverflow = true;
+        } else if (m.memberKind === 'enum_value') {
+          enumValues.push(entry);
+        } else {
+          if (properties.length < maxProperties) properties.push(entry);
+          else propertiesOverflow = true;
+        }
       }
     }
-    return results;
+    return {
+      functions, properties, enumValues,
+      truncated: { functions: functionsOverflow, properties: propertiesOverflow }
+    };
   }
 
   findFileByName(filename, options = {}) {

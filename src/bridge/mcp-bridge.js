@@ -341,10 +341,15 @@ If a search returns no results, check the hints in the response for guidance (wr
                   default: true,
                   description: 'Include child classes/structs that inherit from this type'
                 },
-                maxMembers: {
+                maxFunctions: {
                   type: 'number',
-                  default: 50,
-                  description: 'Maximum members to return'
+                  default: 30,
+                  description: 'Maximum functions to return (independent budget from properties)'
+                },
+                maxProperties: {
+                  type: 'number',
+                  default: 30,
+                  description: 'Maximum properties to return (independent budget from functions)'
                 },
                 maxChildren: {
                   type: 'number',
@@ -565,8 +570,8 @@ If a search returns no results, check the hints in the response for guidance (wr
             toolResult = await fetchService('/explain-type', {
               name: args.name, project: args.project, language: args.language,
               contextLines: args.contextLines, includeMembers: args.includeMembers,
-              includeChildren: args.includeChildren, maxMembers: args.maxMembers,
-              maxChildren: args.maxChildren
+              includeChildren: args.includeChildren, maxFunctions: args.maxFunctions,
+              maxProperties: args.maxProperties, maxChildren: args.maxChildren
             });
             break;
 
