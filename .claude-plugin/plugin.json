@@ -3,5 +3,6 @@
   "description": "AngelScript file index for fast class/struct/file lookups in Unreal projects. Provides tools to find types, browse modules, and discover class hierarchies.",
   "author": {
     "name": "EmbarkStudios"
-  }
+  },
+  "eagerToolLoading": true
 }

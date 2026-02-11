@@ -102,11 +102,40 @@
       <h2>Slowest Queries (Top 10)</h2>
       <div id="slowest" class="loading">Loading...</div>
     </div>
+
+    <!-- MCP Tool Usage -->
+    <div class="card">
+      <h2 style="display:flex;align-items:center;gap:12px">MCP Tool Usage
+        <button onclick="resetMcpStats()" id="reset-mcp-btn"
+          style="padding:3px 10px;background:#3e3e3e;color:#d4d4d4;border:1px solid #555;border-radius:3px;cursor:pointer;font-size:11px">
+          Reset
+        </button>
+      </h2>
+      <div id="mcp-overview" class="loading">Loading...</div>
+    </div>
+
+    <!-- MCP Tool Call Counts -->
+    <div class="card">
+      <h2>MCP Calls by Tool</h2>
+      <div id="mcp-by-tool" class="loading">Loading...</div>
+    </div>
+
+    <!-- MCP Recent Calls -->
+    <div class="card card-full">
+      <h2>Recent MCP Tool Calls (Last 50)</h2>
+      <div id="mcp-recent" class="loading">Loading...</div>
+    </div>
+
+    <!-- MCP Sessions -->
+    <div class="card card-full">
+      <h2>MCP Sessions</h2>
+      <div id="mcp-sessions" class="loading">Loading...</div>
+    </div>
   </div>
 
   <script>
     async function loadAll() {
-      await Promise.all([loadHealth(), loadAnalytics(), loadWatcher()]);
+      await Promise.all([loadHealth(), loadAnalytics(), loadWatcher(), loadMcpAnalytics()]);
     }
 
     async function resetStats() {
@@ -340,6 +369,114 @@
         methodEl.innerHTML = msg;
         latencyEl.innerHTML = msg;
         slowestEl.innerHTML = msg;
+      }
+    }
+
+    async function resetMcpStats() {
+      const btn = document.getElementById('reset-mcp-btn');
+      if (!confirm('Clear all MCP tool analytics data?')) return;
+      btn.disabled = true;
+      btn.textContent = 'Clearing...';
+      try {
+        const resp = await fetch('/mcp-tool-analytics?all=true', { method: 'DELETE' });
+        const data = await resp.json();
+        btn.textContent = `Cleared ${data.deleted}`;
+        setTimeout(() => { btn.textContent = 'Reset'; btn.disabled = false; }, 2000);
+        loadMcpAnalytics();
+      } catch (err) {
+        btn.textContent = 'Error';
+        setTimeout(() => { btn.textContent = 'Reset'; btn.disabled = false; }, 2000);
+      }
+    }
+
+    async function loadMcpAnalytics() {
+      const overviewEl = document.getElementById('mcp-overview');
+      const byToolEl = document.getElementById('mcp-by-tool');
+      const recentEl = document.getElementById('mcp-recent');
+      const sessionsEl = document.getElementById('mcp-sessions');
+
+      try {
+        const resp = await fetch('/mcp-tool-analytics?summary=true');
+        const data = await resp.json();
+
+        // Overview
+        const total = data.total || 0;
+        const tools = data.byTool || [];
+        const sessions = data.bySessions || [];
+        const avgMs = tools.length > 0
+          ? (tools.reduce((s, t) => s + (t.avg_ms || 0) * t.count, 0) / Math.max(total, 1)).toFixed(1)
+          : '—';
+
+        overviewEl.innerHTML = `
+          <div class="stat-big">${total.toLocaleString()}</div>
+          <div class="stat-desc">total MCP tool calls</div>
+          <div class="stat-row" style="margin-top:12px"><span class="stat-label">Avg latency</span><span class="stat-value">${avgMs} ms</span></div>
+          <div class="stat-row"><span class="stat-label">Unique tools used</span><span class="stat-value">${tools.length}</span></div>
+          <div class="stat-row"><span class="stat-label">Sessions</span><span class="stat-value">${sessions.length}</span></div>
+        `;
+
+        // By tool — bar chart
+        if (tools.length === 0) {
+          byToolEl.innerHTML = '<span class="loading">No MCP tool data yet</span>';
+        } else {
+          const maxCount = Math.max(...tools.map(t => t.count));
+          byToolEl.innerHTML = '<div class="bar-chart">' + tools.map(t => {
+            const shortName = t.tool_name.replace('unreal_', '');
+            return `
+              <div class="bar-row">
+                <span class="bar-label" title="${esc(t.tool_name)}">${esc(shortName)}</span>
+                <div class="bar-track"><div class="bar-fill bar-fill-blue" style="width:${(t.count / maxCount * 100).toFixed(1)}%"></div></div>
+                <span class="bar-value">${t.count.toLocaleString()} (${(t.avg_ms || 0).toFixed(0)}ms)</span>
+              </div>
+            `;
+          }).join('') + '</div>';
+        }
+
+        // Recent calls
+        const recent = data.recent || [];
+        if (recent.length === 0) {
+          recentEl.innerHTML = '<span class="loading">No recent MCP calls</span>';
+        } else {
+          recentEl.innerHTML = `
+            <table>
+              <tr><th>Tool</th><th>Args</th><th>Duration</th><th>Size</th><th>Time</th></tr>
+              ${recent.map(c => `
+                <tr>
+                  <td>${esc(c.tool_name.replace('unreal_', ''))}</td>
+                  <td class="mono">${esc(truncate(c.args_summary, 60))}</td>
+                  <td class="mono" style="color:${(c.duration_ms || 0) > 200 ? '#f44747' : '#4ec9b0'}">${(c.duration_ms || 0).toFixed(0)} ms</td>
+                  <td class="mono">${c.result_size ? (c.result_size / 1024).toFixed(1) + 'K' : '—'}</td>
+                  <td style="color:#808080">${formatTime(c.timestamp)}</td>
+                </tr>
+              `).join('')}
+            </table>
+          `;
+        }
+
+        // Sessions
+        if (sessions.length === 0) {
+          sessionsEl.innerHTML = '<span class="loading">No session data</span>';
+        } else {
+          sessionsEl.innerHTML = `
+            <table>
+              <tr><th>Session ID</th><th>Calls</th><th>Started</th><th>Last Call</th></tr>
+              ${sessions.map(s => `
+                <tr>
+                  <td class="mono">${esc((s.session_id || '').slice(0, 8))}...</td>
+                  <td class="mono">${s.count}</td>
+                  <td style="color:#808080">${formatTime(s.started)}</td>
+                  <td style="color:#808080">${formatTime(s.last_call)}</td>
+                </tr>
+              `).join('')}
+            </table>
+          `;
+        }
+      } catch (err) {
+        const msg = `<span class="error">Failed to load: ${esc(err.message)}</span>`;
+        overviewEl.innerHTML = msg;
+        byToolEl.innerHTML = msg;
+        recentEl.innerHTML = msg;
+        sessionsEl.innerHTML = msg;
       }
     }
 

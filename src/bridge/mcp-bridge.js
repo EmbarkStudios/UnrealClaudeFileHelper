@@ -11,11 +11,13 @@ import {
 import { readFile } from 'fs/promises';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
+import { randomUUID } from 'crypto';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 const SERVICE_URL = 'http://127.0.0.1:3847';
+const SESSION_ID = randomUUID();
 
 async function fetchService(endpoint, params = {}) {
   const url = new URL(endpoint, SERVICE_URL);
@@ -44,6 +46,23 @@ async function postService(endpoint) {
     throw new Error(error.error || `HTTP ${response.status}`);
   }
 
+  return response.json();
+}
+
+async function fetchBatch(queries) {
+  if (!queries || !Array.isArray(queries) || queries.length === 0) {
+    throw new Error('queries array is required and must not be empty');
+  }
+  const url = new URL('/batch', SERVICE_URL);
+  const response = await fetch(url.toString(), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ queries })
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: response.statusText }));
+    throw new Error(error.error || `HTTP ${response.status}`);
+  }
   return response.json();
 }
 
@@ -117,6 +136,11 @@ If a search returns no results, check the hints in the response for guidance (wr
                 includeAssets: {
                   type: 'boolean',
                   description: 'Include blueprint/asset types in results. Default: true for exact match, false for fuzzy.'
+                },
+                contextLines: {
+                  type: 'number',
+                  default: 0,
+                  description: 'Lines of source context to include around the type definition. Set to 5-10 to see the type definition inline without needing to Read the file.'
                 }
               },
               required: ['name']
@@ -267,6 +291,65 @@ If a search returns no results, check the hints in the response for guidance (wr
                   type: 'number',
                   default: 20,
                   description: 'Maximum results to return'
+                },
+                contextLines: {
+                  type: 'number',
+                  default: 0,
+                  description: 'Lines of source context around each member definition. Set to 3-5 to see signatures and surrounding code inline.'
+                },
+                includeSignatures: {
+                  type: 'boolean',
+                  default: false,
+                  description: 'Include the source signature line for each member. Lightweight alternative to contextLines when you only need the declaration.'
+                }
+              },
+              required: ['name']
+            }
+          },
+          {
+            name: 'unreal_explain_type',
+            description: 'Get comprehensive information about a type in a single call: definition, members (functions/properties), and children. Replaces the common pattern of find_type + find_member + find_children. Use this when you need to understand a class or struct.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                name: {
+                  type: 'string',
+                  description: 'Type name to look up (e.g. AActor, UWidget, FVector)'
+                },
+                project: {
+                  type: 'string',
+                  description: 'Filter by project'
+                },
+                language: {
+                  type: 'string',
+                  enum: ['all', 'angelscript', 'cpp'],
+                  default: 'all',
+                  description: 'Filter by language'
+                },
+                contextLines: {
+                  type: 'number',
+                  default: 0,
+                  description: 'Lines of source context around the type definition and member declarations'
+                },
+                includeMembers: {
+                  type: 'boolean',
+                  default: true,
+                  description: 'Include member functions, properties, and enum values'
+                },
+                includeChildren: {
+                  type: 'boolean',
+                  default: true,
+                  description: 'Include child classes/structs that inherit from this type'
+                },
+                maxMembers: {
+                  type: 'number',
+                  default: 50,
+                  description: 'Maximum members to return'
+                },
+                maxChildren: {
+                  type: 'number',
+                  default: 20,
+                  description: 'Maximum children to return'
                 }
               },
               required: ['name']
@@ -375,6 +458,36 @@ If a search returns no results, check the hints in the response for guidance (wr
                 }
               }
             }
+          },
+          {
+            name: 'unreal_batch',
+            description: 'Execute multiple index queries in a single call. Use when you need results from several queries (e.g. look up 3 types at once). Each query specifies a method and arguments. Maximum 10 queries per batch.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                queries: {
+                  type: 'array',
+                  description: 'Array of queries to execute',
+                  maxItems: 10,
+                  items: {
+                    type: 'object',
+                    properties: {
+                      method: {
+                        type: 'string',
+                        enum: ['findTypeByName', 'findMember', 'findChildrenOf', 'findFileByName', 'findAssetByName', 'listModules', 'browseModule'],
+                        description: 'Query method to call'
+                      },
+                      args: {
+                        type: 'array',
+                        description: 'Arguments array for the method. E.g. ["AActor", {"project": "Discovery"}] for findTypeByName.'
+                      }
+                    },
+                    required: ['method', 'args']
+                  }
+                }
+              },
+              required: ['queries']
+            }
           }
         ]
       };
@@ -382,139 +495,130 @@ If a search returns no results, check the hints in the response for guidance (wr
 
     this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const { name, arguments: args } = request.params;
+      const callStartMs = performance.now();
+
+      // Fire-and-forget analytics tracking
+      const trackCall = (result) => {
+        const durationMs = Math.round(performance.now() - callStartMs);
+        const resultText = result?.content?.[0]?.text;
+        const resultSize = resultText ? resultText.length : 0;
+        const argsSummary = args ? JSON.stringify(Object.fromEntries(
+          Object.entries(args).map(([k, v]) => [k, typeof v === 'string' && v.length > 50 ? v.slice(0, 50) + '...' : v])
+        )) : null;
+        fetch(new URL('/internal/mcp-tool-call', SERVICE_URL).toString(), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ tool: name, args: argsSummary, durationMs, resultSize, sessionId: SESSION_ID })
+        }).catch(() => {});
+      };
 
       try {
+        let toolResult;
         switch (name) {
-          case 'unreal_find_type': {
-            const result = await fetchService('/find-type', {
-              name: args.name,
-              fuzzy: args.fuzzy,
-              project: args.project,
-              language: args.language,
-              kind: args.kind,
-              maxResults: args.maxResults,
-              includeAssets: args.includeAssets
+          case 'unreal_find_type':
+            toolResult = await fetchService('/find-type', {
+              name: args.name, fuzzy: args.fuzzy, project: args.project,
+              language: args.language, kind: args.kind, maxResults: args.maxResults,
+              includeAssets: args.includeAssets, contextLines: args.contextLines
             });
-            return {
-              content: [{ type: 'text', text: JSON.stringify(result, null, 2) }]
-            };
-          }
+            break;
 
-          case 'unreal_find_children': {
-            const result = await fetchService('/find-children', {
-              parent: args.parentClass,
-              recursive: args.recursive,
-              project: args.project,
-              language: args.language,
-              maxResults: args.maxResults
+          case 'unreal_find_children':
+            toolResult = await fetchService('/find-children', {
+              parent: args.parentClass, recursive: args.recursive,
+              project: args.project, language: args.language, maxResults: args.maxResults
             });
-            return {
-              content: [{ type: 'text', text: JSON.stringify(result, null, 2) }]
-            };
-          }
+            break;
 
-          case 'unreal_browse_module': {
-            const result = await fetchService('/browse-module', {
-              module: args.module,
-              project: args.project,
-              language: args.language,
-              maxResults: args.maxResults
+          case 'unreal_browse_module':
+            toolResult = await fetchService('/browse-module', {
+              module: args.module, project: args.project,
+              language: args.language, maxResults: args.maxResults
             });
-            return {
-              content: [{ type: 'text', text: JSON.stringify(result, null, 2) }]
-            };
-          }
+            break;
 
-          case 'unreal_find_file': {
-            const result = await fetchService('/find-file', {
-              filename: args.filename,
-              project: args.project,
-              language: args.language,
-              maxResults: args.maxResults
+          case 'unreal_find_file':
+            toolResult = await fetchService('/find-file', {
+              filename: args.filename, project: args.project,
+              language: args.language, maxResults: args.maxResults
             });
-            return {
-              content: [{ type: 'text', text: JSON.stringify(result, null, 2) }]
-            };
-          }
+            break;
 
           case 'unreal_refresh_index': {
             const endpoint = args.language && args.language !== 'all'
               ? `/refresh?language=${args.language}`
               : '/refresh';
-            const result = await postService(endpoint);
-            return {
-              content: [{ type: 'text', text: JSON.stringify(result, null, 2) }]
-            };
+            toolResult = await postService(endpoint);
+            break;
           }
 
-          case 'unreal_find_member': {
-            const result = await fetchService('/find-member', {
-              name: args.name,
-              fuzzy: args.fuzzy,
-              containingType: args.containingType,
-              memberKind: args.memberKind,
-              project: args.project,
-              language: args.language,
-              maxResults: args.maxResults
+          case 'unreal_find_member':
+            toolResult = await fetchService('/find-member', {
+              name: args.name, fuzzy: args.fuzzy, containingType: args.containingType,
+              memberKind: args.memberKind, project: args.project, language: args.language,
+              maxResults: args.maxResults, contextLines: args.contextLines,
+              includeSignatures: args.includeSignatures
             });
-            return {
-              content: [{ type: 'text', text: JSON.stringify(result, null, 2) }]
-            };
-          }
+            break;
 
-          case 'unreal_find_asset': {
-            const result = await fetchService('/find-asset', {
-              name: args.name,
-              fuzzy: args.fuzzy !== false,
-              project: args.project,
-              folder: args.folder,
-              maxResults: args.maxResults
+          case 'unreal_explain_type':
+            toolResult = await fetchService('/explain-type', {
+              name: args.name, project: args.project, language: args.language,
+              contextLines: args.contextLines, includeMembers: args.includeMembers,
+              includeChildren: args.includeChildren, maxMembers: args.maxMembers,
+              maxChildren: args.maxChildren
             });
-            return {
-              content: [{ type: 'text', text: JSON.stringify(result, null, 2) }]
-            };
-          }
+            break;
 
-          case 'unreal_grep': {
-            const result = await fetchService('/grep', {
-              pattern: args.pattern,
-              project: args.project,
-              language: args.language,
-              caseSensitive: args.caseSensitive,
-              maxResults: args.maxResults,
-              contextLines: args.contextLines,
-              includeAssets: args.includeAssets
+          case 'unreal_find_asset':
+            toolResult = await fetchService('/find-asset', {
+              name: args.name, fuzzy: args.fuzzy !== false,
+              project: args.project, folder: args.folder, maxResults: args.maxResults
             });
-            return {
-              content: [{ type: 'text', text: JSON.stringify(result, null, 2) }]
-            };
-          }
+            break;
 
-          case 'unreal_list_modules': {
-            const result = await fetchService('/list-modules', {
-              parent: args.parent,
-              project: args.project,
-              language: args.language,
-              depth: args.depth
+          case 'unreal_grep':
+            toolResult = await fetchService('/grep', {
+              pattern: args.pattern, project: args.project, language: args.language,
+              caseSensitive: args.caseSensitive, maxResults: args.maxResults,
+              contextLines: args.contextLines, includeAssets: args.includeAssets
             });
-            return {
-              content: [{ type: 'text', text: JSON.stringify(result, null, 2) }]
-            };
-          }
+            break;
 
-          default:
-            return {
+          case 'unreal_list_modules':
+            toolResult = await fetchService('/list-modules', {
+              parent: args.parent, project: args.project,
+              language: args.language, depth: args.depth
+            });
+            break;
+
+          case 'unreal_batch':
+            toolResult = await fetchBatch(args.queries);
+            break;
+
+          default: {
+            const errResult = {
               content: [{ type: 'text', text: `Unknown tool: ${name}` }],
               isError: true
             };
+            trackCall(errResult);
+            return errResult;
+          }
         }
+
+        const mcpResult = {
+          content: [{ type: 'text', text: JSON.stringify(toolResult, null, 2) }]
+        };
+        trackCall(mcpResult);
+        return mcpResult;
       } catch (error) {
         const isConnectionError = error.cause?.code === 'ECONNREFUSED' ||
                                   error.message.includes('ECONNREFUSED') ||
                                   error.message.includes('fetch failed');
 
+        let errResult;
         if (isConnectionError) {
-          return {
+          errResult = {
             content: [{
               type: 'text',
               text: JSON.stringify({
@@ -524,12 +628,14 @@ If a search returns no results, check the hints in the response for guidance (wr
             }],
             isError: true
           };
+        } else {
+          errResult = {
+            content: [{ type: 'text', text: `Error: ${error.message}` }],
+            isError: true
+          };
         }
-
-        return {
-          content: [{ type: 'text', text: `Error: ${error.message}` }],
-          isError: true
-        };
+        trackCall(errResult);
+        return errResult;
       }
     });
 

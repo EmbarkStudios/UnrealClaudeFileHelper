@@ -1,7 +1,7 @@
 import express from 'express';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
-import { deflateSync } from 'zlib';
+import { deflateSync, inflateSync } from 'zlib';
 import { writeFileSync, readFileSync, existsSync } from 'fs';
 import { spawn } from 'child_process';
 import { rankResults, groupResultsByFile } from './search-ranking.js';
@@ -75,6 +75,95 @@ function extractFilename(input) {
     return input.split(/[/\\]/).pop() || input;
   }
   return input;
+}
+
+/** Attach source context lines to results that have path + line.
+ *  Batch-fetches file content from DB, decompresses, extracts line windows.
+ *  Mutates results in-place, adding context: { lines, startLine } */
+function attachContextLines(results, contextLines, database, fileIdResolver) {
+  if (!contextLines || contextLines <= 0 || results.length === 0) return;
+
+  // Collect unique file IDs
+  const fileIds = new Set();
+  for (const r of results) {
+    const fid = fileIdResolver(r);
+    if (fid != null && r.line > 0) fileIds.add(fid);
+  }
+  if (fileIds.size === 0) return;
+
+  const contentMap = database.getFileContentBatch([...fileIds]);
+
+  // Cache decompressed line arrays per file
+  const linesCache = new Map();
+  const getLines = (fileId) => {
+    if (linesCache.has(fileId)) return linesCache.get(fileId);
+    const entry = contentMap.get(fileId);
+    if (!entry || !entry.content) { linesCache.set(fileId, null); return null; }
+    try {
+      const text = inflateSync(entry.content).toString('utf-8');
+      const lines = text.split('\n');
+      linesCache.set(fileId, lines);
+      return lines;
+    } catch {
+      linesCache.set(fileId, null);
+      return null;
+    }
+  };
+
+  for (const r of results) {
+    const fid = fileIdResolver(r);
+    if (fid == null || r.line <= 0) continue;
+    const lines = getLines(fid);
+    if (!lines) continue;
+
+    const lineIdx = r.line - 1; // 0-indexed
+    const startIdx = Math.max(0, lineIdx - contextLines);
+    const endIdx = Math.min(lines.length - 1, lineIdx + contextLines);
+    r.context = {
+      startLine: startIdx + 1,
+      lines: lines.slice(startIdx, endIdx + 1)
+    };
+  }
+}
+
+/** Attach just the signature line to member results. */
+function attachSignatures(results, database, fileIdResolver) {
+  if (results.length === 0) return;
+
+  const fileIds = new Set();
+  for (const r of results) {
+    const fid = fileIdResolver(r);
+    if (fid != null && r.line > 0) fileIds.add(fid);
+  }
+  if (fileIds.size === 0) return;
+
+  const contentMap = database.getFileContentBatch([...fileIds]);
+  const linesCache = new Map();
+  const getLines = (fileId) => {
+    if (linesCache.has(fileId)) return linesCache.get(fileId);
+    const entry = contentMap.get(fileId);
+    if (!entry || !entry.content) { linesCache.set(fileId, null); return null; }
+    try {
+      const text = inflateSync(entry.content).toString('utf-8');
+      const lines = text.split('\n');
+      linesCache.set(fileId, lines);
+      return lines;
+    } catch {
+      linesCache.set(fileId, null);
+      return null;
+    }
+  };
+
+  for (const r of results) {
+    const fid = fileIdResolver(r);
+    if (fid == null || r.line <= 0) continue;
+    const lines = getLines(fid);
+    if (!lines) continue;
+    const lineIdx = r.line - 1;
+    if (lineIdx < lines.length) {
+      r.signature = lines[lineIdx].trim();
+    }
+  }
 }
 
 export function createApi(database, indexer, queryPool = null, { zoektClient = null, zoektManager = null, zoektMirror = null, memoryIndex = null } = {}) {
@@ -633,9 +722,19 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
     }
   });
 
+  // Resolve file path → file ID using memory index or DB
+  function resolveFileId(path) {
+    if (!path) return null;
+    if (memoryIndex && memoryIndex.isLoaded) {
+      return memoryIndex.filesByPath.get(path) ?? null;
+    }
+    const row = database.db.prepare('SELECT id FROM files WHERE path = ?').get(path);
+    return row ? row.id : null;
+  }
+
   app.get('/find-type', async (req, res) => {
     try {
-      const { name, fuzzy, project, language, maxResults, includeAssets } = req.query;
+      const { name, fuzzy, project, language, maxResults, includeAssets, contextLines: cl } = req.query;
 
       if (!name) {
         return res.status(400).json({ error: 'name parameter required' });
@@ -643,6 +742,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       if (validateProject(database, project, res, memoryIndex)) return;
 
       const mr = parseInt(maxResults, 10) || 10;
+      const contextLines = cl !== undefined ? parseInt(cl, 10) : 0;
 
       const opts = {
         fuzzy: fuzzy === 'true',
@@ -654,6 +754,12 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       };
 
       const results = await poolQuery('findTypeByName', [name, opts]);
+
+      // Attach context lines before cleaning paths (need original paths for file ID lookup)
+      if (contextLines > 0) {
+        attachContextLines(results, contextLines, database, r => resolveFileId(r.path));
+      }
+
       results.forEach(r => {
         if (r.path) r.path = cleanPath(r.path, r.project);
         if (r.implementationPath) r.implementationPath = cleanPath(r.implementationPath, r.project);
@@ -788,7 +894,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
 
   app.get('/find-member', async (req, res) => {
     try {
-      const { name, fuzzy, containingType, containingTypeHierarchy, memberKind, project, language, maxResults } = req.query;
+      const { name, fuzzy, containingType, containingTypeHierarchy, memberKind, project, language, maxResults, contextLines: cl, includeSignatures: iSig } = req.query;
 
       if (!name) {
         return res.status(400).json({ error: 'name parameter required' });
@@ -796,6 +902,8 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       if (validateProject(database, project, res, memoryIndex)) return;
 
       const mr = parseInt(maxResults, 10) || 20;
+      const contextLines = cl !== undefined ? parseInt(cl, 10) : 0;
+      const includeSignatures = iSig === 'true';
 
       const opts = {
         fuzzy: fuzzy === 'true',
@@ -808,6 +916,14 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       };
 
       const results = await poolQuery('findMember', [name, opts]);
+
+      // Attach context or signatures before cleaning paths
+      if (contextLines > 0) {
+        attachContextLines(results, contextLines, database, r => resolveFileId(r.path));
+      } else if (includeSignatures) {
+        attachSignatures(results, database, r => resolveFileId(r.path));
+      }
+
       results.forEach(r => { if (r.path) r.path = cleanPath(r.path, r.project); });
       const response = { results };
       if (results.length === 0) {
@@ -831,6 +947,90 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
 
       const results = await poolQuery('listModules', [parent || '', opts]);
       res.json({ results });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // --- Compound explain-type endpoint (S3) ---
+
+  app.get('/explain-type', async (req, res) => {
+    try {
+      const { name, project, language, contextLines: cl, includeMembers: im, includeChildren: ic, maxMembers: mm, maxChildren: mc } = req.query;
+
+      if (!name) {
+        return res.status(400).json({ error: 'name parameter required' });
+      }
+      if (validateProject(database, project, res, memoryIndex)) return;
+
+      const startMs = performance.now();
+      const contextLines = cl !== undefined ? parseInt(cl, 10) : 0;
+      const includeMembers = im !== 'false';
+      const includeChildren = ic !== 'false';
+      const maxMembers = parseInt(mm, 10) || 50;
+      const maxChildren = parseInt(mc, 10) || 20;
+
+      // Step 1: Find the type
+      const typeOpts = { project: project || null, language: language || null, maxResults: 1 };
+      const typeResults = await poolQuery('findTypeByName', [name, typeOpts]);
+
+      if (typeResults.length === 0) {
+        const response = { type: null, hints: buildEmptyResultHints(database, { project, supportsFuzzy: true }, memoryIndex) };
+        return res.json(response);
+      }
+
+      const typeResult = typeResults[0];
+      const typeName = typeResult.name;
+
+      // Attach context before cleaning path
+      if (contextLines > 0) {
+        attachContextLines([typeResult], contextLines, database, r => resolveFileId(r.path));
+      }
+      if (typeResult.path) typeResult.path = cleanPath(typeResult.path, typeResult.project);
+
+      const response = { type: typeResult };
+
+      // Step 2: Members — list all members of this type directly
+      if (includeMembers) {
+        const memberOpts = {
+          project: project || null,
+          language: language || null,
+          maxResults: maxMembers
+        };
+        const members = await poolQuery('listMembersForType', [typeName, memberOpts]);
+
+        // Attach signatures for members
+        if (contextLines > 0) {
+          attachContextLines(members, contextLines, database, r => resolveFileId(r.path));
+        } else {
+          attachSignatures(members, database, r => resolveFileId(r.path));
+        }
+
+        members.forEach(r => { if (r.path) r.path = cleanPath(r.path, r.project); });
+
+        const functions = members.filter(m => m.member_kind === 'function');
+        const properties = members.filter(m => m.member_kind === 'property');
+        const enumValues = members.filter(m => m.member_kind === 'enum_value');
+        response.members = { functions, properties, enumValues, count: members.length };
+      }
+
+      // Step 3: Children
+      if (includeChildren) {
+        const childOpts = {
+          recursive: true,
+          project: project || null,
+          language: language || null,
+          maxResults: maxChildren
+        };
+        const childResult = await poolQuery('findChildrenOf', [typeName, childOpts]);
+        if (childResult.results) {
+          childResult.results.forEach(r => { if (r.path) r.path = cleanPath(r.path, r.project); });
+        }
+        response.children = childResult;
+      }
+
+      response.queryTimeMs = Math.round(performance.now() - startMs);
+      res.json(response);
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
@@ -944,6 +1144,53 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
     }
   });
 
+  // --- MCP Tool Analytics ---
+
+  app.post('/internal/mcp-tool-call', (req, res) => {
+    try {
+      const { tool, args, durationMs, resultSize, sessionId } = req.body;
+      if (!tool) return res.status(400).json({ error: 'tool required' });
+      database.logMcpToolCall(tool, args || null, durationMs || null, resultSize || null, sessionId || null);
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get('/mcp-tool-analytics', (req, res) => {
+    try {
+      const { summary, toolName, sessionId, limit, since } = req.query;
+      if (summary === 'true') {
+        res.json(database.getMcpToolSummary());
+      } else {
+        const calls = database.getMcpToolCalls({
+          toolName: toolName || null,
+          sessionId: sessionId || null,
+          limit: limit ? parseInt(limit) : 100,
+          since: since || null
+        });
+        res.json({ calls });
+      }
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.delete('/mcp-tool-analytics', (req, res) => {
+    try {
+      if (req.query.all === 'true') {
+        const result = database.db.prepare('DELETE FROM mcp_tool_analytics').run();
+        res.json({ deleted: result.changes });
+      } else {
+        const daysOld = req.query.daysOld ? parseInt(req.query.daysOld) : 7;
+        const deleted = database.cleanupOldMcpAnalytics(daysOld);
+        res.json({ deleted });
+      }
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   // --- Name Trigram Index ---
 
   app.get('/name-trigram-status', (req, res) => {
@@ -980,6 +1227,46 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
         members: result.members,
         durationSeconds: parseFloat(duration)
       });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // --- Batch query endpoint (S6) ---
+
+  const BATCH_ALLOWED_METHODS = new Set([
+    'findTypeByName', 'findMember', 'findChildrenOf', 'findFileByName', 'findAssetByName', 'listModules', 'browseModule'
+  ]);
+
+  app.post('/batch', async (req, res) => {
+    try {
+      const { queries } = req.body;
+      if (!Array.isArray(queries) || queries.length === 0) {
+        return res.status(400).json({ error: 'queries array required' });
+      }
+      if (queries.length > 10) {
+        return res.status(400).json({ error: 'Maximum 10 queries per batch' });
+      }
+
+      const startMs = performance.now();
+      const results = [];
+
+      for (const q of queries) {
+        const { method, args } = q;
+        if (!method || !BATCH_ALLOWED_METHODS.has(method)) {
+          results.push({ error: `Unknown or disallowed method: ${method}` });
+          continue;
+        }
+        try {
+          const argArray = Array.isArray(args) ? args : [args];
+          const result = await poolQuery(method, argArray);
+          results.push({ result });
+        } catch (err) {
+          results.push({ error: err.message });
+        }
+      }
+
+      res.json({ results, totalTimeMs: Math.round(performance.now() - startMs) });
     } catch (err) {
       res.status(500).json({ error: err.message });
     }

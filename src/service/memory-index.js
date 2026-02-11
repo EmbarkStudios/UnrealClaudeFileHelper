@@ -959,6 +959,35 @@ export class MemoryIndex {
     return results;
   }
 
+  listMembersForType(typeName, options = {}) {
+    const { project = null, language = null, maxResults = 50 } = options;
+
+    const results = [];
+    // Find all type IDs for this type name
+    const typeIds = this.typesByName.get(typeName) || [];
+    for (const tid of typeIds) {
+      const t = this.typesById.get(tid);
+      if (!t) continue;
+      const f = this.filesById.get(t.fileId);
+      if (!f) continue;
+      if (project && f.project !== project) continue;
+      if (language && language !== 'all' && f.language !== language) continue;
+
+      const memberIds = this.membersByTypeId.get(tid) || [];
+      for (const mid of memberIds) {
+        const m = this.membersById.get(mid);
+        if (!m) continue;
+        results.push({
+          name: m.name, member_kind: m.memberKind, line: m.line,
+          specifiers: m.specifiers, type_name: t.name, type_kind: t.kind,
+          path: f.path, project: f.project, matchReason: 'type-member'
+        });
+        if (results.length >= maxResults) return results;
+      }
+    }
+    return results;
+  }
+
   findFileByName(filename, options = {}) {
     const { project = null, language = null, maxResults = 20 } = options;
     const filenameLower = filename.toLowerCase().replace(/\.[^.]+$/, '');

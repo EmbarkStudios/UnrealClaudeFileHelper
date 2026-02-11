@@ -369,6 +369,27 @@ export class IndexDatabase {
       this.setMetadata('nameTrigramBuildNeeded', true);
     }
 
+    // MCP tool usage analytics table
+    const hasMcpToolTable = this.db.prepare(`
+      SELECT COUNT(*) as count FROM sqlite_master WHERE type='table' AND name='mcp_tool_analytics'
+    `).get().count > 0;
+
+    if (!hasMcpToolTable) {
+      this.db.exec(`
+        CREATE TABLE mcp_tool_analytics (
+          id INTEGER PRIMARY KEY,
+          timestamp TEXT NOT NULL,
+          tool_name TEXT NOT NULL,
+          args_summary TEXT,
+          duration_ms REAL,
+          result_size INTEGER,
+          session_id TEXT
+        );
+        CREATE INDEX idx_mcp_tool_ts ON mcp_tool_analytics(timestamp);
+        CREATE INDEX idx_mcp_tool_name ON mcp_tool_analytics(tool_name);
+      `);
+    }
+
     // Migrate types table to include depth column for inheritance depth ranking
     const hasDepthColumn = this.db.prepare(`
       SELECT COUNT(*) as count FROM pragma_table_info('types') WHERE name = 'depth'
@@ -2179,6 +2200,74 @@ export class IndexDatabase {
 
     this.setMetadata('depthComputeNeeded', false);
     return depths.size;
+  }
+
+  // --- MCP Tool Analytics Methods ---
+
+  logMcpToolCall(toolName, argsSummary, durationMs, resultSize, sessionId) {
+    try {
+      this.db.prepare(`
+        INSERT INTO mcp_tool_analytics (timestamp, tool_name, args_summary, duration_ms, result_size, session_id)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `).run(new Date().toISOString(), toolName, argsSummary || null, durationMs || null, resultSize || null, sessionId || null);
+    } catch (err) {
+      // Non-critical — don't break tool calls
+    }
+  }
+
+  getMcpToolSummary() {
+    const byTool = this.db.prepare(`
+      SELECT tool_name, COUNT(*) as count, AVG(duration_ms) as avg_ms,
+             MAX(duration_ms) as max_ms, MIN(timestamp) as first_seen, MAX(timestamp) as last_seen
+      FROM mcp_tool_analytics
+      GROUP BY tool_name
+      ORDER BY count DESC
+    `).all();
+
+    const recent = this.db.prepare(`
+      SELECT tool_name, args_summary, duration_ms, result_size, session_id, timestamp
+      FROM mcp_tool_analytics
+      ORDER BY id DESC
+      LIMIT 50
+    `).all();
+
+    const total = this.db.prepare('SELECT COUNT(*) as count FROM mcp_tool_analytics').get().count;
+
+    const bySessions = this.db.prepare(`
+      SELECT session_id, COUNT(*) as count, MIN(timestamp) as started, MAX(timestamp) as last_call
+      FROM mcp_tool_analytics
+      WHERE session_id IS NOT NULL
+      GROUP BY session_id
+      ORDER BY last_call DESC
+      LIMIT 20
+    `).all();
+
+    return { total, byTool, recent, bySessions };
+  }
+
+  getMcpToolCalls(options = {}) {
+    const { toolName = null, sessionId = null, limit = 100, since = null } = options;
+
+    let sql = 'SELECT * FROM mcp_tool_analytics WHERE 1=1';
+    const params = [];
+
+    if (toolName) { sql += ' AND tool_name = ?'; params.push(toolName); }
+    if (sessionId) { sql += ' AND session_id = ?'; params.push(sessionId); }
+    if (since) { sql += ' AND timestamp >= ?'; params.push(since); }
+
+    sql += ' ORDER BY id DESC LIMIT ?';
+    params.push(limit);
+
+    return this.db.prepare(sql).all(...params);
+  }
+
+  cleanupOldMcpAnalytics(daysOld = 7) {
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - daysOld);
+    const result = this.db.prepare(`
+      DELETE FROM mcp_tool_analytics WHERE timestamp < ?
+    `).run(cutoff.toISOString());
+    return result.changes;
   }
 }
 
