@@ -1131,7 +1131,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       const { method, minDurationMs, limit, since, summary } = req.query;
 
       if (summary === 'true') {
-        res.json(database.getQueryAnalyticsSummary());
+        res.json(database.getQueryAnalyticsSummary(since || null));
       } else {
         const options = {
           method: method || null,
@@ -1178,7 +1178,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
     try {
       const { summary, toolName, sessionId, limit, since } = req.query;
       if (summary === 'true') {
-        res.json(database.getMcpToolSummary());
+        res.json(database.getMcpToolSummary(since || null));
       } else {
         const calls = database.getMcpToolCalls({
           toolName: toolName || null,

@@ -41,6 +41,12 @@
     .error { color: #f44747; }
     .refresh-btn { background: #333; color: #808080; border: 1px solid #3e3e3e; padding: 4px 12px; border-radius: 3px; cursor: pointer; font-size: 12px; }
     .refresh-btn:hover { background: #3e3e3e; color: #d4d4d4; }
+    .range-filter { display: flex; gap: 2px; }
+    .range-btn { background: #2d2d2d; color: #808080; border: 1px solid #3e3e3e; padding: 4px 10px; cursor: pointer; font-size: 12px; }
+    .range-btn:first-child { border-radius: 3px 0 0 3px; }
+    .range-btn:last-child { border-radius: 0 3px 3px 0; }
+    .range-btn:hover { background: #3e3e3e; color: #d4d4d4; }
+    .range-btn.active { background: #264f78; color: #9cdcfe; border-color: #264f78; }
     .latency-compare { display: flex; gap: 12px; align-items: flex-end; margin-top: 8px; }
     .latency-bar { display: flex; flex-direction: column; align-items: center; gap: 4px; }
     .latency-bar-inner { width: 60px; border-radius: 3px 3px 0 0; }
@@ -52,6 +58,12 @@
   <div class="header">
     <h1>Unreal Index</h1>
     <a class="nav-link" href="/search.html">Search</a>
+    <div class="range-filter">
+      <button class="range-btn" onclick="setRange('day')" id="range-day">Day</button>
+      <button class="range-btn" onclick="setRange('week')" id="range-week">Week</button>
+      <button class="range-btn" onclick="setRange('month')" id="range-month">Month</button>
+      <button class="range-btn active" onclick="setRange('all')" id="range-all">All</button>
+    </div>
     <button class="refresh-btn" onclick="loadAll()">Refresh</button>
     <span id="version-badge" style="margin-left:auto;font-size:11px;color:#555;font-family:'Cascadia Code','Consolas',monospace"></span>
   </div>
@@ -135,6 +147,25 @@
   </div>
 
   <script>
+    let currentRange = 'all';
+
+    function getSinceParam() {
+      if (currentRange === 'all') return '';
+      const now = new Date();
+      if (currentRange === 'day') now.setDate(now.getDate() - 1);
+      else if (currentRange === 'week') now.setDate(now.getDate() - 7);
+      else if (currentRange === 'month') now.setMonth(now.getMonth() - 1);
+      return now.toISOString();
+    }
+
+    function setRange(range) {
+      currentRange = range;
+      document.querySelectorAll('.range-btn').forEach(b => b.classList.remove('active'));
+      document.getElementById('range-' + range).classList.add('active');
+      loadAnalytics();
+      loadMcpAnalytics();
+    }
+
     async function loadAll() {
       await Promise.all([loadHealth(), loadAnalytics(), loadWatcher(), loadMcpAnalytics()]);
     }
@@ -307,7 +338,9 @@
       const slowestEl = document.getElementById('slowest');
 
       try {
-        const resp = await fetch('/query-analytics?summary=true');
+        const since = getSinceParam();
+        const url = '/query-analytics?summary=true' + (since ? '&since=' + encodeURIComponent(since) : '');
+        const resp = await fetch(url);
         const data = await resp.json();
 
         // Overview
@@ -411,7 +444,9 @@
       const sessionsEl = document.getElementById('mcp-sessions');
 
       try {
-        const resp = await fetch('/mcp-tool-analytics?summary=true');
+        const since = getSinceParam();
+        const url = '/mcp-tool-analytics?summary=true' + (since ? '&since=' + encodeURIComponent(since) : '');
+        const resp = await fetch(url);
         const data = await resp.json();
 
         // Overview

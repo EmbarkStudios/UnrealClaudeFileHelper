@@ -2106,22 +2106,25 @@ export class IndexDatabase {
     return this.db.prepare(sql).all(...params);
   }
 
-  getQueryAnalyticsSummary() {
+  getQueryAnalyticsSummary(since = null) {
+    const whereClause = since ? ' WHERE timestamp >= ?' : '';
+    const params = since ? [since] : [];
+
     const byMethod = this.db.prepare(`
       SELECT method, COUNT(*) as count, AVG(duration_ms) as avg_ms, MAX(duration_ms) as max_ms
-      FROM query_analytics
+      FROM query_analytics${whereClause}
       GROUP BY method
       ORDER BY count DESC
-    `).all();
+    `).all(...params);
 
     const slowest = this.db.prepare(`
       SELECT method, args, duration_ms, timestamp
-      FROM query_analytics
+      FROM query_analytics${whereClause}
       ORDER BY duration_ms DESC
       LIMIT 10
-    `).all();
+    `).all(...params);
 
-    const total = this.db.prepare('SELECT COUNT(*) as count FROM query_analytics').get().count;
+    const total = this.db.prepare(`SELECT COUNT(*) as count FROM query_analytics${whereClause}`).get(...params).count;
 
     return { total, byMethod, slowest };
   }
@@ -2215,32 +2218,36 @@ export class IndexDatabase {
     }
   }
 
-  getMcpToolSummary() {
+  getMcpToolSummary(since = null) {
+    const whereClause = since ? ' WHERE timestamp >= ?' : '';
+    const andClause = since ? ' AND timestamp >= ?' : '';
+    const params = since ? [since] : [];
+
     const byTool = this.db.prepare(`
       SELECT tool_name, COUNT(*) as count, AVG(duration_ms) as avg_ms,
              MAX(duration_ms) as max_ms, MIN(timestamp) as first_seen, MAX(timestamp) as last_seen
-      FROM mcp_tool_analytics
+      FROM mcp_tool_analytics${whereClause}
       GROUP BY tool_name
       ORDER BY count DESC
-    `).all();
+    `).all(...params);
 
     const recent = this.db.prepare(`
       SELECT tool_name, args_summary, duration_ms, result_size, session_id, timestamp
-      FROM mcp_tool_analytics
+      FROM mcp_tool_analytics${whereClause}
       ORDER BY id DESC
       LIMIT 50
-    `).all();
+    `).all(...params);
 
-    const total = this.db.prepare('SELECT COUNT(*) as count FROM mcp_tool_analytics').get().count;
+    const total = this.db.prepare(`SELECT COUNT(*) as count FROM mcp_tool_analytics${whereClause}`).get(...params).count;
 
     const bySessions = this.db.prepare(`
       SELECT session_id, COUNT(*) as count, MIN(timestamp) as started, MAX(timestamp) as last_call
       FROM mcp_tool_analytics
-      WHERE session_id IS NOT NULL
+      WHERE session_id IS NOT NULL${andClause}
       GROUP BY session_id
       ORDER BY last_call DESC
       LIMIT 20
-    `).all();
+    `).all(...params);
 
     return { total, byTool, recent, bySessions };
   }
