@@ -1,13 +1,15 @@
 ---
 name: setup
-description: Initialize and configure the embark-claude-index plugin. Installs dependencies in WSL, runs the setup wizard, installs Zoekt, and starts the indexing service. Run this after first installing the plugin.
+description: Initialize and configure the embark-claude-index plugin. Clones repo into WSL, installs dependencies, runs the setup wizard, installs Zoekt, and starts the indexing service. Run this after first installing the plugin.
 ---
 
 # embark-claude-index Setup
 
 First-time setup for the Unreal Engine code index plugin.
 
-**IMPORTANT: This service runs entirely in WSL.** All setup commands below MUST be executed inside WSL using `wsl -- bash -c '...'`. Do NOT run npm install, setup wizard, or Zoekt installation on Windows directly.
+**CRITICAL SHELL INFO**: Claude Code runs in **Git Bash (MINGW)** on Windows. All commands below use bash syntax. Do NOT use PowerShell (`$env:`, `Get-ChildItem`) or cmd.exe (`dir /s`) syntax — they will fail.
+
+**IMPORTANT**: This service runs entirely in WSL. Use `wsl -- bash -c '...'` for all service-side operations. Use single quotes for the bash -c argument to prevent variable expansion by Git Bash.
 
 ## When to Use
 
@@ -19,43 +21,31 @@ Trigger this skill when:
 
 ## Setup Steps
 
-All commands run from Windows via `wsl -- bash -c '...'`. Use single quotes for the outer bash -c string to prevent Windows shell variable expansion.
+Execute these steps sequentially. Each step depends on the previous one succeeding.
 
-### Step 1: Locate the plugin source and copy to WSL
+### Step 1: Clone the repo into WSL
 
-The plugin cache is on Windows. Find it and determine the WSL-accessible path:
-
-```powershell
-# Find the plugin cache directory on Windows
-dir "$env:USERPROFILE\.claude\plugins\cache\embark-claude-index" -Recurse -Filter "package.json" -Depth 4
-```
-
-The Windows path `C:\Users\<user>\.claude\plugins\cache\...` is accessible from WSL as `/mnt/c/Users/<user>/.claude/plugins/cache/...`.
-
-Clone or copy the repo to a stable WSL location:
+Use git clone directly in WSL. This is the simplest and most reliable approach.
 
 ```bash
-wsl -- bash -c 'PLUGIN_SRC="/mnt/c/Users/$(cmd.exe /c echo %USERNAME% 2>/dev/null | tr -d "\r")/.claude/plugins/cache/embark-claude-index"; DEST="$HOME/.claude/repos/embark-claude-index"; mkdir -p "$DEST" && cp -r "$PLUGIN_SRC"/embark-claude-index/*/. "$DEST/"'
+wsl -- bash -c 'mkdir -p "$HOME/.claude/repos" && if [ -d "$HOME/.claude/repos/embark-claude-index/.git" ]; then cd "$HOME/.claude/repos/embark-claude-index" && git pull --ff-only && echo "Repo updated"; else git clone https://github.com/EmbarkStudios/UnrealClaudeFileHelper.git "$HOME/.claude/repos/embark-claude-index" && echo "Repo cloned"; fi'
 ```
 
-Or if git is available in WSL, clone directly:
-
-```bash
-wsl -- bash -c 'git clone https://github.com/EmbarkStudios/UnrealClaudeFileHelper.git "$HOME/.claude/repos/embark-claude-index" 2>/dev/null || (cd "$HOME/.claude/repos/embark-claude-index" && git pull --ff-only)'
-```
+If this succeeds, move to Step 2. If git clone fails (network issues), ask the user to check their internet connection.
 
 ### Step 2: Install Node.js dependencies in WSL
 
 ```bash
-wsl -- bash -c 'export PATH="$HOME/local/node22/bin:$PATH"; cd "$HOME/.claude/repos/embark-claude-index" && npm install --production'
+wsl -- bash -c 'export PATH="$HOME/local/node22/bin:$PATH"; cd "$HOME/.claude/repos/embark-claude-index" && node --version && npm install --production'
 ```
 
-If this fails with Node version errors, the user needs Node.js 20.18+ in WSL. Check with:
+**If Node.js is not found or too old** (need 20.18+):
 ```bash
-wsl -- bash -c 'export PATH="$HOME/local/node22/bin:$PATH"; node --version'
+wsl -- bash -c 'mkdir -p "$HOME/local/node22" && curl -fsSL https://nodejs.org/dist/v22.12.0/node-v22.12.0-linux-x64.tar.xz | tar -xJ -C "$HOME/local/node22" --strip-components=1 && echo "Node.js installed: $($HOME/local/node22/bin/node --version)"'
 ```
+Then retry the npm install command above.
 
-If `better-sqlite3` fails to compile:
+**If better-sqlite3 fails to compile** (missing build tools):
 ```bash
 wsl -- bash -c 'sudo apt install -y build-essential python3'
 ```
@@ -73,28 +63,35 @@ The wizard will interactively ask the user for:
 - Content/asset indexing preferences
 - It generates `config.json`
 
-**Note:** The wizard understands Windows paths (e.g. `C:\Projects\MyGame`) and converts them automatically.
+**Note:** The wizard accepts Windows paths (e.g. `C:\Projects\MyGame`) and converts them automatically.
 
 ### Step 4: Install Zoekt in WSL (full-text code search)
 
 Zoekt provides fast regex search across the entire codebase. It requires Go.
 
 ```bash
-wsl -- bash -c 'export PATH="/usr/local/go/bin:$HOME/go/bin:$PATH"; which zoekt-index 2>/dev/null && echo "Zoekt already installed" || (go install github.com/sourcegraph/zoekt/cmd/zoekt-index@latest && go install github.com/sourcegraph/zoekt/cmd/zoekt-webserver@latest && echo "Zoekt installed")'
+wsl -- bash -c 'export PATH="/usr/local/go/bin:$HOME/go/bin:$PATH"; if command -v zoekt-index >/dev/null 2>&1; then echo "Zoekt already installed"; elif command -v go >/dev/null 2>&1; then echo "Installing Zoekt..." && go install github.com/sourcegraph/zoekt/cmd/zoekt-index@latest && go install github.com/sourcegraph/zoekt/cmd/zoekt-webserver@latest && echo "Zoekt installed"; else echo "Go not found - Zoekt (optional) requires Go: https://go.dev/dl/"; fi'
 ```
 
-If Go is not installed:
-```bash
-wsl -- bash -c 'which go 2>/dev/null || echo "Go not found — install from https://go.dev/dl/ to enable Zoekt full-text search"'
-```
-
-If Go is missing, tell the user: Zoekt is optional but recommended. Without it, `unreal_grep` will use a slower fallback. They can install Go later and re-run this step.
+If Go is missing, tell the user: Zoekt is optional but recommended. Without it, `unreal_grep` will be unavailable. They can install Go later and re-run this step.
 
 ### Step 5: Start the indexing service in WSL
 
+First check if it's already running:
+```bash
+wsl -- bash -c 'curl -s http://127.0.0.1:3847/health 2>/dev/null && echo "Service already running" || echo "Service not running"'
+```
+
+If not running, start it:
 ```bash
 wsl -- bash -c 'export PATH="$HOME/local/node22/bin:$HOME/go/bin:/usr/local/go/bin:$PATH"; cd "$HOME/.claude/repos/embark-claude-index" && screen -dmS unreal-index bash -c "node src/service/index.js 2>&1 | tee /tmp/unreal-index.log"'
 ```
+
+**If screen is not installed:**
+```bash
+wsl -- bash -c 'sudo apt install -y screen'
+```
+Then retry the start command.
 
 Wait a few seconds, then verify:
 ```bash
@@ -106,19 +103,33 @@ If the health check fails, check the log:
 wsl -- bash -c 'tail -20 /tmp/unreal-index.log'
 ```
 
-### Step 6: Start the file watcher on Windows
+### Step 6: Start the file watcher
 
-This is the ONLY step that runs on Windows directly:
+The watcher runs on the Windows side to watch project files. Find the repo path on Windows and start it:
 
-```powershell
-Start-Process -NoNewWindow -FilePath "node" -ArgumentList "src\watcher\watcher-client.js" -WorkingDirectory "$env:USERPROFILE\.claude\repos\embark-claude-index"
+```bash
+"$HOME/.claude/repos/embark-claude-index/src/watcher/watcher-client.js"
 ```
 
-Or tell the user to open a separate terminal and run:
+Actually, the WSL repo is NOT directly accessible from Windows Git Bash as a Windows path. The watcher needs to run from a Windows-accessible copy. Check if a Windows copy exists:
+
+```bash
+ls "$USERPROFILE/.claude/repos/embark-claude-index/package.json" 2>/dev/null && echo "Windows repo exists" || echo "No Windows repo"
 ```
-cd %USERPROFILE%\.claude\repos\embark-claude-index
-node src\watcher\watcher-client.js
+
+If no Windows copy, clone one:
+```bash
+git clone https://github.com/EmbarkStudios/UnrealClaudeFileHelper.git "$USERPROFILE/.claude/repos/embark-claude-index"
 ```
+
+Then install dependencies and start the watcher:
+```bash
+cd "$USERPROFILE/.claude/repos/embark-claude-index" && npm install --production && node src/watcher/watcher-client.js
+```
+
+Note: The watcher runs in the foreground and will block the terminal. Tell the user they can:
+- Let it run in this terminal (it shows progress as files are indexed)
+- Or open a separate terminal to run it
 
 ### Step 7: Verify
 
@@ -132,12 +143,16 @@ This should show non-zero counts for indexed files.
 
 Tell the user:
 - **Restart Claude Code** to pick up the MCP tools. After restart, all `unreal_*` tools will be available.
-- **Open the dashboard** at [http://localhost:3847](http://localhost:3847) to monitor service health, watcher status, Zoekt, query analytics, and MCP tool usage. The dashboard shows the status of all components and has controls to start/restart the watcher.
+- **Open the dashboard** at [http://localhost:3847](http://localhost:3847) to monitor service health, watcher status, Zoekt, query analytics, and MCP tool usage. The dashboard shows the status of all components and has controls to start/restart services.
 
 ## Troubleshooting
 
-- **Node.js too old in WSL**: Need 20.18+. Install Node 22: `wsl -- bash -c 'curl -fsSL https://nodejs.org/dist/v22.12.0/node-v22.12.0-linux-x64.tar.xz | tar -xJ -C ~/local/node22 --strip-components=1'`
-- **Port 3847 in use**: `wsl -- bash -c 'kill $(lsof -ti:3847)'` then restart
-- **WSL networking**: Ensure `%USERPROFILE%\.wslconfig` contains `[wsl2]` and `networkingMode=mirrored`
+Common errors and fixes (all commands use bash syntax for Git Bash):
+
+- **"wsl is not recognized"**: WSL is not installed. User needs: https://learn.microsoft.com/en-us/windows/wsl/install
+- **Node.js too old in WSL**: Need 20.18+. Install Node 22 with the command in Step 2.
+- **Port 3847 in use**: `wsl -- bash -c 'kill $(lsof -ti:3847)'` then restart service
+- **WSL networking / localhost not working**: Check `cat "$USERPROFILE/.wslconfig"` contains `[wsl2]` and `networkingMode=mirrored`
 - **Screen not installed**: `wsl -- bash -c 'sudo apt install -y screen'`
 - **better-sqlite3 compile error**: `wsl -- bash -c 'sudo apt install -y build-essential python3'`
+- **npm install fails with EACCES**: Don't run npm as root. Fix permissions: `wsl -- bash -c 'sudo chown -R $(whoami) "$HOME/.claude"'`
