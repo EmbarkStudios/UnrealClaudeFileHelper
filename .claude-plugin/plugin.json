@@ -7,6 +7,5 @@
     "url": "https://github.com/EmbarkStudios"
   },
   "repository": "https://github.com/EmbarkStudios/UnrealClaudeFileHelper",
-  "keywords": ["unreal-engine", "gamedev", "angelscript", "cpp", "ue5", "code-search", "mcp"],
-  "eagerToolLoading": true
+  "keywords": ["unreal-engine", "gamedev", "angelscript", "cpp", "ue5", "code-search", "mcp"]
 }
