@@ -2,29 +2,35 @@ name: Claude PR Review
 
 on:
   pull_request:
-    types: [opened, ready_for_review]
-
-permissions:
-  contents: read
-  pull-requests: write
-  issues: write
-  statuses: write
-  checks: write
+    types: [opened, synchronize, ready_for_review, reopened]
 
 jobs:
-  request-claude-review:
-    runs-on: ubuntu-latest
-    # Do not run on draft PRs
+  review:
     if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: read
     steps:
-      - name: Request Claude review
-        uses: actions/github-script@v7
+      - name: Checkout repository
+        uses: actions/checkout@v4
         with:
-          script: |
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.payload.pull_request.number,
-              body: '@claude Please review this PR. Focus on:\n- Code quality and potential bugs\n- Security issues\n- Test coverage\n- Documentation completeness\n\nUse the opus model for thorough analysis.'
-            });
+          fetch-depth: 1
 
+      - name: Run Claude PR Review
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_args: "--model sonnet"
+          prompt: |
+            Review this PR. Focus on:
+            - Code quality and potential bugs
+            - Security issues
+            - Test coverage gaps
+            Approve the PR if everything looks good, or request changes if there are issues.
+          additional_permissions: |
+            actions: read
+            pull-requests: write
