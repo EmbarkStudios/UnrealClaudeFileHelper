@@ -1,0 +1,13 @@
+{
+  "projects": [],
+  "exclude": ["**/Intermediate/**", "**/Binaries/**", "**/ThirdParty/**",
+              "**/__ExternalActors__/**", "**/__ExternalObjects__/**", "**/Developers/**"],
+  "service": { "port": 3847, "host": "0.0.0.0" },
+  "data": {
+    "dbPath": "/data/db/index.db",
+    "mirrorDir": "/data/mirror",
+    "indexDir": "/data/zoekt-index"
+  },
+  "zoekt": { "webPort": 6070, "parallelism": 4, "reindexDebounceMs": 5000 },
+  "watcher": { "debounceMs": 100 }
+}

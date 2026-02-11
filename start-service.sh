@@ -20,6 +20,20 @@ if [ "$1" = "--bg" ]; then
     echo "ERROR: Service failed to start. Check /tmp/unreal-index.log"
     exit 1
   fi
+elif [ "$1" = "--docker" ]; then
+  docker compose up -d
+  echo "Container starting... waiting for health check"
+  for i in $(seq 1 30); do
+    if curl -sf http://127.0.0.1:3847/health > /dev/null 2>&1; then
+      echo "Service ready!"
+      curl -s http://127.0.0.1:3847/health
+      exit 0
+    fi
+    sleep 1
+  done
+  echo "WARNING: Service did not become healthy in 30s"
+  docker compose logs --tail=20
+  exit 1
 else
   exec node src/service/index.js
 fi
