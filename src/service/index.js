@@ -42,7 +42,7 @@ class UnrealIndexService {
   }
 
   async loadConfig() {
-    const configPath = join(__dirname, '..', '..', 'config.json');
+    const configPath = process.env.UNREAL_INDEX_CONFIG || join(__dirname, '..', '..', 'config.json');
 
     if (!existsSync(configPath)) {
       throw new Error(
@@ -69,8 +69,11 @@ class UnrealIndexService {
     }
 
     // Validate projects
-    if (!this.config.projects || !Array.isArray(this.config.projects) || this.config.projects.length === 0) {
-      throw new Error(`config.json has no projects configured.`);
+    if (!this.config.projects || !Array.isArray(this.config.projects)) {
+      this.config.projects = [];
+    }
+    if (this.config.projects.length === 0) {
+      console.log('[Config] No projects configured — service will receive data via /internal/ingest');
     }
 
     for (const project of this.config.projects) {

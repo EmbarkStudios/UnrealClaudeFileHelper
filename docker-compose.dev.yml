@@ -1,0 +1,12 @@
+services:
+  unreal-index:
+    volumes:
+      - ./src:/app/src:ro
+      - ./public:/app/public:ro
+      - unreal-index-db:/data/db
+      - unreal-index-mirror:/data/mirror
+      - unreal-index-zoekt:/data/zoekt-index
+    ports:
+      - "3847:3847"
+      - "6070:6070"
+    command: ["node", "--watch", "src/service/index.js"]

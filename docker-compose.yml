@@ -1,0 +1,27 @@
+services:
+  unreal-index:
+    build: .
+    container_name: unreal-index
+    ports:
+      - "3847:3847"
+    volumes:
+      - unreal-index-db:/data/db
+      - unreal-index-mirror:/data/mirror
+      - unreal-index-zoekt:/data/zoekt-index
+    mem_limit: 4g
+    memswap_limit: 4g
+    environment:
+      - NODE_OPTIONS=--max-old-space-size=3072
+    restart: unless-stopped
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3847/health').then(r=>r.ok?process.exit(0):process.exit(1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+
+volumes:
+  unreal-index-db:
+  unreal-index-mirror:
+  unreal-index-zoekt:
