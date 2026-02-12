@@ -41,6 +41,16 @@
     .error { color: #f44747; }
     .refresh-btn { background: #333; color: #808080; border: 1px solid #3e3e3e; padding: 4px 12px; border-radius: 3px; cursor: pointer; font-size: 12px; }
     .refresh-btn:hover { background: #3e3e3e; color: #d4d4d4; }
+    .version-alert { background: #2a2218; border: 1px solid #ce9178; border-radius: 6px; padding: 14px 16px; margin-bottom: 16px; display: none; }
+    .version-alert.visible { display: block; }
+    .version-alert-header { display: flex; align-items: center; gap: 12px; font-size: 13px; }
+    .version-alert-header .label { color: #ce9178; font-weight: 600; }
+    .version-alert-header .hashes { color: #d4d4d4; font-family: 'Cascadia Code','Consolas',monospace; font-size: 12px; }
+    .version-alert-actions { margin-top: 10px; display: flex; align-items: center; gap: 12px; }
+    .btn-primary { padding: 6px 16px; background: #0e639c; color: #fff; border: none; border-radius: 3px; cursor: pointer; font-size: 12px; }
+    .btn-primary:hover { background: #1177bb; }
+    .btn-primary:disabled { background: #333; color: #666; cursor: default; }
+    .version-alert-status { font-size: 12px; color: #808080; }
     .overview-bar { display: flex; gap: 16px; margin-bottom: 20px; }
     .overview-item { flex: 1; background: #252526; border: 1px solid #3e3e3e; border-radius: 6px; padding: 14px 16px; display: flex; align-items: center; gap: 12px; }
     .overview-dot { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; }
@@ -133,6 +143,18 @@
         <div class="overview-detail" id="ov-zoekt-detail">Checking...</div>
       </div>
       <div class="overview-action" id="ov-zoekt-action"></div>
+    </div>
+  </div>
+
+  <!-- Version Mismatch Alert -->
+  <div class="version-alert" id="version-alert">
+    <div class="version-alert-header">
+      <span class="label">Version mismatch</span>
+      <span class="hashes" id="version-alert-hashes"></span>
+    </div>
+    <div class="version-alert-actions">
+      <button class="btn-primary" id="update-restart-btn" onclick="updateAndRestart()">Update WSL &amp; Restart Service</button>
+      <span class="version-alert-status" id="update-restart-status"></span>
     </div>
   </div>
 
@@ -324,19 +346,12 @@
           const lastIngest = w.counters?.lastIngestAt ? formatRelative(w.counters.lastIngestAt) : 'never';
           const nextReconcile = w.reconciliation?.nextRunAt ? formatRelative(w.reconciliation.nextRunAt, true) : '—';
           const wGit = w.gitHash || '—';
-          const sGit = data.serviceGitHash || '—';
-          const versionMismatch = wGit !== '—' && sGit !== '—' && wGit !== sGit;
-          const versionClass = versionMismatch ? 'health-warn' : '';
-          const versionNote = versionMismatch
-            ? `<div class="stat-row"><span class="stat-label health-warn">Version mismatch</span><span class="stat-value health-warn">Watcher (${esc(wGit)}) differs from service (${esc(sGit)}) — restart watcher to pick up parser/ingest fixes</span></div>`
-            : '';
           watcherEl.innerHTML = `
             <div class="stat-row">
               <span class="stat-label">Status</span>
               <span class="stat-value ${active ? 'health-ok' : 'health-err'}">${active ? 'active' : 'inactive'}</span>
             </div>
-            <div class="stat-row"><span class="stat-label">Version</span><span class="stat-value ${versionClass}">${esc(w.version || '—')} (${esc(wGit)})</span></div>
-            ${versionNote}
+            <div class="stat-row"><span class="stat-label">Version</span><span class="stat-value">${esc(w.version || '—')} (${esc(wGit)})</span></div>
             <div class="stat-row"><span class="stat-label">Watcher ID</span><span class="stat-value">${esc(w.watcherId)}</span></div>
             <div class="stat-row"><span class="stat-label">Started</span><span class="stat-value">${uptime}</span></div>
             <div class="stat-row"><span class="stat-label">Files ingested</span><span class="stat-value">${(w.counters?.filesIngested || 0).toLocaleString()}</span></div>
@@ -663,21 +678,27 @@
       const zoektDot = document.getElementById('ov-zoekt-dot');
       const zoektDetail = document.getElementById('ov-zoekt-detail');
       const zoektAction = document.getElementById('ov-zoekt-action');
+      const versionAlert = document.getElementById('version-alert');
+
+      let serviceGitHash = null;
+      let watcherGitHash = null;
 
       // Service health
       const serviceAction = document.getElementById('ov-service-action');
       try {
         const resp = await fetch('/health');
         const data = await resp.json();
+        serviceGitHash = data.gitHash || null;
+        const hash = data.gitHash ? ` · ${data.gitHash}` : '';
         const heap = data.memoryMB.heapUsed;
         const heapMax = data.memoryMB.heapTotal;
         const heapPct = Math.round(heap / heapMax * 100);
-        if (heapPct > 90) {
+        if (heap > 2800) {
           serviceDot.className = 'overview-dot dot-yellow';
-          serviceDetail.textContent = `Up ${formatUptime(data.uptimeSeconds)} · Heap ${heapPct}% (${heap}/${heapMax} MB) — high memory`;
+          serviceDetail.textContent = `Up ${formatUptime(data.uptimeSeconds)}${hash} · Heap ${heap}/${heapMax} MB — high memory`;
         } else {
           serviceDot.className = 'overview-dot dot-green';
-          serviceDetail.textContent = `Up ${formatUptime(data.uptimeSeconds)} · ${data.memoryMB.rss} MB RSS · Heap ${heapPct}%`;
+          serviceDetail.textContent = `Up ${formatUptime(data.uptimeSeconds)}${hash} · ${data.memoryMB.rss} MB RSS · Heap ${heapPct}%`;
         }
         serviceAction.innerHTML = '<button class="action-btn action-btn-warn" onclick="overviewRestartService(this)">Restart</button>';
       } catch {
@@ -693,15 +714,17 @@
         const active = data.hasActiveWatcher;
         const w = data.watchers[0];
         if (active && w) {
+          watcherGitHash = w.gitHash || null;
+          const hash = w.gitHash ? ` · ${w.gitHash}` : '';
           const files = (w.counters?.filesIngested || 0).toLocaleString();
           const assets = (w.counters?.assetsIngested || 0).toLocaleString();
           const errors = w.counters?.errorsCount || 0;
           if (errors > 0) {
             watcherDot.className = 'overview-dot dot-yellow';
-            watcherDetail.textContent = `Active · ${files} files, ${assets} assets · ${errors} error(s)`;
+            watcherDetail.textContent = `Active${hash} · ${files} files, ${assets} assets · ${errors} error(s)`;
           } else {
             watcherDot.className = 'overview-dot dot-green';
-            watcherDetail.textContent = `Active · ${files} files, ${assets} assets ingested`;
+            watcherDetail.textContent = `Active${hash} · ${files} files, ${assets} assets ingested`;
           }
           watcherAction.innerHTML = '';
         } else {
@@ -715,7 +738,17 @@
         watcherAction.innerHTML = '<button class="action-btn" onclick="overviewStartWatcher(this)">Start</button>';
       }
 
-      // Zoekt status
+      // Version mismatch detection
+      const mismatch = serviceGitHash && watcherGitHash && serviceGitHash !== watcherGitHash;
+      if (mismatch) {
+        versionAlert.classList.add('visible');
+        document.getElementById('version-alert-hashes').textContent =
+          `Service (${serviceGitHash}) differs from Watcher (${watcherGitHash}) — WSL repo needs update`;
+      } else {
+        versionAlert.classList.remove('visible');
+      }
+
+      // Zoekt status (reuse the health data if available, otherwise fetch again)
       try {
         const resp = await fetch('/health');
         const data = await resp.json();
@@ -742,6 +775,50 @@
         zoektDot.className = 'overview-dot dot-gray';
         zoektDetail.textContent = 'Unknown';
         zoektAction.innerHTML = '';
+      }
+    }
+
+    async function updateAndRestart() {
+      const btn = document.getElementById('update-restart-btn');
+      const status = document.getElementById('update-restart-status');
+      if (!confirm('This will git pull in the WSL repo and restart the service. Continue?')) return;
+      btn.disabled = true;
+      btn.textContent = 'Updating...';
+      status.textContent = '';
+      try {
+        const resp = await fetch('/internal/update-and-restart', { method: 'POST' });
+        const data = await resp.json();
+        if (!resp.ok || !data.ok) {
+          status.textContent = 'Failed: ' + (data.error || 'Unknown error');
+          btn.textContent = 'Update WSL & Restart Service';
+          btn.disabled = false;
+          return;
+        }
+        status.textContent = `Updated to ${data.newGitHash}. Restarting service...`;
+        btn.textContent = 'Restarting...';
+        document.getElementById('ov-service-dot').className = 'overview-dot dot-yellow';
+        document.getElementById('ov-service-detail').textContent = 'Restarting...';
+        let attempts = 0;
+        const poll = setInterval(async () => {
+          attempts++;
+          try {
+            const r = await fetch('/health');
+            if (r.ok) {
+              clearInterval(poll);
+              loadAllWithOverview();
+            }
+          } catch {}
+          if (attempts >= 30) {
+            clearInterval(poll);
+            status.textContent = 'Service did not come back within 60s. Check logs.';
+            btn.textContent = 'Update WSL & Restart Service';
+            btn.disabled = false;
+          }
+        }, 2000);
+      } catch (err) {
+        status.textContent = 'Error: ' + err.message;
+        btn.textContent = 'Update WSL & Restart Service';
+        btn.disabled = false;
       }
     }
 

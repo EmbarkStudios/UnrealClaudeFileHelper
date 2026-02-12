@@ -652,11 +652,14 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
     }
 
     // The watcher runs on Windows — spawn via cmd.exe from WSL
+    // Use 'start "title"' to open a visible console window (like the batch file does).
+    // /b (background) is unreliable for long-running processes spawned from WSL.
     const watcherScript = `${winRepoDir}\\src\\watcher\\watcher-client.js`;
     const configFile = `${winRepoDir}\\config.json`;
 
     try {
-      const child = spawn('/mnt/c/Windows/System32/cmd.exe', ['/c', 'start', '/b', 'node', watcherScript, configFile], {
+      const child = spawn('/mnt/c/Windows/System32/cmd.exe',
+        ['/c', 'start', 'Unreal Index Watcher', 'node', watcherScript, configFile], {
         detached: true,
         stdio: 'ignore'
       });
@@ -710,6 +713,43 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       // Give the new process a moment to start, then exit
       setTimeout(() => process.exit(0), 1000);
     }, 500);
+  });
+
+  app.post('/internal/update-and-restart', (req, res) => {
+    const repoDir = join(__dirname, '..', '..');
+    console.log('[API] Update & restart requested from dashboard');
+    try {
+      // Safe pull — fails if local changes or divergent history
+      const pullOutput = execSync('git pull --ff-only', {
+        cwd: repoDir, encoding: 'utf-8', timeout: 30000
+      }).trim();
+      console.log(`[API] git pull: ${pullOutput}`);
+
+      const newHash = execSync('git rev-parse --short HEAD', {
+        cwd: repoDir, encoding: 'utf-8'
+      }).trim();
+
+      res.json({ ok: true, newGitHash: newHash, pullOutput });
+
+      // Restart using the same pattern as /internal/restart-service
+      setTimeout(() => {
+        const child = spawn(process.execPath, [join(__dirname, 'index.js')], {
+          cwd: repoDir,
+          stdio: 'ignore',
+          detached: true,
+          env: { ...process.env },
+        });
+        child.unref();
+        setTimeout(() => process.exit(0), 1000);
+      }, 500);
+    } catch (err) {
+      console.error(`[API] Update failed: ${err.message}`);
+      res.status(500).json({
+        ok: false,
+        error: err.stderr || err.message,
+        hint: 'Manual fix: wsl -- bash -c "cd ~/repos/unreal-index && git stash && git pull && ./start-service.sh --bg"'
+      });
+    }
   });
 
   app.get('/status', (req, res) => {
