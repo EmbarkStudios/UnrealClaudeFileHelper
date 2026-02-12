@@ -26,6 +26,14 @@ var (
 	grepRe = regexp.MustCompile(`^\s*(grep|rg)\b`)
 	catRe  = regexp.MustCompile(`^\s*(cat|head|tail)\b`)
 
+	// PowerShell commands (powershell -Command "..." or pwsh -c "...")
+	powershellRe     = regexp.MustCompile(`(?i)^\s*(powershell|pwsh)\b`)
+	getChildItemRe   = regexp.MustCompile(`(?i)Get-ChildItem|gci\b|ls\b`)
+	selectStringRe   = regexp.MustCompile(`(?i)Select-String|sls\b`)
+	getContentRe     = regexp.MustCompile(`(?i)Get-Content|gc\b|type\b`)
+	psFilterRe       = regexp.MustCompile(`(?i)-Filter\s+['"]?([^'"\s]+)['"]?`)
+	psPatternRe      = regexp.MustCompile(`(?i)-Pattern\s+['"]?([^'"\s]+)['"]?`)
+
 	// Extract -name argument from find commands
 	findNameRe = regexp.MustCompile(`-name\s+["']?([^"'\s]+)["']?`)
 
@@ -477,7 +485,75 @@ func handleBash(ti map[string]interface{}) {
 				"Example: Read tool with file_path parameter.")
 	}
 
-	// E. Everything else → allow
+	// E. PowerShell commands: Get-ChildItem, Select-String, Get-Content
+	if powershellRe.MatchString(trimmed) {
+		// Get-ChildItem / gci → file search, proxy to /find-file
+		if getChildItemRe.MatchString(trimmed) {
+			if m := psFilterRe.FindStringSubmatch(trimmed); m != nil {
+				name := strings.NewReplacer("*", "", "?", "").Replace(m[1])
+				if idx := strings.LastIndex(name, "."); idx >= 0 {
+					name = name[:idx]
+				}
+				if len(name) >= 3 {
+					p := url.Values{}
+					p.Set("filename", name)
+					p.Set("maxResults", "30")
+
+					var data FindFileResponse
+					if fetchJSON(serviceURL+"/find-file?"+p.Encode(), &data) && data.Error == "" && len(data.Results) > 0 {
+						var files []string
+						for _, r := range data.Results {
+							files = append(files, r.File)
+						}
+						deny(fmt.Sprintf(
+							"[unreal-index] PowerShell Get-ChildItem intercepted — indexed results for \"%s\":\n\n%s\n\n"+
+								"Results from pre-built index. Use the Glob tool or unreal_find_file MCP tool instead of PowerShell.",
+							name, strings.Join(files, "\n")))
+					}
+				}
+			}
+			deny(
+				"[unreal-index] PowerShell Get-ChildItem/gci is blocked.\n\n" +
+					"Use the Glob tool to find files by pattern (intercepted by unreal-index for fast results) " +
+					"or the unreal_find_file MCP tool for direct indexed search.")
+		}
+
+		// Select-String / sls → grep equivalent, proxy to /grep
+		if selectStringRe.MatchString(trimmed) {
+			if m := psPatternRe.FindStringSubmatch(trimmed); m != nil && len(m[1]) >= 2 {
+				p := url.Values{}
+				p.Set("pattern", m[1])
+				p.Set("maxResults", "30")
+				p.Set("grouped", "false")
+				p.Set("symbols", "false")
+
+				var data GrepResponse
+				if fetchJSON(serviceURL+"/grep?"+p.Encode(), &data) && data.Error == "" && len(data.Results) > 0 {
+					var lines []string
+					for _, r := range data.Results {
+						lines = append(lines, fmt.Sprintf("%s:%d: %s", r.File, r.Line, r.Match))
+					}
+					deny(fmt.Sprintf(
+						"[unreal-index] PowerShell Select-String intercepted — indexed results for \"%s\":\n\n%s\n\n"+
+							"Results from pre-built index. Use the Grep tool or unreal_grep MCP tool instead of PowerShell.",
+						m[1], strings.Join(lines, "\n")))
+				}
+			}
+			deny(
+				"[unreal-index] PowerShell Select-String/sls is blocked.\n\n" +
+					"Use the Grep tool instead (intercepted by unreal-index for fast indexed results) " +
+					"or the unreal_grep MCP tool for direct indexed search.")
+		}
+
+		// Get-Content / gc / type → block, redirect to Read
+		if getContentRe.MatchString(trimmed) {
+			deny(
+				"[unreal-index] PowerShell Get-Content/gc is blocked.\n\n" +
+					"Use the Read tool instead for better performance and proper file access.")
+		}
+	}
+
+	// F. Everything else → allow
 	allow()
 }
 
