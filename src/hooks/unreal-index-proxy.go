@@ -25,6 +25,7 @@ var (
 	findRe = regexp.MustCompile(`^\s*find\b`)
 	grepRe = regexp.MustCompile(`^\s*(grep|rg)\b`)
 	catRe  = regexp.MustCompile(`^\s*(cat|head|tail)\b`)
+	wcRe   = regexp.MustCompile(`^\s*wc\b`)
 
 	// PowerShell commands (powershell -Command "..." or pwsh -c "...")
 	powershellRe     = regexp.MustCompile(`(?i)^\s*(powershell|pwsh)\b`)
@@ -485,7 +486,15 @@ func handleBash(ti map[string]interface{}) {
 				"Example: Read tool with file_path parameter.")
 	}
 
-	// E. PowerShell commands: Get-ChildItem, Select-String, Get-Content
+	// E. Word count: wc → block, redirect to Read tool
+	if wcRe.MatchString(trimmed) {
+		deny(
+			"[unreal-index] wc is blocked.\n\n" +
+				"Use the Read tool instead — it displays line numbers (cat -n format), " +
+				"so the last line number gives you the total line count.")
+	}
+
+	// F. PowerShell commands: Get-ChildItem, Select-String, Get-Content
 	if powershellRe.MatchString(trimmed) {
 		// Get-ChildItem / gci → file search, proxy to /find-file
 		if getChildItemRe.MatchString(trimmed) {
@@ -553,7 +562,7 @@ func handleBash(ti map[string]interface{}) {
 		}
 	}
 
-	// F. Everything else → allow
+	// G. Everything else → allow
 	allow()
 }
 

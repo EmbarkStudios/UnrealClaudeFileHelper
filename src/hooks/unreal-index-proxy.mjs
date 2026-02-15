@@ -137,6 +137,16 @@ async function handleBash() {
   const cmd = (tool_input.command || '').trim();
   if (!cmd) { allow(); return; }
 
+  // wc → block, redirect to Read tool
+  if (/^\s*wc\b/.test(cmd)) {
+    deny(
+      '[unreal-index] wc is blocked.\n\n' +
+      'Use the Read tool instead — it displays line numbers (cat -n format), ' +
+      'so the last line number gives you the total line count.'
+    );
+    return;
+  }
+
   // Only handle PowerShell commands
   if (!/^\s*(powershell|pwsh)\b/i.test(cmd)) { allow(); return; }
 
