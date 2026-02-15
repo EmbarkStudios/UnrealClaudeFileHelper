@@ -17,6 +17,12 @@ import os from 'os';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
+if (process.platform === 'win32') {
+  console.error('ERROR: The index service must run in WSL, not Windows.');
+  console.error('Use start-all.bat or start-service.bat to launch correctly.');
+  process.exit(1);
+}
+
 function killExistingService(port) {
   try {
     const output = execSync(`lsof -ti:${port}`, { encoding: 'utf-8' });
