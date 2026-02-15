@@ -1,0 +1,18 @@
+[Unit]
+Description=Unreal Index Service - Fast code search for Unreal Engine projects
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory={{REPO_DIR}}
+Environment="PATH={{NODE_DIR}}/bin:{{HOME}}/go/bin:/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="NODE_OPTIONS=--max-old-space-size=3072"
+ExecStart={{NODE_BIN}} src/service/index.js
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=unreal-index
+
+[Install]
+WantedBy=default.target

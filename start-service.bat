@@ -46,7 +46,7 @@ wsl -- bash -c "export PATH=$HOME/local/node22/bin:$HOME/go/bin:/usr/local/go/bi
 if !ERRORLEVEL! NEQ 0 (
     echo.
     echo  Failed to start service. Check logs:
-    echo    wsl -- bash -c "tail -20 /tmp/unreal-index.log"
+    echo    wsl -- journalctl --user -u unreal-index -n 50 --no-pager
     echo.
     pause
     exit /b 1

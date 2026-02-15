@@ -282,15 +282,14 @@ Write-Host "[2/9] Ensuring Node.js in WSL ..." -ForegroundColor Yellow
 $nodeBootstrap = ('set -e; if [ ! -x "{0}" ]; then rm -rf "{1}"; mkdir -p "{1}"; curl -fsSL https://nodejs.org/dist/v22.12.0/node-v22.12.0-linux-x64.tar.xz | tar -xJ -C "{1}" --strip-components=1; fi; "{0}" --version; "{0}" "{2}" --version' -f $WslNodeBinary, $WslNodeDir, $WslNpmCli)
 Invoke-Wsl $nodeBootstrap
 
-# Step 3: Install Linux dependencies (screen/build tools)
-Write-Host "[3/9] Ensuring Linux dependencies (screen/build tools) ..." -ForegroundColor Yellow
-$depsCommand = 'if ( ! command -v screen >/dev/null 2>&1 && ! command -v tmux >/dev/null 2>&1 ) || ! command -v python3 >/dev/null 2>&1 || ! command -v g++ >/dev/null 2>&1; then if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then sudo -n apt-get update && sudo -n apt-get install -y screen build-essential python3 curl || echo deps_install_skipped; else echo deps_install_skipped; fi; fi; command -v screen >/dev/null 2>&1 && echo screen_ok || echo screen_missing; command -v tmux >/dev/null 2>&1 && echo tmux_ok || echo tmux_missing; command -v python3 >/dev/null 2>&1 && echo python3_ok || echo python3_missing; command -v g++ >/dev/null 2>&1 && echo gpp_ok || echo gpp_missing'
+# Step 3: Install Linux dependencies (build tools)
+Write-Host "[3/9] Ensuring Linux dependencies (build tools) ..." -ForegroundColor Yellow
+$depsCommand = 'if ! command -v python3 >/dev/null 2>&1 || ! command -v g++ >/dev/null 2>&1; then if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then sudo -n apt-get update && sudo -n apt-get install -y build-essential python3 curl || echo deps_install_skipped; else echo deps_install_skipped; fi; fi; command -v python3 >/dev/null 2>&1 && echo python3_ok || echo python3_missing; command -v g++ >/dev/null 2>&1 && echo gpp_ok || echo gpp_missing'
 try {
     Invoke-Wsl $depsCommand
 }
 catch {
     Write-Host "  Warning: Could not install one or more Linux packages automatically." -ForegroundColor Yellow
-    Write-Host "  Continuing; service start will use tmux/nohup fallback if screen is missing." -ForegroundColor Gray
 }
 
 # Step 4: Install npm dependencies in WSL
@@ -381,35 +380,17 @@ finally {
     Pop-Location
 }
 
-# Step 8: Start service in WSL
-Write-Host "[8/9] Starting indexing service in WSL ..." -ForegroundColor Yellow
-$servicePath = "{0}/go/bin:{0}/local/go/bin:/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" -f $WslHome
-$launchScript = @"
-cat > /tmp/unreal-index-start.sh <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-exec >/tmp/unreal-index.log 2>&1
-cd "$WslRepoDir"
-export PATH="$servicePath"
-exec "$WslNodeBinary" src/service/index.js
-EOF
-chmod +x /tmp/unreal-index-start.sh
-"@
-wsl -- bash --noprofile --norc -lc $launchScript
+# Step 8: Start service in WSL (systemd)
+Write-Host "[8/9] Starting indexing service in WSL (systemd) ..." -ForegroundColor Yellow
+$systemdStart = "cd '{0}' && bash start-service.sh --bg" -f $WslRepoDir
+wsl -- bash --noprofile --norc -lc $systemdStart
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "  ERROR: Failed to prepare WSL launch script." -ForegroundColor Red
+    Write-Host "  ERROR: Failed to start systemd service." -ForegroundColor Red
+    Write-Host "  Service logs from WSL:" -ForegroundColor Yellow
+    Invoke-Wsl "journalctl --user -u unreal-index -n 50 --no-pager || true" -AllowFailure
     exit 1
 }
-
-$tmuxStart = 'tmux kill-session -t unreal-index >/dev/null 2>&1 || true; rm -f /tmp/unreal-index.log; tmux new-session -d -s unreal-index /tmp/unreal-index-start.sh; sleep 1; tmux has-session -t unreal-index'
-wsl -- bash --noprofile --norc -lc $tmuxStart
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "  ERROR: Failed to launch service process in WSL." -ForegroundColor Red
-    Write-Host "  Last log lines from WSL:" -ForegroundColor Yellow
-    Invoke-Wsl "tail -80 /tmp/unreal-index.log || true" -AllowFailure
-    exit 1
-}
-Write-Host "  Launch mode: tmux" -ForegroundColor Gray
+Write-Host "  Launch mode: systemd" -ForegroundColor Gray
 
 $serviceUp = $false
 for ($i = 0; $i -lt 120; $i++) {
@@ -430,9 +411,9 @@ for ($i = 0; $i -lt 120; $i++) {
 if (-not $serviceUp) {
     Write-Host "  ERROR: Service did not become healthy on port 3847." -ForegroundColor Red
     Write-Host "  Service diagnostics from WSL:" -ForegroundColor Yellow
-    Invoke-Wsl 'tmux ls || true; pgrep -af "src/service/index.js" || true; ss -ltnp | grep 3847 || true' -AllowFailure
-    Write-Host "  Last log lines from WSL:" -ForegroundColor Yellow
-    Invoke-Wsl "tail -80 /tmp/unreal-index.log || true" -AllowFailure
+    Invoke-Wsl 'systemctl --user status unreal-index --no-pager || true; ss -ltnp | grep 3847 || true' -AllowFailure
+    Write-Host "  Service logs from WSL:" -ForegroundColor Yellow
+    Invoke-Wsl "journalctl --user -u unreal-index -n 80 --no-pager || true" -AllowFailure
     exit 1
 }
 Write-Host "  Service is running." -ForegroundColor Green

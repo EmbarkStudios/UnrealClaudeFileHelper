@@ -122,8 +122,10 @@ Supported project languages: `angelscript`, `cpp`, `content` (assets), `config` 
 ## Troubleshooting
 
 **Tools say "Unreal Index Service is not running"**
-- Start the service: `cd ~/.claude/repos/embark-claude-index && ./start-service.sh --bg`
-- Check if it's running: `curl http://127.0.0.1:3847/health`
+- Start the service: `systemctl --user start unreal-index` (or `./start-service.sh --bg` from the repo)
+- Check status: `systemctl --user status unreal-index`
+- Check health: `curl http://127.0.0.1:3847/health`
+- View logs: `journalctl --user -u unreal-index -f`
 
 **No results returned**
 - Check that the file watcher is running and has completed initial indexing
