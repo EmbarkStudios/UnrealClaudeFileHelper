@@ -5,12 +5,15 @@
  * Watches P4 directories for changes, reads + parses files, and POSTs
  * batched updates to the WSL-hosted unreal-index service.
  *
- * Usage: node src/watcher/watcher-client.js [config.json]
+ * Usage: node src/watcher/watcher-client.js [service-url | config.json]
+ *
+ * Config is fetched from the service via GET /internal/config.
+ * If a legacy config.json path is passed, it is read to extract the service URL.
  */
 
 import chokidar from 'chokidar';
 import { readFile, stat } from 'fs/promises';
-import { readdirSync, statSync, readFileSync } from 'fs';
+import { readdirSync, statSync, readFileSync, existsSync } from 'fs';
 import { join, relative } from 'path';
 import { parseFile } from '../parser.js';
 import { parseCppContent } from '../parsers/cpp-parser.js';
@@ -18,14 +21,34 @@ import { parseUAssetHeader } from '../parsers/uasset-parser.js';
 
 // --- Config ---
 
-const configPath = process.argv[2] || join(import.meta.dirname, '..', '..', 'config.json');
-const config = JSON.parse(readFileSync(configPath, 'utf-8'));
-const SERVICE_URL = config.service?.url || `http://${config.service?.host || '127.0.0.1'}:${config.service?.port || 3847}`;
-const DEBOUNCE_MS = config.watcher?.debounceMs || 100;
+// Resolve SERVICE_URL: CLI arg (URL or legacy config path), env var, or default
+let SERVICE_URL = 'http://127.0.0.1:3847';
+const cliArg = process.argv[2];
+if (cliArg && (cliArg.startsWith('http://') || cliArg.startsWith('https://'))) {
+  SERVICE_URL = cliArg;
+} else if (cliArg && !cliArg.startsWith('-') && existsSync(cliArg)) {
+  // Legacy: treat as config.json path, extract service URL
+  try {
+    const legacyConfig = JSON.parse(readFileSync(cliArg, 'utf-8'));
+    SERVICE_URL = legacyConfig.service?.url || `http://${legacyConfig.service?.host || '127.0.0.1'}:${legacyConfig.service?.port || 3847}`;
+    console.log(`[Watcher] Using service URL from legacy config: ${SERVICE_URL}`);
+  } catch (err) {
+    console.warn(`[Watcher] Could not read legacy config ${cliArg}: ${err.message}, using default URL`);
+  }
+} else if (process.env.UNREAL_INDEX_URL) {
+  SERVICE_URL = process.env.UNREAL_INDEX_URL;
+}
+
+// Config is fetched from the service after connection — initially null
+let config = null;
+let lastConfigVersion = 0;
+
+// Config-derived settings (set after config fetch)
 const MAX_CONCURRENT = 10;
 const BATCH_SIZE = 50;
 const HEARTBEAT_INTERVAL_MS = 15000;
-const RECONCILE_INTERVAL_MS = (config.watcher?.reconcileIntervalMinutes || 10) * 60 * 1000;
+function getDebounceMs() { return config?.watcher?.debounceMs || 100; }
+function getReconcileIntervalMs() { return (config?.watcher?.reconcileIntervalMinutes || 10) * 60 * 1000; }
 
 // --- Watcher telemetry ---
 
@@ -503,7 +526,7 @@ function startWatcher() {
 
     pendingUpdates.set(filePath, eventType);
     if (debounceTimer) clearTimeout(debounceTimer);
-    debounceTimer = setTimeout(processUpdates, DEBOUNCE_MS);
+    debounceTimer = setTimeout(processUpdates, getDebounceMs());
   };
 
   watcher.on('add', path => queueUpdate(path, 'add'));
@@ -517,10 +540,34 @@ function startWatcher() {
 
 // --- Main ---
 
+async function fetchConfigFromService() {
+  const resp = await fetch(`${SERVICE_URL}/internal/config`);
+  if (!resp.ok) throw new Error(`Config fetch failed: ${resp.status}`);
+  const data = await resp.json();
+  lastConfigVersion = data.configVersion || 0;
+  return data.config;
+}
+
 async function main() {
-  console.log(`[Watcher] Config: ${config.projects.length} projects, service: ${SERVICE_URL}`);
+  console.log(`[Watcher] Connecting to service at ${SERVICE_URL}...`);
 
   const status = await waitForService();
+
+  // Fetch config from service (single source of truth)
+  try {
+    config = await fetchConfigFromService();
+    console.log(`[Watcher] Config from service: ${config.projects.length} projects`);
+  } catch (err) {
+    // Fallback: try local config.json if service doesn't have the endpoint (older version)
+    console.warn(`[Watcher] Could not fetch config from service: ${err.message}`);
+    const fallbackPath = join(import.meta.dirname, '..', '..', 'config.json');
+    if (existsSync(fallbackPath)) {
+      config = JSON.parse(readFileSync(fallbackPath, 'utf-8'));
+      console.log(`[Watcher] Config from local fallback: ${config.projects.length} projects`);
+    } else {
+      throw new Error('No config available: service /internal/config failed and no local config.json found');
+    }
+  }
 
   // Determine which languages need full scan vs reconciliation
   const configuredLanguages = [...new Set(config.projects.map(p => p.language))];
@@ -553,7 +600,7 @@ async function main() {
 
   async function sendHeartbeat() {
     try {
-      await postJson(`${SERVICE_URL}/internal/heartbeat`, {
+      const resp = await postJson(`${SERVICE_URL}/internal/heartbeat`, {
         watcherId,
         version: watcherVersion,
         gitHash: watcherGitHash,
@@ -576,6 +623,23 @@ async function main() {
           nextRunAt: nextReconcileTimestamp
         }
       });
+
+      // Check if config changed on the service
+      if (resp && resp.configVersion && resp.configVersion !== lastConfigVersion) {
+        console.log(`[Watcher] Config changed on service (version ${lastConfigVersion} -> ${resp.configVersion}), reloading...`);
+        try {
+          const newConfig = await fetchConfigFromService();
+          const projectsChanged = JSON.stringify(newConfig.projects) !== JSON.stringify(config.projects);
+          config = newConfig;
+          if (projectsChanged) {
+            console.log('[Watcher] Projects changed — restart watcher to apply new watch paths');
+          } else {
+            console.log('[Watcher] Config updated (no project path changes)');
+          }
+        } catch (err) {
+          console.warn(`[Watcher] Config reload failed: ${err.message}`);
+        }
+      }
     } catch {
       // Fire-and-forget — don't log noise for missed heartbeats
     }
@@ -588,7 +652,7 @@ async function main() {
   // --- Periodic reconciliation: catch missed file changes ---
 
   lastReconcileTimestamp = new Date().toISOString();
-  nextReconcileTimestamp = new Date(Date.now() + RECONCILE_INTERVAL_MS).toISOString();
+  nextReconcileTimestamp = new Date(Date.now() + getReconcileIntervalMs()).toISOString();
 
   async function periodicReconcile() {
     console.log(`[Watcher] Starting periodic reconciliation...`);
@@ -603,11 +667,11 @@ async function main() {
     const s = ((performance.now() - start) / 1000).toFixed(1);
     console.log(`[Watcher] Periodic reconciliation complete (${s}s)`);
     lastReconcileTimestamp = new Date().toISOString();
-    nextReconcileTimestamp = new Date(Date.now() + RECONCILE_INTERVAL_MS).toISOString();
+    nextReconcileTimestamp = new Date(Date.now() + getReconcileIntervalMs()).toISOString();
   }
 
-  setInterval(periodicReconcile, RECONCILE_INTERVAL_MS);
-  console.log(`[Watcher] Periodic reconciliation scheduled (every ${RECONCILE_INTERVAL_MS / 60000}min)`);
+  setInterval(periodicReconcile, getReconcileIntervalMs());
+  console.log(`[Watcher] Periodic reconciliation scheduled (every ${getReconcileIntervalMs() / 60000}min)`);
 }
 
 main().catch(err => {

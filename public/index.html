@@ -159,6 +159,24 @@
   </div>
 
   <div class="grid">
+    <!-- Configuration -->
+    <div class="card card-full">
+      <h2 style="display:flex;align-items:center;gap:12px">Configuration
+        <button class="action-btn" onclick="toggleConfigEdit()" id="config-edit-btn" style="margin-left:auto">Edit</button>
+      </h2>
+      <div id="config-view">
+        <div id="config-status" class="loading">Loading...</div>
+      </div>
+      <div id="config-editor" style="display:none">
+        <textarea id="config-textarea" style="width:100%;height:300px;background:#1e1e1e;color:#d4d4d4;border:1px solid #3e3e3e;border-radius:4px;padding:8px;font-family:'Cascadia Code','Consolas',monospace;font-size:12px;resize:vertical;tab-size:2"></textarea>
+        <div style="margin-top:8px;display:flex;gap:8px;align-items:center">
+          <button class="btn-primary" onclick="saveConfig()">Save</button>
+          <button class="refresh-btn" onclick="toggleConfigEdit()">Cancel</button>
+          <span id="config-save-status" style="font-size:12px;color:#808080"></span>
+        </div>
+      </div>
+    </div>
+
     <!-- Watcher Status -->
     <div class="card">
       <h2>Watcher Status</h2>
@@ -911,8 +929,95 @@
       }, 2000);
     }
 
+    // --- Config card ---
+
+    async function loadConfig() {
+      const el = document.getElementById('config-status');
+      try {
+        const resp = await fetch('/internal/config');
+        const data = await resp.json();
+        const cfg = data.config;
+        const summary = data.summary || {};
+
+        let html = '<table><tr><th>Project</th><th>Language</th><th>Paths</th></tr>';
+        for (const proj of cfg.projects || []) {
+          const pathList = (proj.paths || []).map(p => esc(p)).join('<br>');
+          html += `<tr>
+            <td>${esc(proj.name)}</td>
+            <td>${esc(proj.language)}</td>
+            <td class="mono" style="font-size:11px">${pathList}</td>
+          </tr>`;
+        }
+        html += '</table>';
+
+        html += `<div style="margin-top:12px">
+          <div class="stat-row"><span class="stat-label">Service port</span><span class="stat-value">${cfg.service?.port || 3847}</span></div>
+          <div class="stat-row"><span class="stat-label">Watcher debounce</span><span class="stat-value">${cfg.watcher?.debounceMs || 100}ms</span></div>
+          <div class="stat-row"><span class="stat-label">Zoekt</span><span class="stat-value">${cfg.zoekt?.enabled !== false ? 'enabled' : 'disabled'}</span></div>
+          <div class="stat-row"><span class="stat-label">Exclude patterns</span><span class="stat-value">${(cfg.exclude || []).length}</span></div>
+        </div>`;
+
+        el.innerHTML = html;
+        window._currentConfig = cfg;
+      } catch (err) {
+        el.innerHTML = `<span class="error">Failed to load config: ${esc(err.message)}</span>`;
+      }
+    }
+
+    function toggleConfigEdit() {
+      const view = document.getElementById('config-view');
+      const editor = document.getElementById('config-editor');
+      const btn = document.getElementById('config-edit-btn');
+      if (editor.style.display === 'none') {
+        document.getElementById('config-textarea').value = JSON.stringify(window._currentConfig, null, 2);
+        editor.style.display = 'block';
+        view.style.display = 'none';
+        btn.textContent = 'Cancel';
+      } else {
+        editor.style.display = 'none';
+        view.style.display = 'block';
+        btn.textContent = 'Edit';
+        document.getElementById('config-save-status').textContent = '';
+      }
+    }
+
+    async function saveConfig() {
+      const statusEl = document.getElementById('config-save-status');
+      const textarea = document.getElementById('config-textarea');
+      let newConfig;
+      try {
+        newConfig = JSON.parse(textarea.value);
+      } catch (e) {
+        statusEl.textContent = 'Invalid JSON: ' + e.message;
+        statusEl.style.color = '#f44747';
+        return;
+      }
+      statusEl.textContent = 'Saving...';
+      statusEl.style.color = '#808080';
+      try {
+        const resp = await fetch('/internal/config', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(newConfig)
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+          statusEl.textContent = data.error || 'Save failed';
+          statusEl.style.color = '#f44747';
+          return;
+        }
+        statusEl.textContent = 'Saved! Watcher picks up changes on next heartbeat (~15s).';
+        statusEl.style.color = '#4ec9b0';
+        toggleConfigEdit();
+        loadConfig();
+      } catch (err) {
+        statusEl.textContent = 'Error: ' + err.message;
+        statusEl.style.color = '#f44747';
+      }
+    }
+
     async function loadAllWithOverview() {
-      await Promise.all([loadOverview(), loadHealth(), loadAnalytics(), loadWatcher(), loadMcpAnalytics()]);
+      await Promise.all([loadOverview(), loadHealth(), loadAnalytics(), loadWatcher(), loadMcpAnalytics(), loadConfig()]);
     }
 
     loadAllWithOverview();

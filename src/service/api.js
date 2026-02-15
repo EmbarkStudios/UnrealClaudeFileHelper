@@ -49,7 +49,8 @@ const grepCache = new GrepCache(200, 30000);
 const watcherState = {
   watchers: new Map(),   // watcherId → { ...payload, receivedAt }
   lastIngestAt: null,
-  ingestCounts: { total: 0, files: 0, assets: 0, deletes: 0 }
+  ingestCounts: { total: 0, files: 0, assets: 0, deletes: 0 },
+  configVersion: Date.now()  // bumped on PUT /internal/config
 };
 
 /** Validate project parameter, returning a 400 response if invalid. Returns true if invalid (response sent). */
@@ -625,7 +626,60 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
         watcherState.watchers.delete(id);
       }
     }
-    res.json({ ok: true });
+    res.json({ ok: true, configVersion: watcherState.configVersion || 0 });
+  });
+
+  // --- Config API ---
+
+  app.get('/internal/config', (req, res) => {
+    const config = indexer.config;
+    if (!config) {
+      return res.status(500).json({ error: 'Config not loaded' });
+    }
+    res.json({
+      config,
+      configVersion: watcherState.configVersion || 0,
+      summary: {
+        projectCount: config.projects?.length || 0,
+        projects: (config.projects || []).map(p => ({
+          name: p.name,
+          language: p.language,
+          pathCount: p.paths?.length || 0
+        })),
+        servicePort: config.service?.port || 3847,
+        zoektEnabled: config.zoekt?.enabled !== false,
+        excludePatterns: config.exclude?.length || 0
+      }
+    });
+  });
+
+  app.put('/internal/config', (req, res) => {
+    const newConfig = req.body;
+
+    // Validate structure
+    if (!newConfig || !Array.isArray(newConfig.projects) || newConfig.projects.length === 0) {
+      return res.status(400).json({ error: 'Invalid config: non-empty projects array required' });
+    }
+    for (const proj of newConfig.projects) {
+      if (!proj.name || !proj.paths || !proj.language) {
+        return res.status(400).json({ error: `Invalid project: name, paths, and language required (got: ${JSON.stringify(proj)})` });
+      }
+    }
+
+    // Write to disk
+    try {
+      const configPath = join(__dirname, '..', '..', 'config.json');
+      writeFileSync(configPath, JSON.stringify(newConfig, null, 2) + '\n');
+    } catch (err) {
+      return res.status(500).json({ error: `Failed to write config: ${err.message}` });
+    }
+
+    // Update in-memory config
+    indexer.config = newConfig;
+    watcherState.configVersion = Date.now();
+
+    console.log(`[API] Config updated (${newConfig.projects.length} projects, version ${watcherState.configVersion})`);
+    res.json({ ok: true, configVersion: watcherState.configVersion });
   });
 
   app.post('/internal/start-watcher', (req, res) => {
@@ -637,29 +691,19 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       }
     }
 
-    // Read config to get Windows repo dir
-    let config;
-    try {
-      const configPath = join(__dirname, '..', '..', 'config.json');
-      config = JSON.parse(readFileSync(configPath, 'utf-8'));
-    } catch {
-      return res.status(500).json({ error: 'Could not read config.json' });
-    }
-
-    const winRepoDir = config.watcher?.windowsRepoDir;
+    // Get Windows repo dir from config
+    const winRepoDir = indexer.config?.watcher?.windowsRepoDir;
     if (!winRepoDir) {
       return res.status(500).json({ error: 'watcher.windowsRepoDir not set in config.json' });
     }
 
     // The watcher runs on Windows — spawn via cmd.exe from WSL
-    // Use 'start "title"' to open a visible console window (like the batch file does).
-    // /b (background) is unreliable for long-running processes spawned from WSL.
+    // The watcher fetches its config from the service via HTTP, so no config file arg needed.
     const watcherScript = `${winRepoDir}\\src\\watcher\\watcher-client.js`;
-    const configFile = `${winRepoDir}\\config.json`;
 
     try {
       const child = spawn('/mnt/c/Windows/System32/cmd.exe',
-        ['/c', 'start', 'Unreal Index Watcher', 'node', watcherScript, configFile], {
+        ['/c', 'start', 'Unreal Index Watcher', 'node', watcherScript], {
         detached: true,
         stdio: 'ignore'
       });
