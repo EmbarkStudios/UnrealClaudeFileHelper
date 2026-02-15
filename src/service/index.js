@@ -19,7 +19,7 @@ const __dirname = dirname(__filename);
 
 if (process.platform === 'win32') {
   console.error('ERROR: The index service must run in WSL, not Windows.');
-  console.error('Use start-all.bat or start-service.bat to launch correctly.');
+  console.error('Use start-service.bat to launch correctly.');
   process.exit(1);
 }
 
