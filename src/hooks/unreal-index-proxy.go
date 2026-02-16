@@ -38,8 +38,8 @@ var (
 	// Extract -name argument from find commands
 	findNameRe = regexp.MustCompile(`-name\s+["']?([^"'\s]+)["']?`)
 
-	// Extract pattern from grep/rg commands (first non-flag argument)
-	shellGrepPatternRe = regexp.MustCompile(`(?:grep|rg)\s+(?:-[a-zA-Z]+\s+)*["']?([^"'\s|>]+)`)
+	// Extract pattern from grep/rg commands — handles quoted patterns with \| and spaces
+	shellGrepPatternRe = regexp.MustCompile(`(?:grep|rg)\s+(?:-[a-zA-Z]+\s+(?:\d+\s+)?)*(?:"([^"]+)"|'([^']+)'|(\S+))`)
 
 	// Smart Grep routing: type definitions
 	classDefRe = regexp.MustCompile(`^(?:class|struct|enum)\s+(\w+)`)
@@ -447,29 +447,44 @@ func handleBash(ti map[string]interface{}) {
 
 	// C. Shell grep/rg → extract pattern and proxy to /grep
 	if grepRe.MatchString(trimmed) {
-		if m := shellGrepPatternRe.FindStringSubmatch(trimmed); m != nil && len(m[1]) >= 2 {
+		if m := shellGrepPatternRe.FindStringSubmatch(trimmed); m != nil {
+			// Pick the matched group: m[1]=double-quoted, m[2]=single-quoted, m[3]=unquoted
 			pattern := m[1]
+			if pattern == "" {
+				pattern = m[2]
+			}
+			if pattern == "" {
+				pattern = m[3]
+			}
+			// Convert basic grep alternation \| to regex |
+			pattern = strings.ReplaceAll(pattern, `\|`, "|")
+			// Strip other basic grep escapes: \( \) \+ \?
+			for _, esc := range []string{`\(`, `\)`, `\+`, `\?`} {
+				pattern = strings.ReplaceAll(pattern, esc, esc[1:])
+			}
 
-			p := url.Values{}
-			p.Set("pattern", pattern)
-			p.Set("maxResults", "30")
-			p.Set("grouped", "false")
-			p.Set("symbols", "false")
+			if len(pattern) >= 2 {
+				p := url.Values{}
+				p.Set("pattern", pattern)
+				p.Set("maxResults", "30")
+				p.Set("grouped", "false")
+				p.Set("symbols", "false")
 
-			var data GrepResponse
-			if fetchJSON(serviceURL+"/grep?"+p.Encode(), &data) && data.Error == "" && len(data.Results) > 0 {
-				var lines []string
-				for _, r := range data.Results {
-					lines = append(lines, fmt.Sprintf("%s:%d: %s", r.File, r.Line, r.Match))
+				var data GrepResponse
+				if fetchJSON(serviceURL+"/grep?"+p.Encode(), &data) && data.Error == "" && len(data.Results) > 0 {
+					var lines []string
+					for _, r := range data.Results {
+						lines = append(lines, fmt.Sprintf("%s:%d: %s", r.File, r.Line, r.Match))
+					}
+					trunc := ""
+					if data.Truncated {
+						trunc = fmt.Sprintf(" (%d of %d)", len(data.Results), data.TotalMatches)
+					}
+					deny(fmt.Sprintf(
+						"[unreal-index] grep/rg intercepted — indexed results for \"%s\"%s:\n\n%s\n\n"+
+							"Results from pre-built index. Use the Grep tool instead of shell grep.",
+						pattern, trunc, strings.Join(lines, "\n")))
 				}
-				trunc := ""
-				if data.Truncated {
-					trunc = fmt.Sprintf(" (%d of %d)", len(data.Results), data.TotalMatches)
-				}
-				deny(fmt.Sprintf(
-					"[unreal-index] grep/rg intercepted — indexed results for \"%s\"%s:\n\n%s\n\n"+
-						"Results from pre-built index. Use the Grep tool instead of shell grep.",
-					pattern, trunc, strings.Join(lines, "\n")))
 			}
 		}
 		// No extractable pattern or no results — still block
