@@ -158,9 +158,10 @@ async function fetchJson(url, retries = 3) {
       if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
       return res.json();
     } catch (err) {
-      if (attempt < retries && (err.code === 'ECONNRESET' || err.code === 'ECONNREFUSED' || err.message.includes('ECONNRESET') || err.message.includes('fetch failed'))) {
+      const code = err.code || err.cause?.code;
+      if (attempt < retries && (code === 'ECONNRESET' || code === 'ECONNREFUSED' || err.message.includes('fetch failed'))) {
         const delay = attempt * 2000;
-        console.warn(`[Watcher] GET failed (${err.code || err.message}), retry ${attempt}/${retries} in ${delay}ms...`);
+        console.warn(`[Watcher] GET failed (${code || err.message}), retry ${attempt}/${retries} in ${delay}ms...`);
         await new Promise(r => setTimeout(r, delay));
         continue;
       }
@@ -184,9 +185,10 @@ async function postJson(url, body, retries = 3) {
       }
       return res.json();
     } catch (err) {
-      if (attempt < retries && (err.code === 'ECONNRESET' || err.code === 'ECONNREFUSED' || err.code === 'UND_ERR_SOCKET' || err.message.includes('ECONNRESET'))) {
+      const code = err.code || err.cause?.code;
+      if (attempt < retries && (code === 'ECONNRESET' || code === 'ECONNREFUSED' || code === 'UND_ERR_SOCKET' || err.message.includes('fetch failed'))) {
         const delay = attempt * 2000;
-        console.warn(`[Watcher] POST failed (${err.code || err.message}), retry ${attempt}/${retries} in ${delay}ms...`);
+        console.warn(`[Watcher] POST failed (${code || err.message}), retry ${attempt}/${retries} in ${delay}ms...`);
         await new Promise(r => setTimeout(r, delay));
         // If service crashed, wait for it to come back
         try { await fetchJson(`${url.replace(/\/internal\/.*/, '')}/health`); } catch {
