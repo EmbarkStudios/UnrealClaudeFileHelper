@@ -209,6 +209,9 @@ async function handleBash() {
   const cmd = (tool_input.command || '').trim();
   if (!cmd) { allow(); return; }
 
+  // Bypass: git commands are always allowed through
+  if (/^\s*git(\s|$)/.test(cmd)) { allow(); return; }
+
   // Bypass: if the command targets a path outside indexed projects, allow through
   const shellPath = extractShellTargetPath(cmd);
   if (shellPath && !isInsideIndex(shellPath)) { allow(); return; }

@@ -517,6 +517,11 @@ func handleBash(ti map[string]interface{}) {
 	// Trim leading whitespace for matching
 	trimmed := strings.TrimSpace(cmd)
 
+	// Bypass: git commands are always allowed through
+	if strings.HasPrefix(trimmed, "git ") || trimmed == "git" {
+		allow()
+	}
+
 	// Bypass: if the command targets a path outside the indexed projects, allow through
 	if shellPath := extractShellTargetPath(trimmed); shellPath != "" && !isInsideIndex(shellPath) {
 		allow()
