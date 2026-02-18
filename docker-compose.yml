@@ -8,8 +8,8 @@ services:
       - unreal-index-db:/data/db
       - unreal-index-mirror:/data/mirror
       - unreal-index-zoekt:/data/zoekt-index
-      # Optional: bind-mount a custom config
-      # - ./config.json:/app/config.json:ro
+      # Bind-mount config with project paths for the watcher
+      - ./config.json:/app/config.json:ro
     mem_limit: 5g
     memswap_limit: 7g
     restart: unless-stopped

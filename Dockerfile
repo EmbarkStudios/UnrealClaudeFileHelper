@@ -47,7 +47,8 @@ COPY public ./public
 COPY config.docker.json ./config.docker.json
 COPY docker-entrypoint.sh ./docker-entrypoint.sh
 
-RUN chmod +x ./docker-entrypoint.sh
+# Fix Windows CRLF line endings (build context may come from Windows filesystem)
+RUN sed -i 's/\r$//' ./docker-entrypoint.sh && chmod +x ./docker-entrypoint.sh
 
 # Create data directories
 RUN mkdir -p /data/db /data/mirror /data/zoekt-index
