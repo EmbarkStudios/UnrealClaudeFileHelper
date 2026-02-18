@@ -1,0 +1,8 @@
+services:
+  unreal-index:
+    volumes:
+      - ./src:/app/src:ro
+      - ./public:/app/public:ro
+    ports:
+      - "6070:6070"
+    command: ["node", "--watch", "src/service/index.js"]

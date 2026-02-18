@@ -1,0 +1,21 @@
+services:
+  unreal-index:
+    build: .
+    container_name: unreal-index
+    ports:
+      - "3847:3847"
+    volumes:
+      - unreal-index-db:/data/db
+      - unreal-index-mirror:/data/mirror
+      - unreal-index-zoekt:/data/zoekt-index
+      # Optional: bind-mount a custom config
+      # - ./config.json:/app/config.json:ro
+    mem_limit: 5g
+    memswap_limit: 7g
+    restart: unless-stopped
+    stop_grace_period: 15s
+
+volumes:
+  unreal-index-db:
+  unreal-index-mirror:
+  unreal-index-zoekt:

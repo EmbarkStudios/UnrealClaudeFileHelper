@@ -18,8 +18,8 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 if (process.platform === 'win32') {
-  console.error('ERROR: The index service must run in WSL, not Windows.');
-  console.error('Use start-service.bat to launch correctly.');
+  console.error('ERROR: The index service must run on Linux (WSL or Docker), not Windows.');
+  console.error('Use: docker compose up -d   OR   ./start-service.sh');
   process.exit(1);
 }
 
@@ -75,8 +75,11 @@ class UnrealIndexService {
     }
 
     // Validate projects
-    if (!this.config.projects || !Array.isArray(this.config.projects) || this.config.projects.length === 0) {
-      throw new Error(`config.json has no projects configured.`);
+    if (!this.config.projects || !Array.isArray(this.config.projects)) {
+      this.config.projects = [];
+    }
+    if (this.config.projects.length === 0) {
+      console.log('[Config] No projects configured — service will accept data via /internal/ingest');
     }
 
     for (const project of this.config.projects) {

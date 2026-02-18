@@ -1,0 +1,27 @@
+node_modules
+data/
+.git
+.gitattributes
+
+# Test and perf artifacts
+*.test.js
+stress-test.js
+test-*.mjs
+test-*.ps1
+perf-*.json
+perf-*.mjs
+profiles/
+
+# Windows-only files
+start-service.bat
+*.ps1
+
+# IDE and config
+.vscode
+.claude
+memory/
+
+# Misc
+NUL
+*.xml
+__pycache__
