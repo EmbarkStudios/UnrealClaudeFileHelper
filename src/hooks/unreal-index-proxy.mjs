@@ -2,11 +2,39 @@
 // Falls through to native Grep/Glob if service is unavailable or returns no results.
 
 import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const SERVICE_URL = 'http://localhost:3847';
 
 // File extensions that indicate a specific file (skip — unreal-index greps whole project)
 const FILE_EXT = /\.(as|cpp|h|hpp|cs|py|ini|json|xml|yaml|yml|toml|md|txt)$/i;
+
+// ── Indexed path bypass ─────────────────────────────────────
+
+const __hookDir = dirname(fileURLToPath(import.meta.url));
+let indexedPrefixes = [];
+try {
+  const cfg = JSON.parse(readFileSync(join(__hookDir, 'unreal-index-paths.json'), 'utf-8'));
+  indexedPrefixes = (cfg.indexedPrefixes || []).map(normalizePath);
+} catch {}
+
+function normalizePath(p) {
+  let s = p.replace(/\\/g, '/').toLowerCase().replace(/\/+$/, '');
+  // Git Bash: /d/path → d:/path
+  if (s.length >= 3 && s[0] === '/' && s[2] === '/' && s[1] >= 'a' && s[1] <= 'z') {
+    s = s[1] + ':' + s.slice(2);
+  }
+  return s;
+}
+
+function isInsideIndex(path) {
+  if (!path || indexedPrefixes.length === 0) return true;
+  const norm = normalizePath(path);
+  return indexedPrefixes.some(prefix =>
+    norm.startsWith(prefix) || prefix.startsWith(norm)
+  );
+}
 
 let input;
 try {
@@ -50,6 +78,7 @@ async function handleGrep() {
 
   if (FILE_EXT.test(path || '')) { allow(); return; }   // specific file
   if (!pattern || pattern.length < 2) { allow(); return; }
+  if (!isInsideIndex(path)) { allow(); return; }        // outside indexed dirs
 
   try {
     const url = new URL('/grep', SERVICE_URL);
@@ -104,6 +133,18 @@ async function handleGrep() {
 async function handleGlob() {
   const { pattern, path } = tool_input;
 
+  // Determine effective search directory from path or glob pattern prefix
+  let searchDir = path || '';
+  if (!searchDir) {
+    const wildIdx = (pattern || '').search(/[*?]/);
+    if (wildIdx > 0) {
+      const prefix = pattern.slice(0, wildIdx);
+      const lastSep = Math.max(prefix.lastIndexOf('/'), prefix.lastIndexOf('\\'));
+      if (lastSep >= 0) searchDir = prefix.slice(0, lastSep);
+    }
+  }
+  if (!isInsideIndex(searchDir)) { allow(); return; }
+
   // Extract meaningful filename from glob — skip pure-extension patterns
   const basename = (pattern || '').split('/').pop().split('\\').pop();
   const cleaned = basename.replace(/\*/g, '').replace(/\?/g, '').replace(/\.[^.]+$/, '');
@@ -132,10 +173,45 @@ async function handleGlob() {
   }
 }
 
+// ── Shell path extraction ────────────────────────────────────
+
+function extractShellTargetPath(cmd) {
+  const parts = cmd.trim().split(/\s+/);
+  if (parts.length < 2) return '';
+  const looksLikePath = (s) => /[/\\]/.test(s) || (s.length >= 3 && s[1] === ':');
+  // grep/rg: last non-flag argument that looks like a path
+  if (/^\s*(grep|rg)\b/.test(cmd)) {
+    for (let i = parts.length - 1; i >= 1; i--) {
+      const arg = parts[i];
+      if (arg.startsWith('-') || arg.startsWith("'") || arg.startsWith('"')) continue;
+      if (looksLikePath(arg)) return arg;
+    }
+  }
+  // find: first non-flag argument after "find"
+  if (/^\s*find\b/.test(cmd)) {
+    for (let i = 1; i < parts.length; i++) {
+      if (parts[i].startsWith('-')) break;
+      if (looksLikePath(parts[i]) || parts[i] === '.') return parts[i];
+    }
+  }
+  // ls: first non-flag argument
+  if (/^\s*(ls|dir|tree)\b/.test(cmd)) {
+    for (let i = 1; i < parts.length; i++) {
+      if (parts[i].startsWith('-')) continue;
+      return parts[i];
+    }
+  }
+  return '';
+}
+
 // ── Bash handler (PowerShell interception) ───────────────────
 async function handleBash() {
   const cmd = (tool_input.command || '').trim();
   if (!cmd) { allow(); return; }
+
+  // Bypass: if the command targets a path outside indexed projects, allow through
+  const shellPath = extractShellTargetPath(cmd);
+  if (shellPath && !isInsideIndex(shellPath)) { allow(); return; }
 
   // wc → block, redirect to Read tool
   if (/^\s*wc\b/.test(cmd)) {

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -187,6 +188,99 @@ func fetchJSON(u string, target interface{}) bool {
 	return json.Unmarshal(body, target) == nil
 }
 
+// ── Indexed path bypass ─────────────────────────────────────
+
+var indexedPrefixes []string
+
+func init() {
+	exe, err := os.Executable()
+	if err != nil {
+		return
+	}
+	configPath := filepath.Join(filepath.Dir(exe), "unreal-index-paths.json")
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return
+	}
+	var cfg struct {
+		IndexedPrefixes []string `json:"indexedPrefixes"`
+	}
+	if json.Unmarshal(data, &cfg) == nil {
+		for _, p := range cfg.IndexedPrefixes {
+			indexedPrefixes = append(indexedPrefixes, normalizePath(p))
+		}
+	}
+}
+
+// normalizePath lowercases, converts backslashes to forward slashes,
+// strips trailing slashes, and converts Git Bash /d/... to d:/...
+func normalizePath(p string) string {
+	s := strings.ToLower(strings.ReplaceAll(p, "\\", "/"))
+	s = strings.TrimRight(s, "/")
+	// Git Bash: /d/path → d:/path
+	if len(s) >= 3 && s[0] == '/' && s[2] == '/' && s[1] >= 'a' && s[1] <= 'z' {
+		s = string(s[1]) + ":" + s[2:]
+	}
+	return s
+}
+
+// isInsideIndex returns true if the path is empty, unresolvable, or overlaps
+// with any indexed project directory. Returns false only when the path is
+// clearly outside all indexed directories (allowing native tools through).
+func isInsideIndex(path string) bool {
+	if path == "" || len(indexedPrefixes) == 0 {
+		return true
+	}
+	norm := normalizePath(path)
+	for _, prefix := range indexedPrefixes {
+		if strings.HasPrefix(norm, prefix) || strings.HasPrefix(prefix, norm) {
+			return true
+		}
+	}
+	return false
+}
+
+// extractShellTargetPath tries to extract the target directory from a shell command.
+func extractShellTargetPath(cmd string) string {
+	parts := strings.Fields(cmd)
+	if len(parts) < 2 {
+		return ""
+	}
+	// For grep/rg: last non-flag argument that looks like a path
+	if grepRe.MatchString(cmd) {
+		for i := len(parts) - 1; i >= 1; i-- {
+			arg := parts[i]
+			if strings.HasPrefix(arg, "-") || strings.HasPrefix(arg, "'") || strings.HasPrefix(arg, "\"") {
+				continue
+			}
+			if strings.ContainsAny(arg, "/\\") || (len(arg) >= 3 && arg[1] == ':') {
+				return arg
+			}
+		}
+	}
+	// For find: first non-flag argument after "find"
+	if findRe.MatchString(cmd) {
+		for i := 1; i < len(parts); i++ {
+			if strings.HasPrefix(parts[i], "-") {
+				break
+			}
+			if strings.ContainsAny(parts[i], "/\\") || parts[i] == "." || (len(parts[i]) >= 3 && parts[i][1] == ':') {
+				return parts[i]
+			}
+		}
+	}
+	// For ls: first non-flag argument
+	if lsRe.MatchString(cmd) {
+		for i := 1; i < len(parts); i++ {
+			if strings.HasPrefix(parts[i], "-") {
+				continue
+			}
+			return parts[i]
+		}
+	}
+	return ""
+}
+
 // ── Smart routing: try find-type ─────────────────────────────
 
 func tryFindType(name string) string {
@@ -245,6 +339,11 @@ func handleGrep(ti map[string]interface{}) {
 	typ := str(ti, "type")
 
 	if fileExtRe.MatchString(path) || len(pattern) < 2 {
+		allow()
+	}
+
+	// Bypass: target path is outside all indexed project directories
+	if !isInsideIndex(path) {
 		allow()
 	}
 
@@ -358,6 +457,21 @@ func handleGrep(ti map[string]interface{}) {
 
 func handleGlob(ti map[string]interface{}) {
 	pattern := str(ti, "pattern")
+	path := str(ti, "path")
+
+	// Determine the effective search directory from path or glob pattern prefix
+	searchDir := path
+	if searchDir == "" {
+		if idx := strings.IndexAny(pattern, "*?"); idx > 0 {
+			prefix := pattern[:idx]
+			if lastSep := strings.LastIndexAny(prefix, "/\\"); lastSep >= 0 {
+				searchDir = prefix[:lastSep]
+			}
+		}
+	}
+	if !isInsideIndex(searchDir) {
+		allow()
+	}
 
 	basename := pattern
 	if idx := strings.LastIndexAny(basename, "/\\"); idx >= 0 {
@@ -402,6 +516,11 @@ func handleBash(ti map[string]interface{}) {
 
 	// Trim leading whitespace for matching
 	trimmed := strings.TrimSpace(cmd)
+
+	// Bypass: if the command targets a path outside the indexed projects, allow through
+	if shellPath := extractShellTargetPath(trimmed); shellPath != "" && !isInsideIndex(shellPath) {
+		allow()
+	}
 
 	// A. Directory listing: ls, dir, tree → block, redirect to Glob
 	if lsRe.MatchString(trimmed) {

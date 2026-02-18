@@ -91,6 +91,24 @@ export async function installHooks(projectDir, { silent = false, tryGo = true } 
     if (!silent) console.log('  Installed Node.js proxy (Go not available).');
   }
 
+  // ── Write indexed paths companion config ────────────────────
+
+  const configPath = join(__dirname, '..', '..', 'config.json');
+  if (existsSync(configPath)) {
+    try {
+      const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+      const indexedPrefixes = (config.projects || []).flatMap(p => p.paths || []);
+      const pathsConfig = { indexedPrefixes };
+      writeFileSync(
+        join(hooksDir, 'unreal-index-paths.json'),
+        JSON.stringify(pathsConfig, null, 2) + '\n'
+      );
+      if (!silent) console.log(`  Wrote indexed paths config (${indexedPrefixes.length} paths).`);
+    } catch (err) {
+      if (!silent) console.log(`  Warning: could not write indexed paths config: ${err.message}`);
+    }
+  }
+
   // ── Update settings.json ───────────────────────────────────
 
   let settings = {};
