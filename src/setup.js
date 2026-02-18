@@ -492,11 +492,36 @@ async function actionFullSetup() {
         const writeIt = cancelGuard(await p.confirm({ message: 'Write this config?', initialValue: true }));
         if (!writeIt) continue; // back to review loop
 
+        // Ask about deployment mode
+        const prereqs = checkPrerequisites();
+        const deploymentMode = cancelGuard(await p.select({
+          message: 'How will you run the service?',
+          options: [
+            ...(prereqs.docker
+              ? [{ value: 'docker', label: 'Docker (recommended)', hint: 'Bundles Node, Zoekt, and all dependencies in a container' }]
+              : []),
+            { value: 'wsl', label: 'Manual WSL', hint: 'Install Node, Go, and Zoekt yourself in WSL' },
+          ],
+          initialValue: prereqs.docker ? 'docker' : 'wsl',
+        }));
+
+        if (deploymentMode === 'docker') {
+          config.service = { port: 3847, host: '0.0.0.0' };
+          config.data = {
+            dbPath: '/data/db/index.db',
+            mirrorDir: '/data/mirror',
+            indexDir: '/data/zoekt-index'
+          };
+          config.zoekt = { webPort: 6070, parallelism: 4, reindexDebounceMs: 5000 };
+          config.watcher = { debounceMs: 100 };
+          p.log.info('Config set for Docker deployment (0.0.0.0 host, /data/* paths).');
+        }
+
         await saveConfig(config);
         clearDatabase();
         p.log.success('Config saved.');
 
-        // Auto-check Zoekt prerequisites so users know what to expect
+        // Show prerequisites status
         await actionCheckPrerequisites();
 
         // Offer to install search instructions and hooks
@@ -648,7 +673,7 @@ function clearDatabase() {
 // ── Prerequisites check ───────────────────────────────────
 
 function checkPrerequisites() {
-  const results = { go: false, zoekt: false, wsl: false, goVersion: null, zoektLocation: null };
+  const results = { go: false, zoekt: false, wsl: false, docker: false, goVersion: null, zoektLocation: null, dockerVersion: null };
 
   // Check Go
   try {
@@ -690,6 +715,25 @@ function checkPrerequisites() {
     } catch {}
   }
 
+  // Check Docker
+  try {
+    const dockerVer = execSync('docker compose version', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 5000 }).trim();
+    results.docker = true;
+    results.dockerVersion = dockerVer;
+  } catch {}
+  if (!results.docker && process.platform === 'win32') {
+    try {
+      const dockerVer = execSync(
+        'wsl -- bash -c "docker compose version 2>/dev/null"',
+        { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 10000 }
+      ).trim();
+      if (dockerVer.includes('Docker Compose')) {
+        results.docker = true;
+        results.dockerVersion = dockerVer + ' (WSL)';
+      }
+    } catch {}
+  }
+
   return results;
 }
 
@@ -723,8 +767,19 @@ async function actionCheckPrerequisites() {
     lines.push('  Zoekt: NOT FOUND (install Go first)');
   }
 
+  // Docker
+  if (prereqs.docker) {
+    lines.push(`  Docker: OK (${prereqs.dockerVersion})`);
+  } else {
+    lines.push('  Docker: NOT FOUND (optional — enables simplified deployment)');
+    lines.push('         Install from https://docker.com');
+  }
+
   // Summary
-  if (prereqs.zoekt) {
+  if (prereqs.docker) {
+    lines.push('');
+    lines.push('  Docker is available — recommended for deployment (bundles Node, Zoekt, and all dependencies).');
+  } else if (prereqs.zoekt) {
     lines.push('');
     lines.push('  Zoekt code search will be enabled for fast /grep queries.');
   } else {

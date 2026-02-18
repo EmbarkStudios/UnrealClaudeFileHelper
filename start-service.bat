@@ -1,5 +1,5 @@
 @echo off
-REM Start the unreal-index service in WSL and the file watcher on Windows.
+REM Start the unreal-index service (Docker-first, WSL fallback) and the file watcher.
 REM Double-click this file or run from a command prompt.
 
 setlocal enabledelayedexpansion
@@ -35,12 +35,28 @@ if !ERRORLEVEL! EQU 0 (
     goto start_watcher
 )
 
+REM Convert Windows path to WSL /mnt/c/... path for Docker Compose
+set "WIN_DIR=%~dp0"
+set "WIN_DIR=%WIN_DIR:\=/%"
+set "WSL_DIR=/mnt/c/%WIN_DIR:~3%"
+
+REM Try Docker first (via WSL since Docker CLI is in WSL)
+echo  Checking for Docker...
+wsl -- bash -c "docker compose version" >nul 2>&1
+if !ERRORLEVEL! EQU 0 (
+    echo  Docker detected. Starting container...
+    echo.
+    wsl -- bash -c "cd '%WSL_DIR%' && docker compose up -d"
+    if !ERRORLEVEL! EQU 0 (
+        goto wait_loop
+    )
+    echo  Docker start failed, falling back to WSL...
+    echo.
+)
+
+REM Fallback: Start via WSL systemd/screen
 echo  Starting service in WSL...
 echo.
-
-REM Find the repo in WSL and start the service
-REM Prefer the Windows-mounted repo (/mnt/c/...) first — it has the latest working-tree changes.
-REM WSL-native clones are checked as fallback only.
 wsl -- bash -c "export PATH=$HOME/local/node22/bin:$HOME/go/bin:/usr/local/go/bin:$PATH; for d in /mnt/c/Users/*/.[cC]laude/repos/embark-claude-index $HOME/.claude/repos/embark-claude-index $HOME/repos/unreal-index $HOME/.claude/repos/unreal-index; do if [ -f $d/start-service.sh ]; then cd $d && bash start-service.sh --bg; exit; fi; done; echo ERROR: Repo not found in WSL"
 
 if !ERRORLEVEL! NEQ 0 (
@@ -53,9 +69,10 @@ if !ERRORLEVEL! NEQ 0 (
 )
 
 REM Wait for service to come up
+:wait_loop
 echo  Waiting for service on port 3847...
 set TRIES=0
-:wait_loop
+:wait_check
 if %TRIES% GEQ 30 (
     echo ERROR: Service did not start within 30s
     pause
@@ -64,7 +81,7 @@ if %TRIES% GEQ 30 (
 timeout /t 1 /nobreak >nul
 curl -s http://127.0.0.1:3847/health >nul 2>&1 && goto service_up
 set /a TRIES+=1
-goto wait_loop
+goto wait_check
 
 :service_up
 echo  Service is running.

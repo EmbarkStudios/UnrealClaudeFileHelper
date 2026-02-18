@@ -2,6 +2,7 @@
 # Start the unreal-index service in WSL.
 # Usage: ./start-service.sh              (foreground)
 #        ./start-service.sh --bg         (install + start systemd service)
+#        ./start-service.sh --docker     (start via Docker Compose)
 #        ./start-service.sh --stop       (stop service)
 #        ./start-service.sh --restart    (restart service)
 #        ./start-service.sh --status     (show service status)
@@ -85,13 +86,37 @@ case "${1:-}" in
     journalctl --user -u "$SERVICE_NAME" -f
     ;;
 
+  --docker)
+    echo "Starting Docker container..."
+    if ! command -v docker &>/dev/null; then
+      echo "ERROR: Docker not found. Install Docker Engine or Docker Desktop."
+      exit 1
+    fi
+    docker compose up -d
+    echo "Waiting for service..."
+    for i in $(seq 1 30); do
+      if curl -s http://127.0.0.1:3847/health > /dev/null 2>&1; then
+        echo "Docker service started successfully"
+        echo "  Logs:    docker compose logs -f"
+        echo "  Stop:    docker compose stop"
+        echo "  Restart: docker compose restart"
+        curl -s http://127.0.0.1:3847/health | head -1 || true
+        exit 0
+      fi
+      sleep 1
+    done
+    echo "ERROR: Service did not start within 30s"
+    docker compose logs --tail=20
+    exit 1
+    ;;
+
   "")
     exec "$NODE_BIN" src/service/index.js
     ;;
 
   *)
     echo "Unknown option: $1"
-    echo "Usage: ./start-service.sh [--bg|--stop|--restart|--status|--logs]"
+    echo "Usage: ./start-service.sh [--bg|--docker|--stop|--restart|--status|--logs]"
     exit 1
     ;;
 esac
