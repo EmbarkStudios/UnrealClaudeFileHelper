@@ -530,7 +530,7 @@ If a search returns no results, check the hints in the response for guidance (wr
 
           case 'unreal_find_children':
             toolResult = await fetchService('/find-children', {
-              parent: args.parentClass, recursive: args.recursive,
+              parent: args.parentClass || args.parent || args.name || args.className, recursive: args.recursive,
               project: args.project, language: args.language, maxResults: args.maxResults
             });
             break;
@@ -584,7 +584,7 @@ If a search returns no results, check the hints in the response for guidance (wr
 
           case 'unreal_grep':
             toolResult = await fetchService('/grep', {
-              pattern: args.pattern, project: args.project, language: args.language,
+              pattern: args.pattern || args.query || args.search, project: args.project, language: args.language,
               caseSensitive: args.caseSensitive, maxResults: args.maxResults,
               contextLines: args.contextLines, includeAssets: args.includeAssets
             });
