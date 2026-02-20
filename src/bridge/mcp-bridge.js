@@ -544,7 +544,7 @@ If a search returns no results, check the hints in the response for guidance (wr
 
           case 'unreal_find_file':
             toolResult = await fetchService('/find-file', {
-              filename: args.filename, project: args.project,
+              filename: args.filename || args.name, project: args.project,
               language: args.language, maxResults: args.maxResults
             });
             break;
