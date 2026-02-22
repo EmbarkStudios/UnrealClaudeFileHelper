@@ -17,16 +17,24 @@ If a search returns no results, check the hints in the response for guidance (wr
 
 ## Architecture
 
-- **Two-process split**: Windows watcher + WSL service
-- **Windows watcher** (`src/watcher/watcher-client.js`): Watches project files, parses them, POSTs to the service
-- **WSL service** (`src/service/index.js`): Express API, SQLite DB, in-memory query index, Zoekt integration
-- **MCP bridge** (`src/bridge/mcp-bridge.js`): Translates MCP tool calls to HTTP API calls against the service
-- **Setup wizard** (`src/setup.js`): Interactive config generation (project paths, engine root)
+- **Docker-only deployment**: Each workspace runs as a Docker container with service + Zoekt + SQLite
+- **Multi-workspace**: Multiple P4 workspaces can be indexed independently, each with its own container and port
+- **Windows watcher** (`src/watcher/watcher-client.js`): Watches project files, parses them, POSTs to the service container
+- **Docker service** (`src/service/index.js`): Express API, SQLite DB, in-memory query index, Zoekt — all inside the container
+- **MCP bridge** (`src/bridge/mcp-bridge.js`): Routes MCP tool calls to the correct workspace container based on the `workspace` parameter
+- **Setup GUI** (`src/setup-gui.js`): Web-based setup at `http://localhost:3846` — auto-detects UE projects, configures workspaces, manages Docker containers, installs hooks
+
+### Key Files
+
+- `workspaces.json` — Single source of truth for workspace definitions (name, port, shared settings)
+- `workspace-configs/<name>.json` — Per-workspace config (projects, paths, service settings)
+- `docker-compose.yml` — Generated from `workspaces.json`, one service per workspace
 
 ## Development
 
-- `npm run setup` — Run the interactive setup wizard
-- `npm start` — Start the indexing service
-- `npm run watcher` — Start the file watcher
+- `npm run setup` — Open the web-based setup GUI at `http://localhost:3846` (no npm install needed)
+- `docker compose up` — Start all workspace containers
+- `docker compose up <workspace>` — Start a specific workspace container
+- `npm run watcher -- --workspace <name>` — Start the file watcher for a specific workspace
 - `npm run bridge` — Start the MCP bridge standalone
 - `npm test` — Run tests

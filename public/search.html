@@ -7,10 +7,6 @@
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: 'Segoe UI', system-ui, sans-serif; background: #1e1e1e; color: #d4d4d4; padding: 20px; }
-    .header { display: flex; align-items: center; gap: 16px; margin-bottom: 16px; }
-    h1 { font-size: 1.4em; color: #569cd6; }
-    .nav-link { font-size: 13px; color: #808080; text-decoration: none; }
-    .nav-link:hover { color: #569cd6; }
     .search-bar { display: flex; gap: 8px; margin-bottom: 12px; position: relative; }
     #pattern { flex: 1; padding: 8px 12px; font-size: 14px; font-family: 'Cascadia Code', 'Consolas', monospace;
       background: #2d2d2d; border: 1px solid #3e3e3e; color: #d4d4d4; border-radius: 4px; }
@@ -19,13 +15,43 @@
     button:hover { background: #1177bb; }
     .loading { display: none; font-size: 12px; color: #569cd6; margin-left: 8px; align-self: center; }
     .loading.active { display: inline; }
-    .filters { display: flex; gap: 12px; margin-bottom: 16px; font-size: 13px; align-items: center; }
+
+    /* Mode tabs */
+    .mode-tabs { display: flex; gap: 4px; margin-bottom: 12px; }
+    .mode-tab {
+      padding: 5px 14px; font-size: 13px; background: transparent;
+      border: 1px solid #3e3e3e; color: #808080; border-radius: 3px; cursor: pointer;
+      font-family: inherit; transition: all 0.15s;
+    }
+    .mode-tab:hover { color: #d4d4d4; border-color: #569cd6; }
+    .mode-tab.active { background: #264f78; color: #9cdcfe; border-color: #264f78; }
+    .mode-tab .mode-key { font-size: 10px; color: #555; margin-left: 4px; }
+    .mode-tab.active .mode-key { color: #6b8fb5; }
+
+    /* Filters */
+    .filters { display: flex; gap: 12px; margin-bottom: 12px; font-size: 13px; align-items: center; flex-wrap: wrap; }
+    .filters.hidden { display: none; }
     .filters label { display: flex; align-items: center; gap: 4px; }
     .filters select, .filters input[type="text"] {
       background: #2d2d2d; border: 1px solid #3e3e3e; color: #d4d4d4; padding: 4px 8px; border-radius: 3px; font-size: 13px; }
+    .filters input[type="checkbox"] { accent-color: #569cd6; }
+
     .meta { font-size: 13px; color: #808080; margin-bottom: 12px; }
     .meta span { color: #569cd6; }
-    .result { border-left: 3px solid #3e3e3e; margin-bottom: 8px; padding: 4px 0 4px 12px; }
+    .shortcut-hint { font-size: 11px; color: #555; margin-bottom: 12px; }
+    kbd { background: #333; padding: 1px 5px; border-radius: 3px; border: 1px solid #555; font-size: 11px; font-family: inherit; }
+
+    /* Badges */
+    .badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 11px; margin-left: 6px; vertical-align: middle; }
+    .badge-lang { background: #264f78; color: #9cdcfe; }
+    .badge-proj { background: #4d3519; color: #ce9178; }
+    .badge-kind { background: #1e4620; color: #6bc96b; }
+    .badge-member { background: #4d2519; color: #ce7178; }
+    .badge-asset-class { background: #2d1e4e; color: #c586c0; }
+    .badge-module { background: #2d3e4e; color: #7ec8e3; }
+
+    /* Grep results */
+    .result { border-left: 3px solid #3e3e3e; margin-bottom: 2px; padding: 4px 0 4px 12px; }
     .result:hover { border-left-color: #569cd6; }
     .result.selected { border-left-color: #569cd6; background: #252526; }
     .result-file { font-size: 13px; color: #4ec9b0; cursor: pointer; text-decoration: none; }
@@ -35,42 +61,106 @@
       background: #252526; padding: 2px 6px; margin-top: 2px; border-radius: 2px; overflow-x: auto; }
     .result-context { font-family: 'Cascadia Code', 'Consolas', monospace; font-size: 12px; color: #666;
       white-space: pre-wrap; padding: 0 6px; }
+    .line-num { color: #555; display: inline-block; width: 4ch; text-align: right; margin-right: 8px; user-select: none; }
+
+    /* File group header */
+    .file-group { margin-bottom: 12px; }
+    .file-group-header { display: flex; align-items: center; gap: 8px; padding: 4px 0; cursor: pointer; user-select: none; }
+    .file-group-header:hover .result-file { text-decoration: underline; }
+    .file-group-toggle { color: #808080; font-size: 11px; width: 16px; text-align: center; transition: transform 0.15s; }
+    .file-group-toggle.collapsed { transform: rotate(-90deg); }
+    .file-group-count { font-size: 11px; color: #569cd6; background: #1e3a5c; padding: 1px 6px; border-radius: 8px; }
+    .file-group-matches { padding-left: 4px; }
+    .file-group-matches.collapsed { display: none; }
+
+    /* Type/member result cards */
+    .result-card { background: #252526; border: 1px solid #3e3e3e; border-radius: 4px; padding: 10px 14px; margin-bottom: 8px; }
+    .result-card:hover { border-color: #4e4e4e; }
+    .result-card.selected { border-color: #569cd6; }
+    .result-card-header { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+    .result-name { font-size: 15px; color: #4ec9b0; font-weight: 600; cursor: pointer; text-decoration: none; }
+    .result-name:hover { text-decoration: underline; }
+    .result-parent { color: #808080; font-size: 13px; }
+    .result-owner { color: #808080; font-size: 13px; }
+    .result-signature { font-family: 'Cascadia Code', 'Consolas', monospace; font-size: 12px; color: #9cdcfe; margin-top: 4px;
+      white-space: pre-wrap; overflow-x: auto; }
+    .result-path { font-size: 12px; color: #808080; margin-top: 4px; }
+    .result-path a { color: #808080; text-decoration: none; }
+    .result-path a:hover { color: #4ec9b0; text-decoration: underline; }
+
+    /* Asset cards */
+    .asset-name { font-size: 15px; color: #ce9178; font-weight: 600; }
+    .asset-content-path { font-size: 12px; color: #808080; font-family: 'Cascadia Code', 'Consolas', monospace; margin-top: 4px; }
+    .asset-folder { font-size: 12px; color: #666; margin-top: 2px; }
+
+    /* File results */
+    .file-result-name { font-size: 14px; color: #4ec9b0; font-weight: 600; cursor: pointer; text-decoration: none; }
+    .file-result-name:hover { text-decoration: underline; }
+    .file-result-path { font-size: 12px; color: #808080; margin-top: 2px; font-family: 'Cascadia Code', 'Consolas', monospace; }
+
+    /* Match highlighting */
+    mark { background: #6b4f00; color: #e8d5a3; padding: 0 2px; border-radius: 2px; }
+
+    /* Explain panel */
+    .explain-btn { background: #333; color: #808080; border: 1px solid #3e3e3e; padding: 2px 10px; border-radius: 3px;
+      cursor: pointer; font-size: 11px; margin-left: 8px; }
+    .explain-btn:hover { color: #d4d4d4; border-color: #569cd6; }
+    .explain-btn.loading { color: #569cd6; }
+    .explain-panel { margin: 8px 0 4px 0; border-left: 2px solid #264f78; padding-left: 12px; }
+    .explain-section { margin-bottom: 8px; }
+    .explain-section h4 { font-size: 12px; color: #569cd6; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
+    .explain-item { font-size: 13px; padding: 2px 0; font-family: 'Cascadia Code', 'Consolas', monospace; }
+    .explain-item a { color: #9cdcfe; text-decoration: none; }
+    .explain-item a:hover { text-decoration: underline; }
+    .explain-item .explain-member-kind { color: #666; font-size: 11px; margin-left: 4px; }
+    .explain-child { font-size: 13px; padding: 2px 0; }
+    .explain-child-name { color: #4ec9b0; }
+    .explain-child-parent { color: #808080; font-size: 12px; margin-left: 6px; }
+
+    .empty { color: #808080; font-style: italic; margin-top: 20px; }
+    .hint { font-size: 12px; color: #808080; margin-top: 8px; padding: 6px 10px; background: #252526; border-radius: 3px; border-left: 3px solid #569cd6; }
+
+    /* Grep asset results section */
     .assets-section { margin-top: 20px; border-top: 1px solid #3e3e3e; padding-top: 12px; }
     .assets-section h3 { font-size: 1em; color: #ce9178; margin-bottom: 8px; }
-    .asset { padding: 4px 0 4px 12px; border-left: 3px solid #3e3e3e; margin-bottom: 6px; }
-    .asset-path { color: #ce9178; font-size: 13px; }
-    .asset-match { font-size: 12px; color: #808080; margin-top: 2px; }
-    .empty { color: #808080; font-style: italic; margin-top: 20px; }
-    .badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 11px; margin-left: 6px; }
-    .badge-lang { background: #264f78; color: #9cdcfe; }
-    .badge-proj { background: #4d3519; color: #ce9178; }
-    .shortcut-hint { font-size: 11px; color: #555; margin-top: 4px; }
-    kbd { background: #333; padding: 1px 5px; border-radius: 3px; border: 1px solid #555; font-size: 11px; font-family: inherit; }
   </style>
 </head>
 <body>
-  <div class="header">
-    <h1>Unreal Index Search <span id="watcher-dot" title="Watcher: checking..." style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#808080;margin-left:4px;vertical-align:middle"></span></h1>
-    <a class="nav-link" href="/">Dashboard</a>
+  <script src="/dashboard.js"></script>
+
+  <div style="display:flex;align-items:center;gap:8px;margin-bottom:16px">
+    <span id="watcher-dot" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#808080;vertical-align:middle" title="Watcher: checking..."></span>
   </div>
+
   <div class="search-bar">
     <input type="text" id="pattern" placeholder="Search pattern (regex supported)" autofocus />
     <button onclick="doSearch()">Search</button>
     <span id="loading" class="loading">Searching...</span>
   </div>
-  <div class="filters">
-    <label>Project: <input type="text" id="project" placeholder="all" style="width:120px" /></label>
+
+  <div class="mode-tabs">
+    <button class="mode-tab active" data-mode="grep">Grep <span class="mode-key">1</span></button>
+    <button class="mode-tab" data-mode="type">Type <span class="mode-key">2</span></button>
+    <button class="mode-tab" data-mode="member">Member <span class="mode-key">3</span></button>
+    <button class="mode-tab" data-mode="file">File <span class="mode-key">4</span></button>
+    <button class="mode-tab" data-mode="asset">Asset <span class="mode-key">5</span></button>
+  </div>
+
+  <!-- Grep filters -->
+  <div class="filters" id="filters-grep">
+    <label>Project: <input type="text" id="grep-project" placeholder="all" style="width:120px" /></label>
     <label>Language:
-      <select id="language">
+      <select id="grep-language">
         <option value="">All</option>
         <option value="cpp">C++</option>
         <option value="angelscript">AngelScript</option>
+        <option value="csharp">C#</option>
         <option value="config">Config</option>
       </select>
     </label>
-    <label><input type="checkbox" id="caseSensitive" checked /> Case sensitive</label>
+    <label><input type="checkbox" id="grep-caseSensitive" checked /> Case sensitive</label>
     <label>Max:
-      <select id="maxResults">
+      <select id="grep-maxResults">
         <option value="25">25</option>
         <option value="50" selected>50</option>
         <option value="100">100</option>
@@ -78,8 +168,78 @@
       </select>
     </label>
   </div>
+
+  <!-- Type filters -->
+  <div class="filters hidden" id="filters-type">
+    <label>Project: <input type="text" id="type-project" placeholder="all" style="width:120px" /></label>
+    <label>Language:
+      <select id="type-language">
+        <option value="">All</option>
+        <option value="cpp">C++</option>
+        <option value="angelscript">AngelScript</option>
+        <option value="csharp">C#</option>
+      </select>
+    </label>
+    <label>Kind:
+      <select id="type-kind">
+        <option value="">All</option>
+        <option value="class">Class</option>
+        <option value="struct">Struct</option>
+        <option value="enum">Enum</option>
+        <option value="interface">Interface</option>
+        <option value="delegate">Delegate</option>
+        <option value="event">Event</option>
+      </select>
+    </label>
+    <label><input type="checkbox" id="type-fuzzy" checked /> Fuzzy</label>
+  </div>
+
+  <!-- Member filters -->
+  <div class="filters hidden" id="filters-member">
+    <label>Project: <input type="text" id="member-project" placeholder="all" style="width:120px" /></label>
+    <label>Language:
+      <select id="member-language">
+        <option value="">All</option>
+        <option value="cpp">C++</option>
+        <option value="angelscript">AngelScript</option>
+        <option value="csharp">C#</option>
+      </select>
+    </label>
+    <label>Containing type: <input type="text" id="member-containingType" placeholder="any" style="width:140px" /></label>
+    <label>Kind:
+      <select id="member-kind">
+        <option value="">All</option>
+        <option value="function">Function</option>
+        <option value="property">Property</option>
+        <option value="enum_value">Enum value</option>
+      </select>
+    </label>
+    <label><input type="checkbox" id="member-fuzzy" checked /> Fuzzy</label>
+  </div>
+
+  <!-- File filters -->
+  <div class="filters hidden" id="filters-file">
+    <label>Project: <input type="text" id="file-project" placeholder="all" style="width:120px" /></label>
+    <label>Language:
+      <select id="file-language">
+        <option value="">All</option>
+        <option value="cpp">C++</option>
+        <option value="angelscript">AngelScript</option>
+        <option value="csharp">C#</option>
+        <option value="config">Config</option>
+      </select>
+    </label>
+  </div>
+
+  <!-- Asset filters -->
+  <div class="filters hidden" id="filters-asset">
+    <label>Project: <input type="text" id="asset-project" placeholder="all" style="width:120px" /></label>
+    <label>Folder: <input type="text" id="asset-folder" placeholder="any" style="width:200px" /></label>
+  </div>
+
   <div class="shortcut-hint">
-    <kbd>/</kbd> focus search &nbsp; <kbd>Up</kbd>/<kbd>Down</kbd> navigate results &nbsp; <kbd>Enter</kbd> open in VS Code
+    <kbd>/</kbd> focus search &nbsp; <kbd>1</kbd>–<kbd>5</kbd> switch mode &nbsp;
+    <kbd>Up</kbd>/<kbd>Down</kbd> navigate &nbsp; <kbd>Enter</kbd> open in VS Code
   </div>
   <div id="meta" class="meta"></div>
   <div id="results"></div>
@@ -87,11 +247,43 @@
   <script>
     const $ = id => document.getElementById(id);
 
-    // --- Debounced live search ---
+    // --- State ---
+    let currentMode = 'grep';
     let debounceTimer = null;
     let currentController = null;
     let selectedIndex = -1;
+    const placeholders = {
+      grep: 'Search pattern (regex supported)',
+      type: 'Type name (class, struct, enum...)',
+      member: 'Member name (function, property...)',
+      file: 'File name',
+      asset: 'Asset name'
+    };
 
+    // --- Mode switching ---
+    document.querySelectorAll('.mode-tab').forEach(tab => {
+      tab.addEventListener('click', () => switchMode(tab.dataset.mode));
+    });
+
+    function switchMode(mode) {
+      if (mode === currentMode) return;
+      currentMode = mode;
+      document.querySelectorAll('.mode-tab').forEach(t => t.classList.toggle('active', t.dataset.mode === mode));
+      document.querySelectorAll('.filters').forEach(f => f.classList.add('hidden'));
+      $('filters-' + mode).classList.remove('hidden');
+      $('pattern').placeholder = placeholders[mode] || '';
+      $('meta').textContent = '';
+      $('results').innerHTML = '';
+      selectedIndex = -1;
+      $('pattern').focus();
+      // Re-trigger search if there's a pattern
+      if ($('pattern').value.trim()) {
+        clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(() => doSearch(), 150);
+      }
+    }
+
+    // --- Debounced live search ---
     $('pattern').addEventListener('input', () => {
       clearTimeout(debounceTimer);
       debounceTimer = setTimeout(() => doSearch(), 300);
@@ -104,50 +296,66 @@
       }
     });
 
-    // Debounce filter changes too
-    for (const id of ['project', 'language', 'caseSensitive', 'maxResults']) {
-      $(id).addEventListener('change', () => {
+    // Debounce filter changes
+    document.querySelectorAll('.filters select, .filters input[type="text"], .filters input[type="checkbox"]').forEach(el => {
+      el.addEventListener('change', () => {
         clearTimeout(debounceTimer);
         debounceTimer = setTimeout(() => doSearch(), 300);
       });
-    }
+    });
 
     // --- Keyboard navigation ---
     document.addEventListener('keydown', e => {
-      // '/' to focus search (only when not already in an input)
-      if (e.key === '/' && document.activeElement.tagName !== 'INPUT' && document.activeElement.tagName !== 'SELECT') {
+      const ae = document.activeElement;
+      const isInput = ae.tagName === 'INPUT' || ae.tagName === 'SELECT' || ae.tagName === 'TEXTAREA';
+
+      // '/' to focus search
+      if (e.key === '/' && !isInput) {
         e.preventDefault();
         $('pattern').focus();
         $('pattern').select();
         return;
       }
 
-      const results = document.querySelectorAll('.result');
-      if (results.length === 0) return;
+      // 1-5 switch mode (when not in input)
+      if (!isInput && e.key >= '1' && e.key <= '5') {
+        const modes = ['grep', 'type', 'member', 'file', 'asset'];
+        const idx = parseInt(e.key) - 1;
+        if (idx < modes.length) {
+          e.preventDefault();
+          switchMode(modes[idx]);
+          return;
+        }
+      }
+
+      // Arrow navigation
+      const items = document.querySelectorAll('.result, .result-card');
+      if (items.length === 0) return;
 
       if (e.key === 'ArrowDown') {
         e.preventDefault();
-        selectedIndex = Math.min(selectedIndex + 1, results.length - 1);
-        updateSelection(results);
+        selectedIndex = Math.min(selectedIndex + 1, items.length - 1);
+        updateSelection(items);
       } else if (e.key === 'ArrowUp') {
         e.preventDefault();
         selectedIndex = Math.max(selectedIndex - 1, -1);
-        updateSelection(results);
+        updateSelection(items);
         if (selectedIndex === -1) $('pattern').focus();
-      } else if (e.key === 'Enter' && selectedIndex >= 0 && document.activeElement.tagName !== 'INPUT') {
+      } else if (e.key === 'Enter' && selectedIndex >= 0 && !isInput) {
         e.preventDefault();
-        const link = results[selectedIndex]?.querySelector('.result-file');
+        const link = items[selectedIndex]?.querySelector('a.result-file, a.result-name, a.file-result-name');
         if (link) window.location.href = link.href;
       }
     });
 
-    function updateSelection(results) {
-      results.forEach((r, i) => r.classList.toggle('selected', i === selectedIndex));
+    function updateSelection(items) {
+      items.forEach((r, i) => r.classList.toggle('selected', i === selectedIndex));
       if (selectedIndex >= 0) {
-        results[selectedIndex].scrollIntoView({ block: 'nearest' });
+        items[selectedIndex].scrollIntoView({ block: 'nearest' });
       }
     }
 
+    // --- Search dispatch ---
     async function doSearch() {
       const pattern = $('pattern').value.trim();
       if (!pattern) {
@@ -156,98 +364,517 @@
         return;
       }
 
-      // Cancel previous in-flight request
       if (currentController) currentController.abort();
       currentController = new AbortController();
-
       $('loading').classList.add('active');
       $('meta').textContent = '';
       selectedIndex = -1;
 
-      const params = new URLSearchParams({
-        pattern,
-        caseSensitive: $('caseSensitive').checked,
-        maxResults: $('maxResults').value,
-        contextLines: 2
-      });
-      const project = $('project').value.trim();
-      const language = $('language').value;
-      if (project) params.set('project', project);
-      if (language) params.set('language', language);
-
       try {
-        const resp = await fetch('/grep?' + params, { signal: currentController.signal });
-        const data = await resp.json();
-
-        $('loading').classList.remove('active');
-
-        if (!resp.ok) {
-          $('meta').textContent = '';
-          $('results').innerHTML = '<div class="empty">Error: ' + (data.error || resp.statusText) + '</div>';
-          return;
+        switch (currentMode) {
+          case 'grep': await doGrepSearch(pattern); break;
+          case 'type': await doTypeSearch(pattern); break;
+          case 'member': await doMemberSearch(pattern); break;
+          case 'file': await doFileSearch(pattern); break;
+          case 'asset': await doAssetSearch(pattern); break;
         }
-
-        const truncNote = data.truncated ? ' (truncated)' : '';
-        $('meta').innerHTML =
-          '<span>' + data.totalMatches + '</span> matches in <span>' + (data.matchedFiles || '?') +
-          '</span> files' + truncNote + ' &mdash; <span>' + (data.zoektDurationMs || '?') + 'ms</span>';
-
-        const html = [];
-        for (const r of data.results) {
-          const vscodeUrl = 'vscode://file/' + r.file + ':' + r.line;
-          html.push('<div class="result">');
-          html.push('  <a class="result-file" href="' + vscodeUrl + '">' + esc(r.file) + '</a>');
-          html.push('  <span class="result-line">:' + r.line + '</span>');
-          if (r.language) html.push('  <span class="badge badge-lang">' + esc(r.language) + '</span>');
-          if (r.project) html.push('  <span class="badge badge-proj">' + esc(r.project) + '</span>');
-          if (r.context && r.context.length > 0) {
-            const beforeLines = r.context.slice(0, Math.floor(r.context.length / 2));
-            const afterLines = r.context.slice(Math.floor(r.context.length / 2));
-            if (beforeLines.length) html.push('  <div class="result-context">' + esc(beforeLines.join('\n')) + '</div>');
-            html.push('  <div class="result-match">' + esc(r.match) + '</div>');
-            if (afterLines.length) html.push('  <div class="result-context">' + esc(afterLines.join('\n')) + '</div>');
-          } else {
-            html.push('  <div class="result-match">' + esc(r.match) + '</div>');
-          }
-          html.push('</div>');
-        }
-
-        if (data.assets && data.assets.length > 0) {
-          html.push('<div class="assets-section"><h3>Assets (' + data.assets.length + ')</h3>');
-          for (const a of data.assets) {
-            html.push('<div class="asset">');
-            html.push('  <div class="asset-path">' + esc(a.file) + '</div>');
-            if (a.project) html.push('  <span class="badge badge-proj">' + esc(a.project) + '</span>');
-            if (a.match) html.push('  <div class="asset-match">' + esc(a.match) + '</div>');
-            html.push('</div>');
-          }
-          html.push('</div>');
-        }
-
-        if (data.results.length === 0 && (!data.assets || data.assets.length === 0)) {
-          html.push('<div class="empty">No results found</div>');
-        }
-
-        $('results').innerHTML = html.join('\n');
       } catch (err) {
-        if (err.name === 'AbortError') return; // Cancelled by new search — ignore
+        if (err.name === 'AbortError') return;
         $('loading').classList.remove('active');
         $('meta').textContent = '';
-        $('results').innerHTML = '<div class="empty">Request failed: ' + err.message + '</div>';
+        $('results').innerHTML = '<div class="empty">Request failed: ' + esc(err.message) + '</div>';
       }
     }
 
-    function esc(s) {
-      const d = document.createElement('div');
-      d.textContent = s;
-      return d.innerHTML;
+    // --- Grep search ---
+    async function doGrepSearch(pattern) {
+      const params = new URLSearchParams({
+        pattern,
+        caseSensitive: $('grep-caseSensitive').checked,
+        maxResults: $('grep-maxResults').value,
+        contextLines: 2,
+        grouped: true,
+        includeAssets: true
+      });
+      const project = $('grep-project').value.trim();
+      const language = $('grep-language').value;
+      if (project) params.set('project', project);
+      if (language) params.set('language', language);
+
+      const startMs = performance.now();
+      const resp = await WorkspaceContext.serviceFetch('/grep?' + params, { signal: currentController.signal });
+      const data = await resp.json();
+      const durationMs = Math.round(performance.now() - startMs);
+      $('loading').classList.remove('active');
+
+      if (!resp.ok) {
+        $('results').innerHTML = '<div class="empty">Error: ' + esc(data.error || resp.statusText) + '</div>';
+        return;
+      }
+
+      const truncNote = data.truncated ? ' (truncated)' : '';
+      const fileCount = data.grouped ? data.results.length : '?';
+      $('meta').innerHTML =
+        '<span>' + (data.totalMatches || 0) + '</span> matches in <span>' + fileCount +
+        '</span> files' + truncNote + ' — <span>' + durationMs + 'ms</span>';
+
+      renderGrepResults(data, pattern);
+    }
+
+    function renderGrepResults(data, pattern) {
+      const html = [];
+      const caseSensitive = $('grep-caseSensitive').checked;
+
+      if (data.grouped && data.results) {
+        for (const group of data.results) {
+          const vscodeBase = 'vscode://file/' + group.file;
+          html.push('<div class="file-group">');
+          html.push('<div class="file-group-header" onclick="toggleGroup(this)">');
+          html.push('  <span class="file-group-toggle">&#9660;</span>');
+          html.push('  <a class="result-file" href="' + vscodeBase + '">' + esc(group.file) + '</a>');
+          if (group.project) html.push('  <span class="badge badge-proj">' + esc(group.project) + '</span>');
+          html.push('  <span class="file-group-count">' + group.matches.length + '</span>');
+          html.push('</div>');
+          html.push('<div class="file-group-matches">');
+
+          for (const m of group.matches) {
+            const vscodeUrl = vscodeBase + ':' + m.line;
+            html.push('<div class="result">');
+
+            if (m.context && m.context.startLine != null && m.context.lines) {
+              const matchIdx = m.line - m.context.startLine;
+              for (let i = 0; i < m.context.lines.length; i++) {
+                const lineNo = m.context.startLine + i;
+                const lineText = m.context.lines[i];
+                if (i === matchIdx) {
+                  html.push('<div class="result-match"><span class="line-num">' + lineNo + '</span>' +
+                    highlightMatch(lineText, pattern, caseSensitive) + '</div>');
+                } else {
+                  html.push('<div class="result-context"><span class="line-num">' + lineNo + '</span>' + esc(lineText) + '</div>');
+                }
+              }
+            } else if (m.context && Array.isArray(m.context)) {
+              const half = Math.floor(m.context.length / 2);
+              const before = m.context.slice(0, half);
+              const after = m.context.slice(half);
+              const startLine = m.line - before.length;
+              for (let i = 0; i < before.length; i++) {
+                html.push('<div class="result-context"><span class="line-num">' + (startLine + i) + '</span>' + esc(before[i]) + '</div>');
+              }
+              html.push('<div class="result-match"><span class="line-num">' + m.line + '</span>' +
+                highlightMatch(m.match, pattern, caseSensitive) + '</div>');
+              for (let i = 0; i < after.length; i++) {
+                html.push('<div class="result-context"><span class="line-num">' + (m.line + 1 + i) + '</span>' + esc(after[i]) + '</div>');
+              }
+            } else {
+              html.push('<div class="result-match"><span class="line-num">' + m.line + '</span>' +
+                highlightMatch(m.match, pattern, caseSensitive) + '</div>');
+            }
+            html.push('</div>');
+          }
+          html.push('</div></div>');
+        }
+      }
+
+      // Asset results from grep
+      if (data.assets && data.assets.length > 0) {
+        html.push('<div class="assets-section"><h3>Assets (' + data.assets.length + ')</h3>');
+        for (const a of data.assets) {
+          html.push('<div class="result-card">');
+          html.push('  <div class="asset-name">' + esc(a.file || a.name || '') + '</div>');
+          if (a.project) html.push('  <span class="badge badge-proj">' + esc(a.project) + '</span>');
+          if (a.match) html.push('  <div class="asset-content-path">' + highlightMatch(a.match, pattern, caseSensitive) + '</div>');
+          html.push('</div>');
+        }
+        html.push('</div>');
+      }
+
+      if ((!data.results || data.results.length === 0) && (!data.assets || data.assets.length === 0)) {
+        html.push('<div class="empty">No results found</div>');
+        if (data.hints) {
+          for (const h of data.hints) html.push('<div class="hint">' + esc(h) + '</div>');
+        }
+      }
+
+      $('results').innerHTML = html.join('\n');
+    }
+
+    function toggleGroup(header) {
+      const toggle = header.querySelector('.file-group-toggle');
+      const matches = header.nextElementSibling;
+      toggle.classList.toggle('collapsed');
+      matches.classList.toggle('collapsed');
+    }
+
+    // --- Type search ---
+    async function doTypeSearch(pattern) {
+      const params = new URLSearchParams({ name: pattern, maxResults: 50, contextLines: 3 });
+      const project = $('type-project').value.trim();
+      const language = $('type-language').value;
+      const kind = $('type-kind').value;
+      const fuzzy = $('type-fuzzy').checked;
+      if (project) params.set('project', project);
+      if (language) params.set('language', language);
+      if (kind) params.set('kind', kind);
+      params.set('fuzzy', fuzzy);
+
+      const startMs = performance.now();
+      const resp = await WorkspaceContext.serviceFetch('/find-type?' + params, { signal: currentController.signal });
+      const data = await resp.json();
+      const durationMs = Math.round(performance.now() - startMs);
+      $('loading').classList.remove('active');
+
+      if (!resp.ok) {
+        $('results').innerHTML = '<div class="empty">Error: ' + esc(data.error || resp.statusText) + '</div>';
+        return;
+      }
+
+      $('meta').innerHTML = '<span>' + data.results.length + '</span> types found — <span>' + durationMs + 'ms</span>';
+      renderTypeResults(data);
+    }
+
+    function renderTypeResults(data) {
+      const html = [];
+      for (const r of data.results) {
+        const vscodeUrl = r.path ? 'vscode://file/' + r.path + (r.line ? ':' + r.line : '') : '#';
+        html.push('<div class="result-card">');
+        html.push('  <div class="result-card-header">');
+        html.push('    <a class="result-name" href="' + vscodeUrl + '">' + esc(r.name) + '</a>');
+        if (r.kind) html.push('    <span class="badge badge-kind">' + esc(r.kind) + '</span>');
+        if (r.language) html.push('    <span class="badge badge-lang">' + esc(r.language) + '</span>');
+        if (r.project) html.push('    <span class="badge badge-proj">' + esc(r.project) + '</span>');
+        if (r.parent) html.push('    <span class="result-parent">extends ' + esc(r.parent) + '</span>');
+        html.push('    <button class="explain-btn" onclick="explainType(\'' + escAttr(r.name) + '\', this)">Explain</button>');
+        html.push('  </div>');
+
+        // Context lines if available
+        if (r.context && r.context.lines) {
+          html.push('  <div style="margin-top:6px">');
+          const matchIdx = r.line - r.context.startLine;
+          for (let i = 0; i < r.context.lines.length; i++) {
+            const lineNo = r.context.startLine + i;
+            const cls = i === matchIdx ? 'result-match' : 'result-context';
+            html.push('    <div class="' + cls + '"><span class="line-num">' + lineNo + '</span>' + esc(r.context.lines[i]) + '</div>');
+          }
+          html.push('  </div>');
+        }
+
+        if (r.path) {
+          html.push('  <div class="result-path"><a href="' + vscodeUrl + '">' + esc(r.path) + (r.line ? ':' + r.line : '') + '</a>');
+          if (r.module) html.push('    <span class="badge badge-module">' + esc(r.module) + '</span>');
+          html.push('  </div>');
+        }
+
+        html.push('  <div class="explain-container"></div>');
+        html.push('</div>');
+      }
+
+      if (data.results.length === 0) {
+        html.push('<div class="empty">No types found</div>');
+        if (data.hints) {
+          for (const h of data.hints) html.push('<div class="hint">' + esc(h) + '</div>');
+        }
+      }
+
+      $('results').innerHTML = html.join('\n');
+    }
+
+    // --- Member search ---
+    async function doMemberSearch(pattern) {
+      const params = new URLSearchParams({ name: pattern, maxResults: 50, includeSignatures: true });
+      const project = $('member-project').value.trim();
+      const language = $('member-language').value;
+      const containingType = $('member-containingType').value.trim();
+      const memberKind = $('member-kind').value;
+      const fuzzy = $('member-fuzzy').checked;
+      if (project) params.set('project', project);
+      if (language) params.set('language', language);
+      if (containingType) params.set('containingType', containingType);
+      if (memberKind) params.set('memberKind', memberKind);
+      params.set('fuzzy', fuzzy);
+
+      const startMs = performance.now();
+      const resp = await WorkspaceContext.serviceFetch('/find-member?' + params, { signal: currentController.signal });
+      const data = await resp.json();
+      const durationMs = Math.round(performance.now() - startMs);
+      $('loading').classList.remove('active');
+
+      if (!resp.ok) {
+        $('results').innerHTML = '<div class="empty">Error: ' + esc(data.error || resp.statusText) + '</div>';
+        return;
+      }
+
+      $('meta').innerHTML = '<span>' + data.results.length + '</span> members found — <span>' + durationMs + 'ms</span>';
+      renderMemberResults(data);
+    }
+
+    function renderMemberResults(data) {
+      const html = [];
+      for (const r of data.results) {
+        const vscodeUrl = r.path ? 'vscode://file/' + r.path + (r.line ? ':' + r.line : '') : '#';
+        html.push('<div class="result-card">');
+        html.push('  <div class="result-card-header">');
+        if (r.ownerType) {
+          html.push('    <span class="result-owner">' + esc(r.ownerType) + '::' + '</span>');
+        }
+        html.push('    <a class="result-name" href="' + vscodeUrl + '">' + esc(r.name) + '</a>');
+        if (r.memberKind) html.push('    <span class="badge badge-member">' + esc(r.memberKind) + '</span>');
+        if (r.language) html.push('    <span class="badge badge-lang">' + esc(r.language) + '</span>');
+        if (r.project) html.push('    <span class="badge badge-proj">' + esc(r.project) + '</span>');
+        html.push('  </div>');
+
+        if (r.signature) {
+          html.push('  <div class="result-signature">' + esc(r.signature) + '</div>');
+        }
+
+        if (r.path) {
+          html.push('  <div class="result-path"><a href="' + vscodeUrl + '">' + esc(r.path) + (r.line ? ':' + r.line : '') + '</a></div>');
+        }
+        html.push('</div>');
+      }
+
+      if (data.results.length === 0) {
+        html.push('<div class="empty">No members found</div>');
+        if (data.hints) {
+          for (const h of data.hints) html.push('<div class="hint">' + esc(h) + '</div>');
+        }
+      }
+
+      $('results').innerHTML = html.join('\n');
+    }
+
+    // --- File search ---
+    async function doFileSearch(pattern) {
+      const params = new URLSearchParams({ filename: pattern, maxResults: 50 });
+      const project = $('file-project').value.trim();
+      const language = $('file-language').value;
+      if (project) params.set('project', project);
+      if (language) params.set('language', language);
+
+      const startMs = performance.now();
+      const resp = await WorkspaceContext.serviceFetch('/find-file?' + params, { signal: currentController.signal });
+      const data = await resp.json();
+      const durationMs = Math.round(performance.now() - startMs);
+      $('loading').classList.remove('active');
+
+      if (!resp.ok) {
+        $('results').innerHTML = '<div class="empty">Error: ' + esc(data.error || resp.statusText) + '</div>';
+        return;
+      }
+
+      $('meta').innerHTML = '<span>' + data.results.length + '</span> files found — <span>' + durationMs + 'ms</span>';
+      renderFileResults(data, pattern);
+    }
+
+    function renderFileResults(data, pattern) {
+      const html = [];
+      for (const r of data.results) {
+        const filePath = r.file || r.path || '';
+        const vscodeUrl = 'vscode://file/' + filePath;
+        const fileName = filePath.split('/').pop() || filePath;
+        const dirPath = filePath.substring(0, filePath.length - fileName.length);
+
+        html.push('<div class="result-card">');
+        html.push('  <div class="result-card-header">');
+        html.push('    <a class="file-result-name" href="' + vscodeUrl + '">' + highlightMatch(fileName, pattern, false) + '</a>');
+        if (r.language) html.push('    <span class="badge badge-lang">' + esc(r.language) + '</span>');
+        if (r.project) html.push('    <span class="badge badge-proj">' + esc(r.project) + '</span>');
+        if (r.module) html.push('    <span class="badge badge-module">' + esc(r.module) + '</span>');
+        html.push('  </div>');
+        if (dirPath) {
+          html.push('  <div class="file-result-path">' + esc(dirPath) + '</div>');
+        }
+        html.push('</div>');
+      }
+
+      if (data.results.length === 0) {
+        html.push('<div class="empty">No files found</div>');
+        if (data.hints) {
+          for (const h of data.hints) html.push('<div class="hint">' + esc(h) + '</div>');
+        }
+      }
+
+      $('results').innerHTML = html.join('\n');
+    }
+
+    // --- Asset search ---
+    async function doAssetSearch(pattern) {
+      const params = new URLSearchParams({ name: pattern, maxResults: 50 });
+      const project = $('asset-project').value.trim();
+      const folder = $('asset-folder').value.trim();
+      if (project) params.set('project', project);
+      if (folder) params.set('folder', folder);
+
+      const startMs = performance.now();
+      const resp = await WorkspaceContext.serviceFetch('/find-asset?' + params, { signal: currentController.signal });
+      const data = await resp.json();
+      const durationMs = Math.round(performance.now() - startMs);
+      $('loading').classList.remove('active');
+
+      if (!resp.ok) {
+        $('results').innerHTML = '<div class="empty">Error: ' + esc(data.error || resp.statusText) + '</div>';
+        return;
+      }
+
+      $('meta').innerHTML = '<span>' + data.results.length + '</span> assets found — <span>' + durationMs + 'ms</span>';
+      renderAssetResults(data, pattern);
+    }
+
+    function renderAssetResults(data, pattern) {
+      const html = [];
+      for (const r of data.results) {
+        html.push('<div class="result-card">');
+        html.push('  <div class="result-card-header">');
+        html.push('    <span class="asset-name">' + highlightMatch(r.name || '', pattern, false) + '</span>');
+        if (r.assetClass) html.push('    <span class="badge badge-asset-class">' + esc(r.assetClass) + '</span>');
+        if (r.project) html.push('    <span class="badge badge-proj">' + esc(r.project) + '</span>');
+        html.push('  </div>');
+        if (r.contentPath) {
+          html.push('  <div class="asset-content-path">' + esc(r.contentPath) + '</div>');
+        }
+        if (r.parentClass) {
+          html.push('  <div class="result-parent" style="margin-top:2px">inherits from ' + esc(r.parentClass) + '</div>');
+        }
+        if (r.folder) {
+          html.push('  <div class="asset-folder">' + esc(r.folder) + '</div>');
+        }
+        html.push('</div>');
+      }
+
+      if (data.results.length === 0) {
+        html.push('<div class="empty">No assets found</div>');
+        if (data.hints) {
+          for (const h of data.hints) html.push('<div class="hint">' + esc(h) + '</div>');
+        }
+      }
+
+      $('results').innerHTML = html.join('\n');
+    }
+
+    // --- Explain type expansion ---
+    async function explainType(name, btn) {
+      const container = btn.closest('.result-card').querySelector('.explain-container');
+      // Toggle off if already expanded
+      if (container.querySelector('.explain-panel')) {
+        container.innerHTML = '';
+        btn.textContent = 'Explain';
+        return;
+      }
+
+      btn.textContent = 'Loading...';
+      btn.classList.add('loading');
+
+      try {
+        const params = new URLSearchParams({
+          name,
+          includeMembers: true,
+          includeChildren: true,
+          contextLines: 0,
+          maxChildren: 30,
+          maxFunctions: 40,
+          maxProperties: 40
+        });
+        const resp = await WorkspaceContext.serviceFetch('/explain-type?' + params);
+        const data = await resp.json();
+
+        btn.textContent = 'Collapse';
+        btn.classList.remove('loading');
+
+        if (!data.type) {
+          container.innerHTML = '<div class="explain-panel"><div class="empty">Type not found</div></div>';
+          return;
+        }
+
+        const html = ['<div class="explain-panel">'];
+
+        // Members
+        if (data.members) {
+          if (data.members.functions && data.members.functions.length > 0) {
+            html.push('<div class="explain-section"><h4>Functions (' + data.members.functions.length + ')</h4>');
+            for (const f of data.members.functions) {
+              const vscUrl = f.path ? 'vscode://file/' + f.path + (f.line ? ':' + f.line : '') : '#';
+              html.push('<div class="explain-item"><a href="' + vscUrl + '">' +
+                esc(f.signature || f.name) + '</a></div>');
+            }
+            html.push('</div>');
+          }
+
+          if (data.members.properties && data.members.properties.length > 0) {
+            html.push('<div class="explain-section"><h4>Properties (' + data.members.properties.length + ')</h4>');
+            for (const p of data.members.properties) {
+              const vscUrl = p.path ? 'vscode://file/' + p.path + (p.line ? ':' + p.line : '') : '#';
+              html.push('<div class="explain-item"><a href="' + vscUrl + '">' +
+                esc(p.signature || p.name) + '</a></div>');
+            }
+            html.push('</div>');
+          }
+
+          if (data.members.enumValues && data.members.enumValues.length > 0) {
+            html.push('<div class="explain-section"><h4>Enum Values (' + data.members.enumValues.length + ')</h4>');
+            for (const v of data.members.enumValues) {
+              html.push('<div class="explain-item">' + esc(v.name) + '</div>');
+            }
+            html.push('</div>');
+          }
+
+          if (data.members.truncated) {
+            html.push('<div class="hint">Results truncated — not all members shown</div>');
+          }
+        }
+
+        // Children
+        if (data.children && data.children.results && data.children.results.length > 0) {
+          html.push('<div class="explain-section"><h4>Children (' + data.children.results.length + ')</h4>');
+          for (const c of data.children.results) {
+            const vscUrl = c.path ? 'vscode://file/' + c.path + (c.line ? ':' + c.line : '') : '#';
+            html.push('<div class="explain-child">');
+            html.push('  <a class="explain-child-name" href="' + vscUrl + '">' + esc(c.name) + '</a>');
+            if (c.kind) html.push('  <span class="badge badge-kind">' + esc(c.kind) + '</span>');
+            if (c.parent && c.parent !== name) html.push('  <span class="explain-child-parent">via ' + esc(c.parent) + '</span>');
+            html.push('</div>');
+          }
+          if (data.children.truncated) {
+            html.push('<div class="hint">Children list truncated</div>');
+          }
+          html.push('</div>');
+        }
+
+        if ((!data.members || data.members.count === 0) &&
+            (!data.children || !data.children.results || data.children.results.length === 0)) {
+          html.push('<div class="empty">No members or children found</div>');
+        }
+
+        html.push('</div>');
+        container.innerHTML = html.join('\n');
+      } catch (err) {
+        btn.textContent = 'Explain';
+        btn.classList.remove('loading');
+        container.innerHTML = '<div class="explain-panel"><div class="empty">Failed to load: ' + esc(err.message) + '</div></div>';
+      }
+    }
+
+    // --- Helpers ---
+    function highlightMatch(text, pattern, caseSensitive) {
+      if (!pattern || !text) return esc(text);
+      try {
+        const escaped = pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const flags = caseSensitive ? 'g' : 'gi';
+        const regex = new RegExp('(' + escaped + ')', flags);
+        const parts = String(text).split(regex);
+        return parts.map((part, i) => {
+          if (i % 2 === 1) return '<mark>' + esc(part) + '</mark>';
+          return esc(part);
+        }).join('');
+      } catch {
+        return esc(text);
+      }
     }
 
     // --- Watcher status dot ---
     async function checkWatcher() {
       const dot = $('watcher-dot');
       try {
-        const resp = await fetch('/watcher-status');
+        const resp = await WorkspaceContext.serviceFetch('/watcher-status');
         if (!resp.ok) throw new Error(resp.statusText);
         const data = await resp.json();
         if (data.hasActiveWatcher) {
@@ -262,7 +889,29 @@
         dot.title = 'Watcher: unknown (service error)';
       }
     }
-    checkWatcher();
+
+    window.onWorkspaceChanged = () => {
+      $('results').innerHTML = '';
+      $('meta').textContent = '';
+      checkWatcher();
+    };
+
+    initDashboard('search');
+    WorkspaceContext.load().then(() => {
+      checkWatcher();
+      // --- URL parameter support ---
+      const params = new URLSearchParams(window.location.search);
+      const mode = params.get('mode');
+      if (mode && ['grep', 'type', 'member', 'file', 'asset'].includes(mode)) {
+        switchMode(mode);
+      }
+      const q = params.get('q') || params.get('pattern');
+      if (q) {
+        $('pattern').value = q;
+        clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(() => doSearch(), 100);
+      }
+    });
     setInterval(checkWatcher, 30000);
   </script>
 </body>

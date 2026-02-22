@@ -457,6 +457,25 @@ export class IndexDatabase {
     return result;
   }
 
+  batchCheckMtimes(filePaths) {
+    if (!filePaths || filePaths.length === 0) return new Map();
+    const result = new Map();
+    const chunkSize = 900;
+    for (let i = 0; i < filePaths.length; i += chunkSize) {
+      const chunk = filePaths.slice(i, i + chunkSize);
+      const ph = chunk.map(() => '?').join(',');
+      const rows = this.db.prepare(`
+        SELECT f.path, f.mtime, (fc.file_id IS NOT NULL) as has_content
+        FROM files f LEFT JOIN file_content fc ON fc.file_id = f.id
+        WHERE f.path IN (${ph})
+      `).all(...chunk);
+      for (const row of rows) {
+        result.set(row.path, { mtime: row.mtime, hasContent: !!row.has_content });
+      }
+    }
+    return result;
+  }
+
   findSymbolsAtLocations(fileLines) {
     // fileLines: [{path, line}, ...] — paths are cleaned (project/relativePath format)
     // Returns Map<"path:line", {name, kind, entityType}>
@@ -578,10 +597,12 @@ export class IndexDatabase {
       VALUES (?, 'type', ?)
     `);
 
+    const inserted = [];
     const insertMany = this.db.transaction((items) => {
       for (const item of items) {
         const result = typeStmt.run(fileId, item.name, item.kind, item.parent || null, item.line);
         const typeId = result.lastInsertRowid;
+        inserted.push({ id: typeId, name: item.name, kind: item.kind, parent: item.parent || null, line: item.line, depth: 0 });
 
         // Insert name trigrams for fast fuzzy search
         const trigrams = extractTrigrams(item.name);
@@ -592,6 +613,7 @@ export class IndexDatabase {
     });
 
     insertMany(types);
+    return inserted;
   }
 
   clearTypesForFile(fileId) {
@@ -613,6 +635,40 @@ export class IndexDatabase {
     this.db.prepare('DELETE FROM types WHERE file_id = ?').run(fileId);
   }
 
+  clearTypesForFiles(fileIds) {
+    if (fileIds.length === 0) return;
+    const chunkSize = 900;
+    for (let i = 0; i < fileIds.length; i += chunkSize) {
+      const chunk = fileIds.slice(i, i + chunkSize);
+      const ph = chunk.map(() => '?').join(',');
+
+      const typeIds = this.db.prepare(
+        `SELECT id FROM types WHERE file_id IN (${ph})`
+      ).all(...chunk).map(r => r.id);
+      const memberIds = this.db.prepare(
+        `SELECT id FROM members WHERE file_id IN (${ph})`
+      ).all(...chunk).map(r => r.id);
+
+      this._bulkDeleteTrigrams('type', typeIds);
+      this._bulkDeleteTrigrams('member', memberIds);
+
+      this.db.prepare(`DELETE FROM members WHERE file_id IN (${ph})`).run(...chunk);
+      this.db.prepare(`DELETE FROM types WHERE file_id IN (${ph})`).run(...chunk);
+    }
+  }
+
+  _bulkDeleteTrigrams(entityType, entityIds) {
+    if (entityIds.length === 0) return;
+    const chunkSize = 900;
+    for (let i = 0; i < entityIds.length; i += chunkSize) {
+      const chunk = entityIds.slice(i, i + chunkSize);
+      const ph = chunk.map(() => '?').join(',');
+      this.db.prepare(
+        `DELETE FROM name_trigrams WHERE entity_type = ? AND entity_id IN (${ph})`
+      ).run(entityType, ...chunk);
+    }
+  }
+
   insertMembers(fileId, members) {
     const memberStmt = this.db.prepare(`
       INSERT INTO members (type_id, file_id, name, member_kind, line, is_static, specifiers)
@@ -623,6 +679,7 @@ export class IndexDatabase {
       VALUES (?, 'member', ?)
     `);
 
+    const inserted = [];
     const insertMany = this.db.transaction((items) => {
       for (const item of items) {
         const result = memberStmt.run(
@@ -635,6 +692,15 @@ export class IndexDatabase {
           item.specifiers || null
         );
         const memberId = result.lastInsertRowid;
+        inserted.push({
+          id: memberId,
+          typeId: item.typeId || null,
+          name: item.name,
+          memberKind: item.memberKind,
+          line: item.line,
+          isStatic: item.isStatic ? 1 : 0,
+          specifiers: item.specifiers || null
+        });
 
         // Insert name trigrams for fast fuzzy search
         const trigrams = extractTrigrams(item.name);
@@ -645,6 +711,7 @@ export class IndexDatabase {
     });
 
     insertMany(members);
+    return inserted;
   }
 
   clearMembersForFile(fileId) {
@@ -1715,6 +1782,21 @@ export class IndexDatabase {
     });
 
     insertMany(assets);
+
+    // Batch fetch all upserted rows (1 query instead of N individual SELECTs)
+    const paths = assets.map(a => a.path);
+    const results = [];
+    const chunkSize = 900;
+    for (let i = 0; i < paths.length; i += chunkSize) {
+      const chunk = paths.slice(i, i + chunkSize);
+      const ph = chunk.map(() => '?').join(',');
+      const rows = this.db.prepare(`
+        SELECT id, path, name, content_path, folder, project, extension, mtime, asset_class, parent_class
+        FROM assets WHERE path IN (${ph})
+      `).all(...chunk);
+      results.push(...rows);
+    }
+    return results;
   }
 
   deleteAsset(path) {

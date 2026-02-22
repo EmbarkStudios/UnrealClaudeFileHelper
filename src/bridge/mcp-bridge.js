@@ -9,25 +9,76 @@ import {
   ReadResourceRequestSchema
 } from '@modelcontextprotocol/sdk/types.js';
 import { readFile } from 'fs/promises';
+import { readFileSync, existsSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { randomUUID } from 'crypto';
+import { Agent } from 'undici';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-const SERVICE_URL = 'http://127.0.0.1:3847';
 const SESSION_ID = randomUUID();
 
-async function fetchService(endpoint, params = {}) {
-  const url = new URL(endpoint, SERVICE_URL);
+// ── Connection pool ──────────────────────────────────────────
+
+const httpAgent = new Agent({
+  keepAliveTimeout: 60_000,
+  connections: 10,
+  pipelining: 1
+});
+
+// ── Workspace routing ────────────────────────────────────────
+
+const INSIDE_CONTAINER = !!process.env.INSIDE_CONTAINER;
+
+const workspaceUrls = new Map();
+let defaultWorkspace = null;
+
+function loadWorkspacesConfig() {
+  if (INSIDE_CONTAINER) {
+    // Inside Docker: always route to local service
+    workspaceUrls.set('default', 'http://127.0.0.1:3847');
+    defaultWorkspace = 'default';
+    return;
+  }
+  const wsPath = join(__dirname, '..', '..', 'workspaces.json');
+  try {
+    const cfg = JSON.parse(readFileSync(wsPath, 'utf-8'));
+    for (const [name, ws] of Object.entries(cfg.workspaces || {})) {
+      workspaceUrls.set(name, `http://127.0.0.1:${ws.port}`);
+    }
+    defaultWorkspace = cfg.defaultWorkspace || [...workspaceUrls.keys()][0];
+  } catch {
+    workspaceUrls.set('default', 'http://127.0.0.1:3847');
+    defaultWorkspace = 'default';
+  }
+}
+loadWorkspacesConfig();
+
+function resolveServiceUrl(workspace) {
+  if (workspace && workspaceUrls.has(workspace)) {
+    return workspaceUrls.get(workspace);
+  }
+  if (workspace && !workspaceUrls.has(workspace)) {
+    throw new Error(`Unknown workspace "${workspace}". Available: ${[...workspaceUrls.keys()].join(', ')}`);
+  }
+  return workspaceUrls.get(defaultWorkspace) || 'http://127.0.0.1:3847';
+}
+
+const availableWorkspaces = () => [...workspaceUrls.keys()].join(', ');
+
+// ── HTTP helpers ─────────────────────────────────────────────
+
+async function fetchService(serviceUrl, endpoint, params = {}) {
+  const url = new URL(endpoint, serviceUrl);
   for (const [key, value] of Object.entries(params)) {
     if (value !== undefined && value !== null) {
       url.searchParams.set(key, String(value));
     }
   }
 
-  const response = await fetch(url.toString());
+  const response = await fetch(url.toString(), { dispatcher: httpAgent });
 
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: response.statusText }));
@@ -37,9 +88,9 @@ async function fetchService(endpoint, params = {}) {
   return response.json();
 }
 
-async function postService(endpoint) {
-  const url = new URL(endpoint, SERVICE_URL);
-  const response = await fetch(url.toString(), { method: 'POST' });
+async function postService(serviceUrl, endpoint) {
+  const url = new URL(endpoint, serviceUrl);
+  const response = await fetch(url.toString(), { method: 'POST', dispatcher: httpAgent });
 
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: response.statusText }));
@@ -49,15 +100,16 @@ async function postService(endpoint) {
   return response.json();
 }
 
-async function fetchBatch(queries) {
+async function fetchBatch(serviceUrl, queries) {
   if (!queries || !Array.isArray(queries) || queries.length === 0) {
     throw new Error('queries array is required and must not be empty');
   }
-  const url = new URL('/batch', SERVICE_URL);
+  const url = new URL('/batch', serviceUrl);
   const response = await fetch(url.toString(), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ queries })
+    body: JSON.stringify({ queries }),
+    dispatcher: httpAgent
   });
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: response.statusText }));
@@ -65,6 +117,15 @@ async function fetchBatch(queries) {
   }
   return response.json();
 }
+
+// ── Workspace parameter definition ───────────────────────────
+
+const workspaceParam = {
+  workspace: {
+    type: 'string',
+    description: `Workspace to query. Available: ${availableWorkspaces()}. Default: "${defaultWorkspace}"`
+  }
+};
 
 class UnrealIndexBridge {
   constructor() {
@@ -85,7 +146,8 @@ class UnrealIndexBridge {
 - Use unreal_find_member instead of grep to locate function/property definitions
 - Use the Read tool (not sed/cat/head) to read file contents after finding them
 Never fall back to Bash find/grep — these tools are faster, project-aware, and return structured results.
-If a search returns no results, check the hints in the response for guidance (wrong project filter, try fuzzy, etc).`,
+If a search returns no results, check the hints in the response for guidance (wrong project filter, try fuzzy, etc).
+Available workspaces: ${availableWorkspaces()}. Default workspace: "${defaultWorkspace}". Use the "workspace" parameter to query a specific workspace.`,
       }
     );
   }
@@ -141,7 +203,8 @@ If a search returns no results, check the hints in the response for guidance (wr
                   type: 'number',
                   default: 0,
                   description: 'Lines of source context to include around the type definition. Set to 5-10 to see the type definition inline without needing to Read the file.'
-                }
+                },
+                ...workspaceParam
               },
               required: ['name']
             }
@@ -175,7 +238,8 @@ If a search returns no results, check the hints in the response for guidance (wr
                   type: 'number',
                   default: 50,
                   description: 'Maximum results to return'
-                }
+                },
+                ...workspaceParam
               },
               required: ['parentClass']
             }
@@ -204,7 +268,8 @@ If a search returns no results, check the hints in the response for guidance (wr
                   type: 'number',
                   default: 100,
                   description: 'Maximum types to return'
-                }
+                },
+                ...workspaceParam
               },
               required: ['module']
             }
@@ -233,7 +298,8 @@ If a search returns no results, check the hints in the response for guidance (wr
                   type: 'number',
                   default: 20,
                   description: 'Maximum results to return'
-                }
+                },
+                ...workspaceParam
               },
               required: ['filename']
             }
@@ -249,7 +315,8 @@ If a search returns no results, check the hints in the response for guidance (wr
                   enum: ['all', 'angelscript', 'cpp'],
                   default: 'all',
                   description: 'Language to refresh: all, angelscript, or cpp'
-                }
+                },
+                ...workspaceParam
               }
             }
           },
@@ -301,7 +368,8 @@ If a search returns no results, check the hints in the response for guidance (wr
                   type: 'boolean',
                   default: false,
                   description: 'Include the source signature line for each member. Lightweight alternative to contextLines when you only need the declaration.'
-                }
+                },
+                ...workspaceParam
               },
               required: ['name']
             }
@@ -355,7 +423,8 @@ If a search returns no results, check the hints in the response for guidance (wr
                   type: 'number',
                   default: 20,
                   description: 'Maximum children to return'
-                }
+                },
+                ...workspaceParam
               },
               required: ['name']
             }
@@ -387,7 +456,8 @@ If a search returns no results, check the hints in the response for guidance (wr
                   type: 'number',
                   default: 20,
                   description: 'Maximum results to return'
-                }
+                },
+                ...workspaceParam
               },
               required: ['name']
             }
@@ -431,7 +501,8 @@ If a search returns no results, check the hints in the response for guidance (wr
                   type: 'boolean',
                   default: false,
                   description: 'Also search asset names/paths and return matches in an "assets" section'
-                }
+                },
+                ...workspaceParam
               },
               required: ['pattern']
             }
@@ -460,7 +531,8 @@ If a search returns no results, check the hints in the response for guidance (wr
                   type: 'number',
                   default: 1,
                   description: 'How many levels deep to return'
-                }
+                },
+                ...workspaceParam
               }
             }
           },
@@ -489,7 +561,8 @@ If a search returns no results, check the hints in the response for guidance (wr
                     },
                     required: ['method', 'args']
                   }
-                }
+                },
+                ...workspaceParam
               },
               required: ['queries']
             }
@@ -502,18 +575,30 @@ If a search returns no results, check the hints in the response for guidance (wr
       const { name, arguments: args } = request.params;
       const callStartMs = performance.now();
 
+      // Resolve workspace → service URL
+      let serviceUrl;
+      try {
+        serviceUrl = resolveServiceUrl(args?.workspace);
+      } catch (err) {
+        return {
+          content: [{ type: 'text', text: `Error: ${err.message}` }],
+          isError: true
+        };
+      }
+
       // Fire-and-forget analytics tracking
       const trackCall = (result) => {
         const durationMs = Math.round(performance.now() - callStartMs);
         const resultText = result?.content?.[0]?.text;
         const resultSize = resultText ? resultText.length : 0;
         const argsSummary = args ? JSON.stringify(Object.fromEntries(
-          Object.entries(args).map(([k, v]) => [k, typeof v === 'string' && v.length > 50 ? v.slice(0, 50) + '...' : v])
+          Object.entries(args).filter(([k]) => k !== 'workspace').map(([k, v]) => [k, typeof v === 'string' && v.length > 50 ? v.slice(0, 50) + '...' : v])
         )) : null;
-        fetch(new URL('/internal/mcp-tool-call', SERVICE_URL).toString(), {
+        fetch(new URL('/internal/mcp-tool-call', serviceUrl).toString(), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ tool: name, args: argsSummary, durationMs, resultSize, sessionId: SESSION_ID })
+          body: JSON.stringify({ tool: name, args: argsSummary, durationMs, resultSize, sessionId: SESSION_ID }),
+          dispatcher: httpAgent
         }).catch(() => {});
       };
 
@@ -521,7 +606,7 @@ If a search returns no results, check the hints in the response for guidance (wr
         let toolResult;
         switch (name) {
           case 'unreal_find_type':
-            toolResult = await fetchService('/find-type', {
+            toolResult = await fetchService(serviceUrl, '/find-type', {
               name: args.name, fuzzy: args.fuzzy, project: args.project,
               language: args.language, kind: args.kind, maxResults: args.maxResults,
               includeAssets: args.includeAssets, contextLines: args.contextLines
@@ -529,21 +614,21 @@ If a search returns no results, check the hints in the response for guidance (wr
             break;
 
           case 'unreal_find_children':
-            toolResult = await fetchService('/find-children', {
+            toolResult = await fetchService(serviceUrl, '/find-children', {
               parent: args.parentClass || args.parent || args.name || args.className, recursive: args.recursive,
               project: args.project, language: args.language, maxResults: args.maxResults
             });
             break;
 
           case 'unreal_browse_module':
-            toolResult = await fetchService('/browse-module', {
+            toolResult = await fetchService(serviceUrl, '/browse-module', {
               module: args.module, project: args.project,
               language: args.language, maxResults: args.maxResults
             });
             break;
 
           case 'unreal_find_file':
-            toolResult = await fetchService('/find-file', {
+            toolResult = await fetchService(serviceUrl, '/find-file', {
               filename: args.filename || args.name, project: args.project,
               language: args.language, maxResults: args.maxResults
             });
@@ -553,12 +638,12 @@ If a search returns no results, check the hints in the response for guidance (wr
             const endpoint = args.language && args.language !== 'all'
               ? `/refresh?language=${args.language}`
               : '/refresh';
-            toolResult = await postService(endpoint);
+            toolResult = await postService(serviceUrl, endpoint);
             break;
           }
 
           case 'unreal_find_member':
-            toolResult = await fetchService('/find-member', {
+            toolResult = await fetchService(serviceUrl, '/find-member', {
               name: args.name, fuzzy: args.fuzzy, containingType: args.containingType,
               memberKind: args.memberKind, project: args.project, language: args.language,
               maxResults: args.maxResults, contextLines: args.contextLines,
@@ -567,7 +652,7 @@ If a search returns no results, check the hints in the response for guidance (wr
             break;
 
           case 'unreal_explain_type':
-            toolResult = await fetchService('/explain-type', {
+            toolResult = await fetchService(serviceUrl, '/explain-type', {
               name: args.name, project: args.project, language: args.language,
               contextLines: args.contextLines, includeMembers: args.includeMembers,
               includeChildren: args.includeChildren, maxFunctions: args.maxFunctions,
@@ -576,14 +661,14 @@ If a search returns no results, check the hints in the response for guidance (wr
             break;
 
           case 'unreal_find_asset':
-            toolResult = await fetchService('/find-asset', {
+            toolResult = await fetchService(serviceUrl, '/find-asset', {
               name: args.name, fuzzy: args.fuzzy !== false,
               project: args.project, folder: args.folder, maxResults: args.maxResults
             });
             break;
 
           case 'unreal_grep':
-            toolResult = await fetchService('/grep', {
+            toolResult = await fetchService(serviceUrl, '/grep', {
               pattern: args.pattern || args.query || args.search, project: args.project, language: args.language,
               caseSensitive: args.caseSensitive, maxResults: args.maxResults,
               contextLines: args.contextLines, includeAssets: args.includeAssets
@@ -591,14 +676,14 @@ If a search returns no results, check the hints in the response for guidance (wr
             break;
 
           case 'unreal_list_modules':
-            toolResult = await fetchService('/list-modules', {
+            toolResult = await fetchService(serviceUrl, '/list-modules', {
               parent: args.parent, project: args.project,
               language: args.language, depth: args.depth
             });
             break;
 
           case 'unreal_batch':
-            toolResult = await fetchBatch(args.queries);
+            toolResult = await fetchBatch(serviceUrl, args.queries);
             break;
 
           default: {
@@ -623,12 +708,13 @@ If a search returns no results, check the hints in the response for guidance (wr
 
         let errResult;
         if (isConnectionError) {
+          const wsName = args?.workspace || defaultWorkspace;
           errResult = {
             content: [{
               type: 'text',
               text: JSON.stringify({
-                error: 'Unreal Index Service is not running',
-                hint: 'Start the service with: npm start (in D:\\p4\\games\\Games\\Tools\\unreal-index)'
+                error: `Unreal Index Service is not running (workspace: ${wsName})`,
+                hint: `Start the container: docker compose up ${wsName}`
               }, null, 2)
             }],
             isError: true
@@ -665,10 +751,11 @@ If a search returns no results, check the hints in the response for guidance (wr
 
     this.server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
       const { uri } = request.params;
+      const serviceUrl = resolveServiceUrl(null);
 
       if (uri === 'unreal://index/summary' || uri === 'angelscript://index/summary') {
         try {
-          const summary = await fetchService('/summary');
+          const summary = await fetchService(serviceUrl, '/summary');
           return {
             contents: [
               {
@@ -693,7 +780,7 @@ If a search returns no results, check the hints in the response for guidance (wr
 
       if (uri === 'unreal://index/status') {
         try {
-          const status = await fetchService('/status');
+          const status = await fetchService(serviceUrl, '/status');
           return {
             contents: [
               {

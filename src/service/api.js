@@ -1,7 +1,7 @@
 import express from 'express';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
-import { deflateSync, inflateSync } from 'zlib';
+import { deflateSync, inflateSync, gunzipSync } from 'zlib';
 import { writeFileSync, readFileSync, existsSync } from 'fs';
 import { spawn, execSync } from 'child_process';
 import { rankResults, groupResultsByFile } from './search-ranking.js';
@@ -20,7 +20,14 @@ try {
 let SERVICE_GIT_HASH = 'unknown';
 try {
   SERVICE_GIT_HASH = execSync('git rev-parse --short HEAD', { cwd: join(__dirname, '..', '..'), encoding: 'utf-8' }).trim();
-} catch {}
+} catch {
+  // Fallback: read baked-in .git-hash file (Docker builds without .git)
+  try {
+    const hashFile = join(__dirname, '..', '..', '.git-hash');
+    const hash = readFileSync(hashFile, 'utf-8').trim();
+    if (hash && hash !== 'unknown') SERVICE_GIT_HASH = hash;
+  } catch {}
+}
 
 // LRU+TTL cache for /grep results — agents often repeat the same search
 class GrepCache {
@@ -47,7 +54,8 @@ const grepCache = new GrepCache(200, 30000);
 
 // Watcher heartbeat state — in-memory only, not persisted
 const watcherState = {
-  watchers: new Map(),   // watcherId → { ...payload, receivedAt }
+  watchers: new Map(),      // watcherId → { ...payload, receivedAt }
+  shutdownRequested: new Set(),  // watcherIds (or '*' for all) pending shutdown via heartbeat
   lastIngestAt: null,
   ingestCounts: { total: 0, files: 0, assets: 0, deletes: 0 },
   configVersion: Date.now()  // bumped on PUT /internal/config
@@ -181,8 +189,40 @@ function attachSignatures(results, database, fileIdResolver) {
 
 export function createApi(database, indexer, queryPool = null, { zoektClient = null, zoektManager = null, zoektMirror = null, memoryIndex = null } = {}) {
   const app = express();
+
+  // Decompress gzip-encoded request bodies (watcher sends compressed payloads)
+  app.use((req, res, next) => {
+    if (req.headers['content-encoding'] === 'gzip') {
+      const chunks = [];
+      req.on('data', chunk => chunks.push(chunk));
+      req.on('end', () => {
+        try {
+          req.body = JSON.parse(gunzipSync(Buffer.concat(chunks)).toString());
+          delete req.headers['content-encoding'];
+          delete req.headers['content-length'];
+          next();
+        } catch (err) {
+          res.status(400).json({ error: `Failed to decompress gzip body: ${err.message}` });
+        }
+      });
+      req.on('error', err => {
+        res.status(400).json({ error: `Request stream error: ${err.message}` });
+      });
+    } else {
+      next();
+    }
+  });
+
   app.use(express.json({ limit: '50mb' }));
-  app.use(express.static(join(__dirname, '..', '..', 'public')));
+
+  // CORS — allow setup GUI on :3846 to fetch from service containers
+  app.use((req, res, next) => {
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Content-Type');
+    if (req.method === 'OPTIONS') return res.sendStatus(204);
+    next();
+  });
 
   // Compute per-project path prefixes (strip from responses to match Zoekt mirror paths)
   const projectPrefixes = new Map();
@@ -275,6 +315,35 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
     next();
   });
 
+  // Read Docker container memory stats from cgroup (works inside containers)
+  function readCgroupMemory() {
+    try {
+      // cgroup v2
+      const limitBytes = parseInt(readFileSync('/sys/fs/cgroup/memory.max', 'utf-8').trim());
+      const usageBytes = parseInt(readFileSync('/sys/fs/cgroup/memory.current', 'utf-8').trim());
+      if (!isNaN(limitBytes) && !isNaN(usageBytes) && limitBytes > 0) {
+        return {
+          memLimitMB: Math.round(limitBytes / 1024 / 1024),
+          memUsageMB: Math.round(usageBytes / 1024 / 1024),
+          memPercent: Math.round(usageBytes / limitBytes * 100)
+        };
+      }
+    } catch {}
+    try {
+      // cgroup v1 fallback
+      const limitBytes = parseInt(readFileSync('/sys/fs/cgroup/memory/memory.limit_in_bytes', 'utf-8').trim());
+      const usageBytes = parseInt(readFileSync('/sys/fs/cgroup/memory/memory.usage_in_bytes', 'utf-8').trim());
+      if (!isNaN(limitBytes) && !isNaN(usageBytes) && limitBytes > 0 && limitBytes < 9e18) {
+        return {
+          memLimitMB: Math.round(limitBytes / 1024 / 1024),
+          memUsageMB: Math.round(usageBytes / 1024 / 1024),
+          memPercent: Math.round(usageBytes / limitBytes * 100)
+        };
+      }
+    } catch {}
+    return null;
+  }
+
   app.get('/health', (req, res) => {
     const mem = process.memoryUsage();
     const response = {
@@ -289,6 +358,10 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
         rss: Math.round(mem.rss / 1024 / 1024)
       }
     };
+    const docker = readCgroupMemory();
+    if (docker) {
+      response.docker = docker;
+    }
     if (zoektManager) {
       response.zoekt = zoektManager.getStatus();
     }
@@ -305,17 +378,54 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
     res.json(response);
   });
 
+  // --- Workspace list (for dashboard workspace selector) ---
+  app.get('/api/workspaces', (req, res) => {
+    try {
+      // Try Docker container path first, then repo-relative path
+      const candidates = [
+        join(__dirname, '..', '..', 'workspaces.json'),
+        '/app/workspaces.json',
+      ];
+      for (const wsPath of candidates) {
+        if (existsSync(wsPath)) {
+          const data = JSON.parse(readFileSync(wsPath, 'utf-8'));
+          res.json(data);
+          return;
+        }
+      }
+      res.json({ workspaces: {} });
+    } catch {
+      res.json({ workspaces: {} });
+    }
+  });
+
   // --- Watcher status (public, consumed by GUI) ---
+
+  // Periodically prune stale watchers (covers case where all watchers disconnect)
+  setInterval(() => {
+    const cutoff = Date.now() - 60000;
+    for (const [id, w] of watcherState.watchers) {
+      if (new Date(w.receivedAt).getTime() < cutoff) {
+        watcherState.watchers.delete(id);
+      }
+    }
+  }, 15000);
 
   app.get('/watcher-status', (req, res) => {
     const watchers = [];
-    const cutoff = Date.now() - 45000; // 3 missed heartbeats = stale
+    const staleCutoff = Date.now() - 45000; // 3 missed heartbeats = stale
+    const pruneCutoff = Date.now() - 60000;
 
     for (const [id, w] of watcherState.watchers) {
       const receivedMs = new Date(w.receivedAt).getTime();
+      // Auto-prune watchers not heard from in >60s
+      if (receivedMs < pruneCutoff) {
+        watcherState.watchers.delete(id);
+        continue;
+      }
       watchers.push({
         ...w,
-        status: receivedMs > cutoff ? 'active' : 'stale'
+        status: receivedMs > staleCutoff ? 'active' : 'stale'
       });
     }
 
@@ -413,7 +523,9 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
     }
   });
 
-  app.post('/internal/ingest', (req, res) => {
+  const yieldTick = () => new Promise(resolve => setImmediate(resolve));
+
+  app.post('/internal/ingest', async (req, res) => {
     try {
       const { files = [], assets = [], deletes = [] } = req.body;
       const affectedProjects = new Set();
@@ -445,121 +557,170 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       }
 
       // Process source files
-      for (const file of files) {
-        try {
-          // Mtime guard: skip re-processing if file hasn't changed
-          // Exception: if file has content but no stored content yet, re-process
-          const existing = database.getFileByPath(file.path);
+      if (files.length > 0) {
+        // Batch mtime pre-filter — single query instead of N individual lookups
+        const mtimeCheck = database.batchCheckMtimes(files.map(f => f.path));
+        let filesToProcess = [];
+        for (const file of files) {
+          const existing = mtimeCheck.get(file.path);
           if (existing && existing.mtime === file.mtime) {
-            const hasStoredContent = file.content ? !!database.getFileContent(existing.id) : true;
-            if (hasStoredContent) {
+            if (!file.content || existing.hasContent) {
               processed++;
               continue;
             }
           }
+          filesToProcess.push(file);
+        }
 
-          let ingestFileId;
+        // Deduplicate by path (keep last occurrence) to prevent duplicate symbols
+        if (filesToProcess.length > 1) {
+          const seen = new Map();
+          for (const file of filesToProcess) {
+            seen.set(file.path, file);
+          }
+          if (seen.size < filesToProcess.length) {
+            filesToProcess = [...seen.values()];
+          }
+        }
+
+        // Opt 3: Pre-compress content outside transaction (CPU-intensive, don't hold WAL lock)
+        for (const file of filesToProcess) {
+          if (file.content && file.content.length <= 2000000) {
+            file._compressed = deflateSync(file.content);
+            file._hash = contentHash(file.content);
+          }
+        }
+
+        // Single batch transaction: upsert files → batch clear → insert types/members
+        const batchResults = [];
+        const mirrorWrites = [];
+
+        try {
           database.transaction(() => {
-            const fileId = database.upsertFile(file.path, file.project, file.module, file.mtime, file.language, file.relativePath || null);
-            ingestFileId = fileId;
-            database.clearTypesForFile(fileId);
-
-            if (file.types && file.types.length > 0) {
-              database.insertTypes(fileId, file.types);
+            // Phase 1: Upsert all files to get fileIds
+            const fileEntries = [];
+            for (const file of filesToProcess) {
+              try {
+                const fileId = database.upsertFile(file.path, file.project, file.module, file.mtime, file.language, file.relativePath || null);
+                fileEntries.push({ fileId, file });
+              } catch (err) {
+                errors.push({ path: file.path, error: err.message });
+              }
             }
 
-            if (file.members && file.members.length > 0) {
-              const typeIds = database.getTypeIdsForFile(fileId);
-              const nameToId = new Map(typeIds.map(t => [t.name, t.id]));
-              const resolvedMembers = file.members.map(m => ({
-                typeId: nameToId.get(m.ownerName) || null,
-                name: m.name,
-                memberKind: m.memberKind,
-                line: m.line,
-                isStatic: m.isStatic,
-                specifiers: m.specifiers
-              }));
-              database.insertMembers(fileId, resolvedMembers);
+            // Phase 2: Batch clear old types/members/trigrams (1 call instead of N)
+            if (fileEntries.length > 0) {
+              database.clearTypesForFiles(fileEntries.map(e => e.fileId));
             }
 
-            if (file.content && file.content.length <= 2000000) {
-              const compressed = deflateSync(file.content);
-              const hash = contentHash(file.content);
-              database.upsertFileContent(fileId, compressed, hash);
+            // Phase 3: Insert new types/members and content
+            for (const { fileId, file } of fileEntries) {
+              try {
+                let insertedTypes = [];
+                if (file.types && file.types.length > 0) {
+                  insertedTypes = database.insertTypes(fileId, file.types);
+                }
 
-              // Write to Zoekt mirror
-              if (zoektManager) {
-                try {
+                let insertedMembers = [];
+                if (file.members && file.members.length > 0) {
+                  const nameToId = new Map(insertedTypes.map(t => [t.name, t.id]));
+                  const resolvedMembers = file.members.map(m => ({
+                    typeId: nameToId.get(m.ownerName) || null,
+                    name: m.name,
+                    memberKind: m.memberKind,
+                    line: m.line,
+                    isStatic: m.isStatic,
+                    specifiers: m.specifiers
+                  }));
+                  insertedMembers = database.insertMembers(fileId, resolvedMembers);
+                }
+
+                if (file._compressed) {
+                  database.upsertFileContent(fileId, file._compressed, file._hash);
+                }
+
+                batchResults.push({ fileId, file, insertedTypes, insertedMembers });
+
+                // Collect mirror write for after transaction
+                if (file.content && file.content.length <= 2000000 && zoektManager) {
                   const mirrorPath = file.relativePath
                     ? `${file.project}/${file.relativePath}`
                     : (zoektMirror ? zoektMirror._toRelativePath(file.path) : file.path);
-                  zoektManager.updateMirrorFile(mirrorPath, file.content);
-                } catch {}
+                  mirrorWrites.push({ path: mirrorPath, content: file.content });
+                }
+              } catch (err) {
+                errors.push({ path: file.path, error: err.message });
               }
             }
           });
+        } catch (err) {
+          errors.push({ type: 'batch-transaction', error: err.message });
+        }
 
-          // Sync memory index after successful transaction
-          if (memoryIndex && ingestFileId) {
-            memoryIndex.removeFile(ingestFileId);
+        // Yield after transaction to keep event loop responsive
+        await yieldTick();
+
+        // Perform mirror writes outside transaction
+        for (const { path: mirrorPath, content } of mirrorWrites) {
+          try {
+            zoektManager.updateMirrorFile(mirrorPath, content);
+          } catch {}
+        }
+
+        // Yield after mirror writes
+        if (mirrorWrites.length > 0) await yieldTick();
+
+        // Sync memory index using captured insert data (no DB round-trip)
+        for (const { fileId, file, insertedTypes, insertedMembers } of batchResults) {
+          if (memoryIndex) {
+            memoryIndex.removeFile(fileId);
             const baseLower = file.path.replace(/\\/g, '/');
             const lastSlash = baseLower.lastIndexOf('/');
             const fn = lastSlash >= 0 ? baseLower.substring(lastSlash + 1) : baseLower;
             const dotIdx = fn.lastIndexOf('.');
             const stem = dotIdx > 0 ? fn.substring(0, dotIdx) : fn;
-            memoryIndex.addFile(ingestFileId, {
+            memoryIndex.addFile(fileId, {
               path: file.path, project: file.project, module: file.module,
               language: file.language, mtime: file.mtime,
               basenameLower: stem.toLowerCase(),
               relativePath: file.relativePath || null
             });
 
-            // Re-read types and members from DB (they now have correct IDs)
-            const dbTypes = database.getTypeIdsForFile(ingestFileId);
-            if (dbTypes.length > 0) {
-              const typeRows = database.db.prepare(
-                `SELECT id, name, kind, parent, line, depth FROM types WHERE file_id = ?`
-              ).all(ingestFileId);
-              memoryIndex.addTypes(ingestFileId, typeRows.map(t => ({
-                id: t.id, name: t.name, kind: t.kind, parent: t.parent, line: t.line, depth: t.depth
-              })));
+            if (insertedTypes.length > 0) {
+              memoryIndex.addTypes(fileId, insertedTypes);
             }
-
-            const memberRows = database.db.prepare(
-              `SELECT id, type_id as typeId, name, member_kind as memberKind, line, is_static as isStatic, specifiers FROM members WHERE file_id = ?`
-            ).all(ingestFileId);
-            if (memberRows.length > 0) {
-              memoryIndex.addMembers(ingestFileId, memberRows);
+            if (insertedMembers.length > 0) {
+              memoryIndex.addMembers(fileId, insertedMembers);
             }
           }
 
           affectedProjects.add(file.project);
           processed++;
-        } catch (err) {
-          errors.push({ path: file.path, error: err.message });
         }
+
+        // Free pre-compressed data
+        for (const file of filesToProcess) {
+          delete file._compressed;
+          delete file._hash;
+        }
+
+        // Yield after memory index sync
+        if (batchResults.length > 0) await yieldTick();
       }
 
       // Process assets
       if (assets.length > 0) {
         try {
-          database.upsertAssetBatch(assets);
+          const assetDbRows = database.upsertAssetBatch(assets);
           database.indexAssetContent(assets);
 
-          // Sync memory index with newly upserted assets
-          if (memoryIndex) {
-            const assetRows = [];
-            for (const a of assets) {
-              const row = database.db.prepare('SELECT id, path, name, content_path, folder, project, extension, mtime, asset_class, parent_class FROM assets WHERE path = ?').get(a.path);
-              if (row) {
-                assetRows.push({
-                  id: row.id, path: row.path, name: row.name, contentPath: row.content_path,
-                  folder: row.folder, project: row.project, extension: row.extension, mtime: row.mtime,
-                  assetClass: row.asset_class, parentClass: row.parent_class
-                });
-              }
-            }
-            if (assetRows.length > 0) memoryIndex.upsertAssets(assetRows);
+          // Sync memory index using batch-returned rows (no individual SELECTs)
+          if (memoryIndex && assetDbRows.length > 0) {
+            memoryIndex.upsertAssets(assetDbRows.map(r => ({
+              id: r.id, path: r.path, name: r.name, contentPath: r.content_path,
+              folder: r.folder, project: r.project, extension: r.extension, mtime: r.mtime,
+              assetClass: r.asset_class, parentClass: r.parent_class
+            })));
           }
 
           affectedProjects.add('_assets');
@@ -615,6 +776,10 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
     if (!hb || !hb.watcherId) {
       return res.status(400).json({ error: 'watcherId required' });
     }
+    // Check if this watcher has been asked to shut down
+    const shouldShutdown = watcherState.shutdownRequested?.has(hb.watcherId) ||
+      watcherState.shutdownRequested?.has('*');
+
     watcherState.watchers.set(hb.watcherId, {
       ...hb,
       receivedAt: new Date().toISOString()
@@ -626,7 +791,22 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
         watcherState.watchers.delete(id);
       }
     }
+
+    if (shouldShutdown) {
+      watcherState.shutdownRequested.delete(hb.watcherId);
+      watcherState.shutdownRequested.delete('*');
+      watcherState.watchers.delete(hb.watcherId);
+      console.log(`[API] Sending shutdown to watcher ${hb.watcherId}`);
+      return res.json({ ok: true, shutdown: true });
+    }
     res.json({ ok: true, configVersion: watcherState.configVersion || 0 });
+  });
+
+  app.post('/internal/stop-watcher', (req, res) => {
+    const { watcherId } = req.body || {};
+    watcherState.shutdownRequested.add(watcherId || '*');
+    console.log(`[API] Watcher shutdown requested for: ${watcherId || 'all'}`);
+    res.json({ ok: true, message: `Shutdown signal queued (will take effect on next heartbeat)` });
   });
 
   // --- Config API ---
@@ -698,7 +878,6 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
     }
 
     // The watcher runs on Windows — spawn via cmd.exe from WSL
-    // The watcher fetches its config from the service via HTTP, so no config file arg needed.
     const watcherScript = `${winRepoDir}\\src\\watcher\\watcher-client.js`;
 
     try {
@@ -757,43 +936,6 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       // Give the new process a moment to start, then exit
       setTimeout(() => process.exit(0), 1000);
     }, 500);
-  });
-
-  app.post('/internal/update-and-restart', (req, res) => {
-    const repoDir = join(__dirname, '..', '..');
-    console.log('[API] Update & restart requested from dashboard');
-    try {
-      // Safe pull — fails if local changes or divergent history
-      const pullOutput = execSync('git pull --ff-only', {
-        cwd: repoDir, encoding: 'utf-8', timeout: 30000
-      }).trim();
-      console.log(`[API] git pull: ${pullOutput}`);
-
-      const newHash = execSync('git rev-parse --short HEAD', {
-        cwd: repoDir, encoding: 'utf-8'
-      }).trim();
-
-      res.json({ ok: true, newGitHash: newHash, pullOutput });
-
-      // Restart using the same pattern as /internal/restart-service
-      setTimeout(() => {
-        const child = spawn(process.execPath, [join(__dirname, 'index.js')], {
-          cwd: repoDir,
-          stdio: 'ignore',
-          detached: true,
-          env: { ...process.env },
-        });
-        child.unref();
-        setTimeout(() => process.exit(0), 1000);
-      }, 500);
-    } catch (err) {
-      console.error(`[API] Update failed: ${err.message}`);
-      res.status(500).json({
-        ok: false,
-        error: err.stderr || err.message,
-        hint: 'Manual fix: wsl -- bash -c "cd ~/repos/unreal-index && git stash && git pull && ./start-service.sh --bg"'
-      });
-    }
   });
 
   app.get('/status', (req, res) => {
@@ -1490,6 +1632,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
 
     try {
       // Source search + optional asset search via Zoekt
+      const t0 = performance.now();
       const sourcePromise = zoektClient.search(pattern, {
         project: project || null,
         language: (language && language !== 'all') ? language : null,
@@ -1501,6 +1644,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
         ? zoektClient.searchAssets(pattern, { project: project || null, caseSensitive, maxResults: 20 })
         : Promise.resolve({ results: [] });
       const [sourceResult, assetResult] = await Promise.all([sourcePromise, assetPromise]);
+      const tZoekt = performance.now();
 
       // Clean paths and rank results
       let results = sourceResult.results.map(r => ({ ...r, file: cleanPath(r.file) }));
@@ -1533,7 +1677,9 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       const postFilterCount = results.length;
 
       const uniquePaths = [...new Set(results.map(r => r.file))];
-      const mtimeMap = database.getFilesMtime(uniquePaths);
+      const mtimeMap = (memoryIndex?.isLoaded)
+        ? memoryIndex.getFilesMtime(uniquePaths)
+        : database.getFilesMtime(uniquePaths);
 
       // Symbol cross-reference: boost results at known type/member definitions
       // Skip when symbols=false (e.g. hook queries that don't need ranking precision)
@@ -1542,15 +1688,20 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
         symbolMap = new Map();
       } else {
         const fileLines = results.map(r => ({ path: r.file, line: r.line }));
-        symbolMap = database.findSymbolsAtLocations(fileLines);
+        symbolMap = (memoryIndex?.isLoaded)
+          ? memoryIndex.findSymbolsAtLocations(fileLines)
+          : database.findSymbolsAtLocations(fileLines);
       }
+      const tEnrich = performance.now();
 
       results = rankResults(results, mtimeMap, symbolMap);
       if (results.length > maxResults) results = results.slice(0, maxResults);
+      const tRank = performance.now();
 
-      const durationMs = Math.round(performance.now() - grepStartMs);
+      const ms = v => v.toFixed(1);
+      const durationMs = Math.round(tRank - grepStartMs);
       const logFn = durationMs > 1000 ? console.warn : console.log;
-      logFn(`[Grep] "${pattern.slice(0, 60)}" -> ${results.length} results (zoekt, ${durationMs}ms)`);
+      logFn(`[Grep] "${pattern.slice(0, 60)}" -> ${results.length} results (zoekt:${ms(tZoekt - t0)}ms enrich:${ms(tEnrich - tZoekt)}ms rank:${ms(tRank - tEnrich)}ms total:${durationMs}ms)`);
 
       // Log to query analytics
       database._logSlowQuery('grep', [pattern, project || '', language || ''], durationMs, results.length);
@@ -1573,8 +1724,10 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
         const groupedResponse = {
           results: groupResultsByFile(results),
           totalMatches: postFilterCount,
+          matchedFiles: sourceResult.matchedFiles,
           truncated: postFilterCount > maxResults,
-          grouped: true
+          grouped: true,
+          zoektDurationMs: sourceResult.zoektDurationMs
         };
         if (assetResult.results.length > 0) groupedResponse.assets = assetResult.results;
         if (grepHints.length > 0) groupedResponse.hints = grepHints;
@@ -1585,7 +1738,9 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       const response = {
         results,
         totalMatches: postFilterCount,
-        truncated: postFilterCount > maxResults
+        matchedFiles: sourceResult.matchedFiles,
+        truncated: postFilterCount > maxResults,
+        zoektDurationMs: sourceResult.zoektDurationMs
       };
       if (assetResult.results.length > 0) {
         response.assets = assetResult.results;

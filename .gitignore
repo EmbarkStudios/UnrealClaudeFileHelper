@@ -2,3 +2,6 @@ node_modules/
 data/
 *.log
 config.json
+workspaces.json
+workspace-configs/*.json
+!workspace-configs/.gitkeep

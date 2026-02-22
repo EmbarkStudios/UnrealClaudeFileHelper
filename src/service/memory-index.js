@@ -28,6 +28,7 @@ export class MemoryIndex {
     // Files
     this.filesById = new Map();
     this.filesByPath = new Map();         // path → id
+    this.filesByCleanPath = new Map();    // "project/relativePath" → id (for grep lookups)
     this.filesByBasename = new Map();     // basename_lower → [id]
     this.filesByModule = new Map();       // module → [id]
     this.filesByProject = new Map();      // project → [id]
@@ -219,6 +220,9 @@ export class MemoryIndex {
   _addFileRecord(rec) {
     this.filesById.set(rec.id, rec);
     this.filesByPath.set(rec.path, rec.id);
+    if (rec.project && rec.relativePath) {
+      this.filesByCleanPath.set(rec.project + '/' + rec.relativePath, rec.id);
+    }
     this._addToMultiMap(this.filesByBasename, rec.basenameLower, rec.id);
     this._addToMultiMap(this.filesByModule, rec.module, rec.id);
     this._addToMultiMap(this.filesByProject, rec.project, rec.id);
@@ -236,6 +240,9 @@ export class MemoryIndex {
     if (!rec) return;
     this.filesById.delete(fileId);
     this.filesByPath.delete(rec.path);
+    if (rec.project && rec.relativePath) {
+      this.filesByCleanPath.delete(rec.project + '/' + rec.relativePath);
+    }
     this._removeFromMultiMap(this.filesByBasename, rec.basenameLower, fileId);
     this._removeFromMultiMap(this.filesByModule, rec.module, fileId);
     this._removeFromMultiMap(this.filesByProject, rec.project, fileId);
@@ -1398,6 +1405,77 @@ export class MemoryIndex {
         .sort((a, b) => b.count - a.count),
       blueprintCount
     };
+  }
+
+  // --- Grep support methods (replaces DB queries for grep handler) ---
+
+  /**
+   * Get file mtimes for a list of cleaned paths (project/relativePath format).
+   * Returns Map<path, mtime> — same interface as database.getFilesMtime().
+   */
+  getFilesMtime(filePaths) {
+    if (!filePaths || filePaths.length === 0) return new Map();
+    const result = new Map();
+    for (const p of filePaths) {
+      const fileId = this.filesByCleanPath.get(p);
+      if (fileId != null) {
+        const rec = this.filesById.get(fileId);
+        if (rec) result.set(p, rec.mtime);
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Find types/members at given file:line locations (±3 line proximity).
+   * Returns Map<"path:line", {name, kind, entityType}> — same interface as database.findSymbolsAtLocations().
+   * @param {Array<{path: string, line: number}>} fileLines - paths in "project/relativePath" format
+   */
+  findSymbolsAtLocations(fileLines) {
+    if (!fileLines || fileLines.length === 0) return new Map();
+
+    const results = new Map();
+    const pathsToLines = new Map();
+    for (const { path, line } of fileLines) {
+      if (!pathsToLines.has(path)) pathsToLines.set(path, []);
+      pathsToLines.get(path).push(line);
+    }
+
+    for (const [path, lines] of pathsToLines) {
+      const fileId = this.filesByCleanPath.get(path);
+      if (fileId == null) continue;
+
+      // Check types for this file
+      const typeIds = this.typesByFileId.get(fileId);
+      if (typeIds) {
+        for (const tid of typeIds) {
+          const t = this.typesById.get(tid);
+          if (!t) continue;
+          for (const line of lines) {
+            if (Math.abs(line - t.line) <= 3) {
+              results.set(`${path}:${line}`, { name: t.name, kind: t.kind, entityType: 'type' });
+            }
+          }
+        }
+      }
+
+      // Check members for this file
+      const memberIds = this.membersByFileId.get(fileId);
+      if (memberIds) {
+        for (const mid of memberIds) {
+          const m = this.membersById.get(mid);
+          if (!m) continue;
+          for (const line of lines) {
+            if (Math.abs(line - m.line) <= 3) {
+              const typeName = m.typeId ? (this.typesById.get(m.typeId)?.name || null) : null;
+              results.set(`${path}:${line}`, { name: m.name, kind: m.memberKind, type_name: typeName, entityType: 'member' });
+            }
+          }
+        }
+      }
+    }
+
+    return results;
   }
 
   _recomputeStats() {

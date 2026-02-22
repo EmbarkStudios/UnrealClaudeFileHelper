@@ -1,0 +1,1578 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Unreal Index — Setup</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Segoe UI', system-ui, sans-serif; background: #1e1e1e; color: #d4d4d4; padding: 20px; max-width: 1000px; margin: 0 auto; }
+
+    h2 { font-size: 1.1em; color: #9cdcfe; margin-bottom: 12px; }
+    h3 { font-size: 0.95em; color: #9cdcfe; margin-bottom: 8px; }
+
+    .card { background: #252526; border: 1px solid #3e3e3e; border-radius: 6px; padding: 16px; margin-bottom: 16px; }
+    .card-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+
+    .btn { padding: 6px 16px; border: none; border-radius: 4px; cursor: pointer; font-size: 13px; }
+    .btn:disabled { opacity: 0.5; cursor: default; }
+    .btn-primary { background: #0e639c; color: #fff; }
+    .btn-primary:hover:not(:disabled) { background: #1177bb; }
+    .btn-secondary { background: #333; color: #d4d4d4; border: 1px solid #3e3e3e; }
+    .btn-secondary:hover:not(:disabled) { background: #3e3e3e; }
+    .btn-danger { background: #6d1d1d; color: #fff; }
+    .btn-danger:hover:not(:disabled) { background: #8a2424; }
+    .btn-success { background: #2d6d3a; color: #fff; }
+    .btn-success:hover:not(:disabled) { background: #3a8a4d; }
+    .btn-sm { padding: 3px 10px; font-size: 12px; }
+
+    .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; }
+    .dot-green { background: #4ec9b0; box-shadow: 0 0 6px #4ec9b044; }
+    .dot-yellow { background: #dcdcaa; box-shadow: 0 0 6px #dcdcaa44; }
+    .dot-red { background: #f44747; box-shadow: 0 0 6px #f4474744; }
+    .dot-gray { background: #555; }
+
+    .badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 11px; margin-left: 4px; }
+    .badge-lang { background: #264f78; color: #9cdcfe; }
+    .badge-port { background: #4d3519; color: #ce9178; }
+
+    .form-group { margin-bottom: 12px; }
+    .form-group label { display: block; font-size: 13px; color: #808080; margin-bottom: 4px; }
+    .form-input { width: 100%; padding: 8px 12px; background: #2d2d2d; border: 1px solid #3e3e3e; color: #d4d4d4;
+      border-radius: 4px; font-size: 14px; font-family: 'Cascadia Code', 'Consolas', monospace; }
+    .form-input:focus { outline: none; border-color: #569cd6; }
+
+    .check-group { display: flex; align-items: center; gap: 8px; padding: 6px 0; }
+    .check-group label { font-size: 13px; cursor: pointer; flex: 1; }
+    .check-group input[type="checkbox"] { width: 16px; height: 16px; cursor: pointer; }
+
+    .tabs { display: flex; gap: 0; border-bottom: 1px solid #3e3e3e; margin-bottom: 12px; }
+    .tab { padding: 8px 16px; cursor: pointer; font-size: 13px; color: #808080; border-bottom: 2px solid transparent; }
+    .tab:hover { color: #d4d4d4; }
+    .tab.active { color: #569cd6; border-bottom-color: #569cd6; }
+    .tab-content { display: none; }
+    .tab-content.active { display: block; }
+
+    .project-card { background: #1e1e1e; border: 1px solid #3e3e3e; border-radius: 4px; padding: 10px 12px;
+      margin-bottom: 8px; display: flex; align-items: center; gap: 12px; cursor: pointer; }
+    .project-card:hover { border-color: #569cd6; }
+    .project-card.selected { border-color: #4ec9b0; background: #1a2a1e; }
+    .project-card .name { font-weight: 600; color: #4ec9b0; }
+    .project-card .path { font-size: 12px; color: #808080; font-family: 'Cascadia Code', 'Consolas', monospace; }
+    .project-card .p4 { font-size: 11px; color: #ce9178; }
+
+    .terminal { background: #0d0d0d; border: 1px solid #3e3e3e; border-radius: 4px; padding: 12px;
+      font-family: 'Cascadia Code', 'Consolas', monospace; font-size: 12px; color: #4ec9b0;
+      max-height: 300px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; }
+
+    .workspace-card { background: #252526; border: 1px solid #3e3e3e; border-radius: 6px; padding: 14px 16px;
+      margin-bottom: 12px; }
+    .workspace-card .ws-header { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+    .workspace-card .ws-name { font-size: 15px; font-weight: 600; color: #d4d4d4; }
+    .workspace-card .ws-desc { font-size: 12px; color: #808080; }
+    .workspace-card .ws-projects { font-size: 12px; color: #808080; margin-top: 6px; }
+    .workspace-card .ws-actions { display: flex; gap: 8px; margin-top: 10px; align-items: center; }
+
+    .prereq-item { display: flex; align-items: center; gap: 8px; padding: 6px 0; font-size: 13px; }
+
+    .wizard-steps { display: flex; gap: 0; margin-bottom: 16px; }
+    .wizard-step { flex: 1; text-align: center; padding: 8px; font-size: 12px; color: #555;
+      border-bottom: 2px solid #3e3e3e; }
+    .wizard-step.active { color: #569cd6; border-bottom-color: #569cd6; }
+    .wizard-step.done { color: #4ec9b0; border-bottom-color: #4ec9b0; }
+
+    .wizard-nav { display: flex; justify-content: space-between; margin-top: 16px; }
+
+    .scanning-status { font-size: 12px; color: #808080; margin-bottom: 8px; }
+    .scan-spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid #555;
+      border-top-color: #569cd6; border-radius: 50%; animation: spin 0.8s linear infinite; margin-right: 6px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .hidden { display: none !important; }
+    .error-msg { color: #f44747; font-size: 13px; margin-top: 4px; }
+    .success-msg { color: #4ec9b0; font-size: 13px; margin-top: 4px; }
+    .info-msg { color: #808080; font-size: 12px; margin-top: 4px; }
+  </style>
+</head>
+<body>
+  <script src="/dashboard.js"></script>
+
+  <!-- Prerequisites -->
+  <div class="card" id="prereqs-card">
+    <h2>Prerequisites</h2>
+    <div id="prereqs-status">
+      <div class="prereq-item"><span class="scan-spinner"></span> Checking Docker...</div>
+    </div>
+  </div>
+
+  <!-- Workspace Overview -->
+  <div id="overview-section">
+    <div class="card">
+      <div class="card-header">
+        <h2 style="margin-bottom:0">Workspaces</h2>
+        <button class="btn btn-primary" onclick="startWizard()">Add Workspace</button>
+      </div>
+      <div id="workspaces-list">
+        <div class="info-msg">Loading...</div>
+      </div>
+    </div>
+    <div id="mcp-config-panel" class="hidden" style="margin-top:12px; padding-top:12px; border-top:1px solid #3e3e3e">
+      <h3>MCP Server Config</h3>
+      <p class="info-msg" style="margin-bottom:8px">Add this to your project's <code>.mcp.json</code> to run the bridge inside Docker (fastest). Each tool call routes through <code>docker exec</code> to the container's loopback — no WSL2 network hop.</p>
+      <pre id="mcp-config-output" style="background:#1e1e1e;border:1px solid #3e3e3e;border-radius:4px;padding:12px;font-size:13px;overflow-x:auto;color:#d4d4d4;font-family:'Cascadia Code','Consolas',monospace;white-space:pre-wrap;margin-bottom:8px"></pre>
+      <button class="btn btn-primary btn-sm" onclick="copyMcpConfig()">Copy to clipboard</button>
+      <span id="mcp-config-copy-status" class="info-msg" style="margin-left:8px"></span>
+    </div>
+  </div>
+
+  <!-- Wizard -->
+  <div id="wizard-section" class="hidden">
+    <div class="card">
+      <div class="card-header">
+        <h2 style="margin-bottom:0">Add Workspace</h2>
+        <button class="btn btn-secondary btn-sm" onclick="cancelWizard()">Cancel</button>
+      </div>
+
+      <div class="wizard-steps">
+        <div class="wizard-step active" id="step-ind-0">Projects</div>
+        <div class="wizard-step" id="step-ind-1">Engine</div>
+        <div class="wizard-step" id="step-ind-2">Workspace</div>
+        <div class="wizard-step" id="step-ind-3">Review</div>
+      </div>
+
+      <!-- Step 0: Projects Overview -->
+      <div class="wizard-content" id="step-0">
+        <h3>Projects to Index</h3>
+        <div id="projects-list"></div>
+        <div style="display:flex; justify-content:space-between; margin-top:12px">
+          <button class="btn btn-secondary" onclick="startAddProject()">+ Add Project</button>
+          <button class="btn btn-primary" onclick="wizardNext()" id="projects-next-btn" disabled>Next</button>
+        </div>
+      </div>
+
+      <!-- Step 1: Find Project (sub-flow) -->
+      <div class="wizard-content hidden" id="step-1">
+        <div class="tabs">
+          <div class="tab active" onclick="switchTab('scan')">Scan Drives</div>
+          <div class="tab" onclick="switchTab('p4')">P4 Clients</div>
+          <div class="tab" onclick="switchTab('manual')">Enter Path</div>
+        </div>
+
+        <div class="tab-content active" id="tab-scan">
+          <button class="btn btn-primary btn-sm" onclick="startScan()" id="scan-btn">Scan Drives</button>
+          <div class="scanning-status hidden" id="scan-status"></div>
+          <div id="scan-results" style="margin-top:8px; max-height:300px; overflow-y:auto"></div>
+        </div>
+
+        <div class="tab-content" id="tab-p4">
+          <button class="btn btn-primary btn-sm" onclick="startP4Scan()" id="p4-scan-btn">Scan P4 Clients</button>
+          <div class="scanning-status hidden" id="p4-status"></div>
+          <div id="p4-results" style="margin-top:8px; max-height:300px; overflow-y:auto"></div>
+        </div>
+
+        <div class="tab-content" id="tab-manual">
+          <div class="form-group">
+            <label>Path to .uproject file or project directory</label>
+            <input type="text" class="form-input" id="manual-path" placeholder="D:/Code/UE/MyProject/MyGame.uproject">
+          </div>
+          <button class="btn btn-primary btn-sm" onclick="selectManualPath()">Select</button>
+          <div id="manual-error" class="error-msg hidden"></div>
+        </div>
+
+        <div class="wizard-nav">
+          <button class="btn btn-secondary" onclick="wizardBack()">Back</button>
+          <span></span>
+        </div>
+      </div>
+
+      <!-- Step 2: Select Directories (sub-flow) -->
+      <div class="wizard-content hidden" id="step-2">
+        <h3 id="dir-step-title">Select directories to index</h3>
+        <div id="dir-checkboxes"></div>
+        <div style="margin-top:12px">
+          <button class="btn btn-secondary btn-sm" onclick="toggleExtraPaths()">Add Extra Path</button>
+          <div id="extra-paths-form" class="hidden" style="margin-top:8px">
+            <div class="form-group">
+              <label>Path to directory</label>
+              <input type="text" class="form-input" id="extra-path-input" placeholder="D:/Code/SharedLib">
+            </div>
+            <div class="form-group">
+              <label>Language</label>
+              <select class="form-input" id="extra-path-lang" style="font-family:inherit">
+                <option value="angelscript">AngelScript</option>
+                <option value="cpp">C++</option>
+                <option value="content">Content</option>
+                <option value="config">Config</option>
+              </select>
+            </div>
+            <button class="btn btn-primary btn-sm" onclick="addExtraPath()">Add</button>
+          </div>
+          <div id="extra-paths-list" style="margin-top:8px"></div>
+        </div>
+        <div class="wizard-nav">
+          <button class="btn btn-secondary" onclick="wizardBack()">Back</button>
+          <button class="btn btn-primary" onclick="finishAddProject()">Add to Workspace</button>
+        </div>
+      </div>
+
+      <!-- Step 3: Engine -->
+      <div class="wizard-content hidden" id="step-3">
+        <h3>Engine Source</h3>
+        <div id="engine-section"></div>
+        <div class="wizard-nav">
+          <button class="btn btn-secondary" onclick="wizardBack()">Back</button>
+          <button class="btn btn-primary" onclick="wizardNext()">Next</button>
+        </div>
+      </div>
+
+      <!-- Step 4: Workspace Name -->
+      <div class="wizard-content hidden" id="step-4">
+        <div class="form-group">
+          <label>Workspace name (lowercase, hyphens, no spaces)</label>
+          <input type="text" class="form-input" id="workspace-name" placeholder="my-project">
+        </div>
+        <div class="form-group">
+          <label>Description (optional)</label>
+          <input type="text" class="form-input" id="workspace-desc" placeholder="My UE5 project workspace" style="font-family:inherit">
+        </div>
+        <div id="name-error" class="error-msg hidden"></div>
+        <div class="wizard-nav">
+          <button class="btn btn-secondary" onclick="wizardBack()">Back</button>
+          <button class="btn btn-primary" onclick="wizardNext()">Next</button>
+        </div>
+      </div>
+
+      <!-- Step 5: Review & Save -->
+      <div class="wizard-content hidden" id="step-5">
+        <h3>Review Configuration</h3>
+        <div id="review-summary" style="background:#1e1e1e;border:1px solid #3e3e3e;border-radius:4px;padding:12px;font-size:13px;margin-bottom:12px"></div>
+        <div class="wizard-nav">
+          <button class="btn btn-secondary" onclick="wizardBack()">Back</button>
+          <button class="btn btn-success" onclick="saveWorkspace()" id="save-btn">Save & Create</button>
+        </div>
+        <div id="save-status" class="hidden" style="margin-top:12px"></div>
+
+        <!-- Post-save actions -->
+        <div id="post-save" class="hidden" style="margin-top:16px">
+          <h3>Next Steps</h3>
+
+          <div style="margin-bottom:12px">
+            <button class="btn btn-primary" onclick="buildDocker()" id="build-btn">Build Docker Image</button>
+            <span id="build-status" class="info-msg"></span>
+          </div>
+          <div class="terminal hidden" id="build-terminal"></div>
+
+          <div style="margin-bottom:12px; margin-top:12px">
+            <button class="btn btn-success" onclick="startContainer()" id="start-btn" disabled>Start Container</button>
+            <span id="start-status" class="info-msg"></span>
+          </div>
+
+          <div style="margin-bottom:12px">
+            <h3 style="margin-top:12px">Install Hooks</h3>
+            <p class="info-msg" style="margin-bottom:8px">Installs a Claude Code hook that automatically routes MCP tool calls (find_type, grep, etc.) to this workspace's container. Creates a <code>.claude/</code> directory with hook config and a proxy binary in each selected project.</p>
+            <div id="hooks-targets"></div>
+            <div style="margin-top:8px">
+              <button class="btn btn-secondary btn-sm" onclick="toggleCustomHookPath()">+ Add Custom Path</button>
+              <div id="custom-hook-form" class="hidden" style="margin-top:8px">
+                <div class="form-group">
+                  <label>Custom directory path</label>
+                  <input type="text" class="form-input" id="custom-hook-path" placeholder="D:/Code/MyProject">
+                </div>
+                <button class="btn btn-primary btn-sm" onclick="addCustomHookTarget()">Add</button>
+              </div>
+            </div>
+          </div>
+
+          <div style="margin-top:16px">
+            <button class="btn btn-secondary" onclick="finishWizard()">Done</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+<script>
+// ── State ──────────────────────────────────────────────
+
+let wizardStep = 0;
+let workspacesCache = {};
+const wizardData = {
+  // Array of added projects, each with resolved dirs
+  addedProjects: [],
+  // Transient state for the project being added (steps 1-2)
+  current: {
+    projectRoot: null,
+    projectName: null,
+    directories: [],
+    selectedDirs: [],
+    extraPaths: [],
+    engineRoot: null,
+    engineDirs: [],
+  },
+  // Shared engine (configured in step 3, auto-detected from first project with engine)
+  engineRoot: null,
+  engineDirs: [],
+  selectedEngineDirs: [],
+  // Workspace
+  workspaceName: '',
+  workspaceDesc: '',
+  savedWorkspace: null,
+};
+
+function resetCurrent() {
+  wizardData.current = {
+    projectRoot: null,
+    projectName: null,
+    directories: [],
+    selectedDirs: [],
+    extraPaths: [],
+    engineRoot: null,
+    engineDirs: [],
+  };
+}
+
+// ── Prerequisites ──────────────────────────────────────
+
+async function checkPrereqs() {
+  try {
+    const resp = await fetch('/api/prerequisites');
+    const data = await resp.json();
+    const el = document.getElementById('prereqs-status');
+    if (data.docker) {
+      el.innerHTML = `<div class="prereq-item"><span class="dot dot-green"></span> Docker: ${esc(data.dockerVersion)}</div>`;
+    } else {
+      el.innerHTML = `<div class="prereq-item"><span class="dot dot-red"></span> Docker: Not found. <a href="https://docker.com" target="_blank" style="color:#569cd6">Install Docker</a></div>`;
+    }
+  } catch (err) {
+    document.getElementById('prereqs-status').innerHTML = `<div class="prereq-item"><span class="dot dot-red"></span> Error checking prerequisites: ${esc(err.message)}</div>`;
+  }
+}
+
+// ── Workspace List ─────────────────────────────────────
+
+async function loadWorkspaces() {
+  try {
+    const resp = await fetch('/api/workspaces');
+    const data = await resp.json();
+    const el = document.getElementById('workspaces-list');
+
+    workspacesCache = data.workspaces || {};
+    const entries = Object.entries(workspacesCache);
+    if (entries.length === 0) {
+      el.innerHTML = '<div class="info-msg">No workspaces configured yet. Click "Add Workspace" to get started.</div>';
+      return;
+    }
+
+    let html = '';
+    for (const [name, ws] of entries) {
+      const dotClass = ws.running
+        ? (ws.health === 'healthy' ? 'dot-green' : ws.health === 'starting' ? 'dot-yellow' : 'dot-red')
+        : 'dot-red';
+      const healthLabel = ws.running ? (ws.health || 'running') : 'stopped';
+      const isDefault = name === data.defaultWorkspace ? ' (default)' : '';
+      const config = ws.config || {};
+      const projects = (config.projects || []).map(p => `${p.name} <span class="badge badge-lang">${p.language}</span>`).join(', ');
+
+      // Memory display
+      let memHtml = '';
+      if (ws.running && ws.memUsage) {
+        const memPct = ws.memPercent || 0;
+        const memColor = memPct > 85 ? '#f44747' : memPct > 70 ? '#dcdcaa' : '#4ec9b0';
+        memHtml = `<span style="font-size:12px;color:${memColor};font-family:'Cascadia Code','Consolas',monospace;margin-left:8px">${esc(ws.memUsage)} (${memPct.toFixed(0)}%)</span>`;
+      } else if (ws.computedMemLimitGB) {
+        memHtml = `<span style="font-size:11px;color:#555;margin-left:8px">limit: ${ws.computedMemLimitGB}GB</span>`;
+      }
+
+      html += `
+        <div class="workspace-card">
+          <div class="ws-header">
+            <span class="dot ${dotClass}"></span>
+            <span class="ws-name" onclick="renameWorkspace('${escAttr(name)}', this)" style="cursor:pointer" title="Click to rename">${esc(name)}</span>${isDefault}
+            <span class="badge badge-port">:${ws.port}</span>
+            <span style="font-size:12px;color:#808080;margin-left:4px">${esc(healthLabel)}</span>
+            ${memHtml}
+            <span class="ws-desc">${esc(ws.description || '')}</span>
+          </div>
+          <div class="ws-projects">${projects || 'No projects configured'}</div>
+          <div class="ws-actions">
+            ${ws.running
+              ? `<a class="btn btn-primary btn-sm" href="/index.html" onclick="WorkspaceContext.onSelect('${escAttr(name)}')">Dashboard</a>
+                 <button class="btn btn-secondary btn-sm" onclick="stopWorkspace('${esc(name)}', this)">Stop</button>`
+              : `<button class="btn btn-success btn-sm" onclick="startWorkspace('${esc(name)}', this)">Start</button>
+                 <span class="ws-start-error error-msg" style="font-size:12px"></span>`}
+            <button class="btn btn-secondary btn-sm" onclick="rebuildWorkspace('${esc(name)}')">Rebuild</button>
+            <button class="btn btn-secondary btn-sm" onclick="viewWorkspaceLogs('${esc(name)}')">Logs</button>
+            <button class="btn btn-secondary btn-sm" onclick="viewWatcherLogs('${esc(name)}')">Watcher Logs</button>
+            <button class="btn btn-secondary btn-sm" onclick="toggleWorkspaceHooks('${esc(name)}')">Install Hooks</button>
+            <button class="btn btn-secondary btn-sm" onclick="toggleMcpConfig()">MCP Config</button>
+            <button class="btn btn-secondary btn-sm" onclick="toggleMemoryConfig('${esc(name)}')">Memory</button>
+            <button class="btn btn-danger btn-sm" onclick="deleteWorkspace('${esc(name)}')" style="margin-left:auto">Delete</button>
+          </div>
+          <div id="ws-hooks-${esc(name)}" class="hidden" style="margin-top:12px; padding-top:12px; border-top:1px solid #3e3e3e">
+            <p class="info-msg" style="margin-bottom:8px">Installs a Claude Code hook that routes MCP tool calls (find_type, grep, etc.) to this workspace's container. Creates a <code>.claude/</code> directory with hook config and a proxy binary.</p>
+            <div id="ws-hooks-targets-${esc(name)}"></div>
+            <div style="margin-top:8px; display:flex; gap:8px; align-items:flex-end">
+              <div class="form-group" style="flex:1; margin-bottom:0">
+                <label>Custom path</label>
+                <input type="text" class="form-input" id="ws-hooks-custom-${esc(name)}" placeholder="D:/Code/MyProject">
+              </div>
+              <button class="btn btn-primary btn-sm" onclick="addAndInstallCustomWorkspaceHook('${esc(name)}')" style="margin-bottom:1px">Add & Install</button>
+            </div>
+          </div>
+          <div id="ws-memory-${esc(name)}" class="hidden" style="margin-top:12px; padding-top:12px; border-top:1px solid #3e3e3e">
+            <p class="info-msg" style="margin-bottom:8px">Auto-calculated: 4GB base + 0.5GB per project (${(ws.config?.projects?.length || 0)} projects = ${ws.computedMemLimitGB || '?'}GB). Override below or set to 0 to use auto.</p>
+            <div style="display:flex; gap:8px; align-items:flex-end">
+              <div class="form-group" style="margin-bottom:0; width:150px">
+                <label>Memory limit (GB)</label>
+                <input type="number" class="form-input" id="ws-memlimit-${esc(name)}" value="${ws.memoryLimitGB || ws.computedMemLimitGB || ''}" min="2" max="32" step="0.5">
+              </div>
+              <button class="btn btn-primary btn-sm" onclick="updateMemoryLimit('${esc(name)}')" style="margin-bottom:1px">Apply</button>
+              <span id="ws-memlimit-status-${esc(name)}" class="info-msg"></span>
+            </div>
+          </div>
+          <div id="ws-rebuild-${esc(name)}" class="hidden" style="margin-top:12px">
+            <span id="ws-rebuild-status-${esc(name)}" class="info-msg"></span>
+            <div class="terminal" id="ws-rebuild-terminal-${esc(name)}" style="margin-top:8px"></div>
+          </div>
+        </div>
+      `;
+    }
+    el.innerHTML = html;
+
+  } catch (err) {
+    document.getElementById('workspaces-list').innerHTML = `<div class="error-msg">Failed to load workspaces: ${esc(err.message)}</div>`;
+  }
+}
+
+async function startWorkspace(name, btn) {
+  btn.disabled = true;
+  btn.textContent = 'Starting...';
+  const statusEl = btn.parentElement.querySelector('.ws-start-error');
+  if (statusEl) statusEl.textContent = '';
+  try {
+    const resp = await fetch('/api/docker/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workspace: name }),
+    });
+    const data = await resp.json();
+    if (!resp.ok || !data.ok) {
+      btn.textContent = 'Start';
+      btn.disabled = false;
+      const errMsg = data.error || 'Failed to start container';
+      if (statusEl) statusEl.textContent = errMsg;
+      else alert(errMsg);
+      return;
+    }
+    setTimeout(loadWorkspaces, 3000);
+  } catch (err) {
+    btn.textContent = 'Start';
+    btn.disabled = false;
+    if (statusEl) statusEl.textContent = err.message;
+    else alert('Start error: ' + err.message);
+  }
+}
+
+async function stopWorkspace(name, btn) {
+  btn.disabled = true;
+  btn.textContent = 'Stopping...';
+  try {
+    await fetch('/api/docker/stop', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workspace: name }),
+    });
+    setTimeout(loadWorkspaces, 2000);
+  } catch (err) {
+    btn.textContent = 'Error';
+    setTimeout(() => { btn.textContent = 'Stop'; btn.disabled = false; }, 2000);
+  }
+}
+
+async function deleteWorkspace(name) {
+  // Custom confirmation with volume deletion option
+  const dialog = document.createElement('div');
+  dialog.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:1000';
+  dialog.innerHTML = `<div style="background:#252526;border:1px solid #3e3e3e;border-radius:8px;padding:20px;max-width:420px;width:90%">
+    <h3 style="color:#f44747;margin-bottom:12px">Delete workspace "${esc(name)}"?</h3>
+    <p style="font-size:13px;color:#d4d4d4;margin-bottom:12px">This will stop the container and remove the workspace configuration.</p>
+    <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#d4d4d4;cursor:pointer;margin-bottom:16px">
+      <input type="checkbox" id="delete-volumes-cb" checked>
+      Also delete indexed data (database, mirror, Zoekt index)
+    </label>
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+      <button class="btn btn-secondary" id="delete-cancel">Cancel</button>
+      <button class="btn btn-danger" id="delete-confirm">Delete</button>
+    </div>
+  </div>`;
+  document.body.appendChild(dialog);
+
+  const result = await new Promise(resolve => {
+    dialog.querySelector('#delete-cancel').onclick = () => resolve(null);
+    dialog.querySelector('#delete-confirm').onclick = () => resolve({
+      deleteVolumes: dialog.querySelector('#delete-volumes-cb').checked
+    });
+    dialog.onclick = (e) => { if (e.target === dialog) resolve(null); };
+  });
+  dialog.remove();
+  if (!result) return;
+
+  try {
+    const qs = result.deleteVolumes ? '?deleteVolumes=true' : '';
+    await fetch(`/api/workspaces/${name}${qs}`, { method: 'DELETE' });
+    loadWorkspaces();
+  } catch (err) {
+    alert('Failed to delete: ' + err.message);
+  }
+}
+
+// ── Rename workspace ──────────────────────────────────
+
+function renameWorkspace(name, el) {
+  const current = el.textContent;
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.value = current;
+  input.className = 'form-input';
+  input.style.cssText = 'font-size:15px;font-weight:600;width:180px;padding:2px 6px;margin:-2px 0';
+
+  el.replaceWith(input);
+  input.focus();
+  input.select();
+
+  async function commit() {
+    const newName = input.value.trim().toLowerCase();
+    if (!newName || newName === name) {
+      loadWorkspaces();
+      return;
+    }
+    if (!/^[a-z0-9][a-z0-9-]*$/.test(newName)) {
+      alert('Invalid name. Use lowercase letters, numbers, and hyphens.');
+      input.focus();
+      return;
+    }
+    try {
+      const resp = await fetch(`/api/workspaces/${name}/rename`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ newName }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) {
+        alert(data.error || 'Rename failed');
+        input.focus();
+        return;
+      }
+      loadWorkspaces();
+    } catch (err) {
+      alert('Rename failed: ' + err.message);
+      loadWorkspaces();
+    }
+  }
+
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); commit(); }
+    if (e.key === 'Escape') { loadWorkspaces(); }
+  });
+  input.addEventListener('blur', commit);
+}
+
+// ── Memory config ──────────────────────────────────────
+
+function toggleMemoryConfig(name) {
+  const el = document.getElementById('ws-memory-' + name);
+  el.classList.toggle('hidden');
+}
+
+async function toggleMcpConfig() {
+  const panel = document.getElementById('mcp-config-panel');
+  if (!panel.classList.contains('hidden')) {
+    panel.classList.add('hidden');
+    return;
+  }
+  panel.classList.remove('hidden');
+  const output = document.getElementById('mcp-config-output');
+  output.textContent = 'Loading...';
+  try {
+    const resp = await fetch('/api/mcp-config');
+    const data = await resp.json();
+    if (data.error) {
+      output.textContent = 'Error: ' + data.error;
+    } else {
+      output.textContent = JSON.stringify(data, null, 2);
+    }
+  } catch (err) {
+    output.textContent = 'Error: ' + err.message;
+  }
+}
+
+function copyMcpConfig() {
+  const output = document.getElementById('mcp-config-output');
+  const status = document.getElementById('mcp-config-copy-status');
+  navigator.clipboard.writeText(output.textContent).then(() => {
+    status.innerHTML = '<span class="success-msg">Copied!</span>';
+    setTimeout(() => { status.textContent = ''; }, 2000);
+  }).catch(() => {
+    status.innerHTML = '<span class="error-msg">Copy failed</span>';
+  });
+}
+
+async function updateMemoryLimit(name) {
+  const input = document.getElementById('ws-memlimit-' + name);
+  const status = document.getElementById('ws-memlimit-status-' + name);
+  const value = parseFloat(input.value) || 0;
+
+  status.textContent = 'Saving...';
+  try {
+    const resp = await fetch(`/api/workspaces/${name}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ memoryLimitGB: value }),
+    });
+    const data = await resp.json();
+    if (data.ok) {
+      status.innerHTML = '<span class="success-msg">Saved. Restart container to apply.</span>';
+    } else {
+      status.innerHTML = `<span class="error-msg">${esc(data.error)}</span>`;
+    }
+  } catch (err) {
+    status.innerHTML = `<span class="error-msg">${esc(err.message)}</span>`;
+  }
+}
+
+// ── Rebuild workspace ──────────────────────────────────
+
+async function rebuildWorkspace(name) {
+  const container = document.getElementById('ws-rebuild-' + name);
+  const terminal = document.getElementById('ws-rebuild-terminal-' + name);
+  const status = document.getElementById('ws-rebuild-status-' + name);
+  container.classList.remove('hidden');
+
+  buildDocker(terminal, status, (success) => {
+    if (success) {
+      status.textContent = 'Restarting container...';
+      fetch('/api/docker/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspace: name }),
+      }).then(resp => resp.json()).then(data => {
+        if (data.ok) {
+          status.innerHTML = '<span class="success-msg">Rebuilt and started!</span>';
+          setTimeout(loadWorkspaces, 3000);
+        } else {
+          status.textContent = 'Start failed: ' + (data.error || 'unknown');
+        }
+      }).catch(err => {
+        status.textContent = 'Start error: ' + err.message;
+      });
+    }
+  });
+}
+
+// ── View workspace logs ────────────────────────────────
+
+async function viewWorkspaceLogs(name) {
+  const container = document.getElementById('ws-rebuild-' + name);
+  const terminal = document.getElementById('ws-rebuild-terminal-' + name);
+  const status = document.getElementById('ws-rebuild-status-' + name);
+  container.classList.remove('hidden');
+  status.textContent = 'Fetching logs...';
+  terminal.textContent = '';
+
+  try {
+    const resp = await fetch(`/api/docker/logs/${name}`);
+    const data = await resp.json();
+    if (data.ok) {
+      status.textContent = 'Container logs (last 80 lines):';
+      terminal.textContent = data.logs;
+      terminal.scrollTop = terminal.scrollHeight;
+    } else {
+      status.textContent = 'Failed to fetch logs';
+      terminal.textContent = data.error || 'Unknown error';
+    }
+  } catch (err) {
+    status.textContent = 'Error fetching logs';
+    terminal.textContent = err.message;
+  }
+}
+
+// ── View watcher logs ──────────────────────────────────
+
+async function viewWatcherLogs(name) {
+  const container = document.getElementById('ws-rebuild-' + name);
+  const terminal = document.getElementById('ws-rebuild-terminal-' + name);
+  const status = document.getElementById('ws-rebuild-status-' + name);
+  container.classList.remove('hidden');
+  status.textContent = 'Fetching watcher logs...';
+  terminal.textContent = '';
+
+  try {
+    const resp = await fetch(`/api/watcher/logs/${encodeURIComponent(name)}?tail=100`);
+    const data = await resp.json();
+    if (data.ok) {
+      if (data.lineCount > 0) {
+        status.textContent = `Watcher logs (${data.lineCount} lines):`;
+        terminal.textContent = data.logs;
+      } else {
+        status.textContent = 'Watcher logs:';
+        terminal.textContent = 'No watcher log file found. Start the watcher from the dashboard to capture logs.';
+      }
+      terminal.scrollTop = terminal.scrollHeight;
+    } else {
+      status.textContent = 'Failed to fetch watcher logs';
+      terminal.textContent = data.error || 'Unknown error';
+    }
+  } catch (err) {
+    status.textContent = 'Error fetching watcher logs';
+    terminal.textContent = err.message;
+  }
+}
+
+// ── Wizard ─────────────────────────────────────────────
+
+function startWizard() {
+  wizardStep = 0;
+  wizardData.addedProjects = [];
+  resetCurrent();
+  wizardData.engineRoot = null;
+  wizardData.engineDirs = [];
+  wizardData.selectedEngineDirs = [];
+  wizardData.workspaceName = '';
+  wizardData.workspaceDesc = '';
+  wizardData.savedWorkspace = null;
+  document.getElementById('overview-section').classList.add('hidden');
+  document.getElementById('wizard-section').classList.remove('hidden');
+  renderProjectsList();
+  showStep(0);
+}
+
+function cancelWizard() {
+  document.getElementById('wizard-section').classList.add('hidden');
+  document.getElementById('overview-section').classList.remove('hidden');
+  loadWorkspaces();
+}
+
+function finishWizard() {
+  cancelWizard();
+}
+
+function showStep(n) {
+  wizardStep = n;
+  // Show/hide content panels (6 internal steps: 0-5)
+  for (let i = 0; i <= 5; i++) {
+    document.getElementById('step-' + i).classList.toggle('hidden', i !== n);
+  }
+  // Update step indicators (4 visible indicators)
+  // Steps 0,1,2 → indicator 0 (Projects); 3 → 1 (Engine); 4 → 2 (Workspace); 5 → 3 (Review)
+  const indMap = [0, 0, 0, 1, 2, 3];
+  const activeInd = indMap[n];
+  for (let i = 0; i <= 3; i++) {
+    const el = document.getElementById('step-ind-' + i);
+    el.className = 'wizard-step' + (i === activeInd ? ' active' : (i < activeInd ? ' done' : ''));
+  }
+}
+
+function wizardBack() {
+  if (wizardStep === 1) showStep(0);      // Find Project → Projects list
+  else if (wizardStep === 2) showStep(1); // Directories → Find Project
+  else if (wizardStep === 3) showStep(0); // Engine → Projects list
+  else if (wizardStep === 4) showStep(3); // Workspace → Engine
+  else if (wizardStep === 5) showStep(4); // Review → Workspace
+}
+
+function wizardNext() {
+  if (wizardStep === 0) {
+    // Projects → Engine
+    if (wizardData.addedProjects.length === 0) {
+      alert('Add at least one project.');
+      return;
+    }
+    populateEngine();
+    showStep(3);
+  } else if (wizardStep === 3) {
+    // Engine → Workspace Name
+    wizardData.selectedEngineDirs = [];
+    document.querySelectorAll('#engine-section input[type="checkbox"]:checked').forEach(cb => {
+      const idx = parseInt(cb.dataset.idx);
+      wizardData.selectedEngineDirs.push(wizardData.engineDirs[idx]);
+    });
+    populateWorkspaceName();
+    showStep(4);
+  } else if (wizardStep === 4) {
+    // Workspace Name → Review
+    const name = document.getElementById('workspace-name').value.trim();
+    if (!name) {
+      showError('name-error', 'Please enter a workspace name.');
+      return;
+    }
+    if (!/^[a-z0-9][a-z0-9-]*$/.test(name)) {
+      showError('name-error', 'Use lowercase letters, numbers, and hyphens only.');
+      return;
+    }
+    hideError('name-error');
+    wizardData.workspaceName = name;
+    wizardData.workspaceDesc = document.getElementById('workspace-desc').value.trim();
+    populateReview();
+    showStep(5);
+  }
+}
+
+// ── Step 0: Projects list ──────────────────────────────
+
+function renderProjectsList() {
+  const el = document.getElementById('projects-list');
+  const nextBtn = document.getElementById('projects-next-btn');
+
+  if (wizardData.addedProjects.length === 0) {
+    el.innerHTML = '<div class="info-msg" style="margin:16px 0">No projects added yet — add at least one project to index.</div>';
+    nextBtn.disabled = true;
+    return;
+  }
+
+  let html = '';
+  for (let i = 0; i < wizardData.addedProjects.length; i++) {
+    const p = wizardData.addedProjects[i];
+    const dirs = [...p.selectedDirs, ...p.extraPaths]
+      .map(d => `${esc(d.label)} <span class="badge badge-lang">${esc(d.language)}</span>`)
+      .join(', ');
+    html += `<div class="project-card" style="cursor:default">
+      <div style="flex:1">
+        <div class="name">${esc(p.projectName)}</div>
+        <div style="font-size:12px;color:#808080;margin-top:2px">${dirs}</div>
+        <div class="path">${esc(p.projectRoot)}</div>
+      </div>
+      <button class="btn btn-danger btn-sm" onclick="removeProject(${i})">Remove</button>
+    </div>`;
+  }
+  el.innerHTML = html;
+  nextBtn.disabled = false;
+}
+
+function removeProject(idx) {
+  wizardData.addedProjects.splice(idx, 1);
+  // Re-detect engine from remaining projects
+  wizardData.engineRoot = null;
+  wizardData.engineDirs = [];
+  for (const p of wizardData.addedProjects) {
+    if (p.engineRoot) {
+      wizardData.engineRoot = p.engineRoot;
+      wizardData.engineDirs = [...p.engineDirs];
+      break;
+    }
+  }
+  renderProjectsList();
+}
+
+function startAddProject() {
+  resetCurrent();
+  document.getElementById('manual-path').value = '';
+  hideError('manual-error');
+  document.getElementById('extra-paths-form').classList.add('hidden');
+  showStep(1);
+}
+
+// ── Step 1: Tab switching ──────────────────────────────
+
+function switchTab(name) {
+  document.querySelectorAll('.tabs .tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+  document.querySelector(`.tab-content#tab-${name}`).classList.add('active');
+  document.querySelector(`.tabs .tab:nth-child(${name === 'scan' ? 1 : name === 'p4' ? 2 : 3})`).classList.add('active');
+}
+
+// ── Step 1: Scan Drives ────────────────────────────────
+
+function startScan() {
+  const btn = document.getElementById('scan-btn');
+  const status = document.getElementById('scan-status');
+  const results = document.getElementById('scan-results');
+  btn.disabled = true;
+  status.classList.remove('hidden');
+  status.innerHTML = '<span class="scan-spinner"></span> Scanning drives...';
+  results.innerHTML = '';
+
+  const evtSource = new EventSource('/api/scan');
+  evtSource.addEventListener('project', e => {
+    const p = JSON.parse(e.data);
+    results.innerHTML += makeProjectCard(p);
+  });
+  evtSource.addEventListener('done', e => {
+    const d = JSON.parse(e.data);
+    status.innerHTML = `Found ${d.total} project(s).`;
+    btn.disabled = false;
+    evtSource.close();
+  });
+  evtSource.addEventListener('error', e => {
+    status.innerHTML = 'Scan error.';
+    btn.disabled = false;
+    evtSource.close();
+  });
+  evtSource.onerror = () => {
+    status.innerHTML = `Scan complete.`;
+    btn.disabled = false;
+    evtSource.close();
+  };
+}
+
+// ── Step 1: P4 Scan ────────────────────────────────────
+
+function startP4Scan() {
+  const btn = document.getElementById('p4-scan-btn');
+  const status = document.getElementById('p4-status');
+  const results = document.getElementById('p4-results');
+  btn.disabled = true;
+  status.classList.remove('hidden');
+  status.innerHTML = '<span class="scan-spinner"></span> Scanning P4 clients...';
+  results.innerHTML = '';
+
+  const evtSource = new EventSource('/api/p4clients');
+  evtSource.addEventListener('info', e => {
+    const d = JSON.parse(e.data);
+    status.innerHTML = `<span class="scan-spinner"></span> ${esc(d.message)}`;
+  });
+  evtSource.addEventListener('project', e => {
+    const p = JSON.parse(e.data);
+    results.innerHTML += makeProjectCard(p);
+  });
+  evtSource.addEventListener('error', e => {
+    const d = JSON.parse(e.data);
+    status.innerHTML = `Error: ${esc(d.message)}`;
+    btn.disabled = false;
+  });
+  evtSource.addEventListener('done', e => {
+    const d = JSON.parse(e.data);
+    status.innerHTML = `Found ${d.total} project(s) in ${d.clientCount || 0} client(s).`;
+    btn.disabled = false;
+    evtSource.close();
+  });
+  evtSource.onerror = () => {
+    status.innerHTML = 'P4 scan complete.';
+    btn.disabled = false;
+    evtSource.close();
+  };
+}
+
+function makeProjectCard(p) {
+  const dir = (p.dir || '').replace(/\\/g, '/');
+  const p4 = p.p4client ? `<div class="p4">P4 client: ${esc(p.p4client)}</div>` : '';
+  return `<div class="project-card" onclick="selectProject('${escAttr(dir)}')">
+    <div style="flex:1">
+      <div class="name">${esc(p.name)}</div>
+      <div class="path">${esc(dir)}</div>
+      ${p4}
+    </div>
+    <button class="btn btn-primary btn-sm" onclick="event.stopPropagation(); selectProject('${escAttr(dir)}')">Select</button>
+  </div>`;
+}
+
+// ── Step 1: Manual path ────────────────────────────────
+
+function selectManualPath() {
+  const path = document.getElementById('manual-path').value.trim();
+  if (!path) {
+    showError('manual-error', 'Please enter a path.');
+    return;
+  }
+  hideError('manual-error');
+  selectProject(path);
+}
+
+// ── Step 1→2: Select project and detect ────────────────
+
+async function selectProject(path) {
+  try {
+    const resp = await fetch('/api/detect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path }),
+    });
+    const data = await resp.json();
+
+    if (!resp.ok) {
+      alert(data.error || 'Detection failed');
+      return;
+    }
+
+    wizardData.current.projectRoot = data.projectRoot;
+    wizardData.current.projectName = data.projectName;
+    wizardData.current.directories = data.directories || [];
+    wizardData.current.engineRoot = data.engineRoot;
+    wizardData.current.engineDirs = data.engineDirectories || [];
+
+    populateDirectories();
+    showStep(2);
+  } catch (err) {
+    alert('Error: ' + err.message);
+  }
+}
+
+// ── Step 2: Populate directories ───────────────────────
+
+function populateDirectories() {
+  document.getElementById('dir-step-title').textContent =
+    `Select directories to index for ${wizardData.current.projectName}`;
+
+  const el = document.getElementById('dir-checkboxes');
+  if (wizardData.current.directories.length === 0) {
+    el.innerHTML = '<div class="info-msg">No standard directories found in this project.</div>';
+    return;
+  }
+  let html = '';
+  wizardData.current.directories.forEach((d, i) => {
+    html += `<div class="check-group">
+      <input type="checkbox" id="dir-${i}" data-idx="${i}" checked>
+      <label for="dir-${i}">${esc(d.label)} <span class="badge badge-lang">${esc(d.language)}</span></label>
+      <span style="font-size:11px;color:#555;font-family:monospace">${esc(d.dir)}</span>
+    </div>`;
+  });
+  el.innerHTML = html;
+  wizardData.current.extraPaths = [];
+  document.getElementById('extra-paths-list').innerHTML = '';
+}
+
+function toggleExtraPaths() {
+  document.getElementById('extra-paths-form').classList.toggle('hidden');
+}
+
+function addExtraPath() {
+  const path = document.getElementById('extra-path-input').value.trim();
+  const lang = document.getElementById('extra-path-lang').value;
+  if (!path) return;
+  const dir = path.replace(/\\/g, '/');
+  const label = dir.split('/').pop() + '/';
+  wizardData.current.extraPaths.push({ dir, label, language: lang });
+  document.getElementById('extra-path-input').value = '';
+  renderExtraPaths();
+}
+
+function removeExtraPath(idx) {
+  wizardData.current.extraPaths.splice(idx, 1);
+  renderExtraPaths();
+}
+
+function renderExtraPaths() {
+  let html = '';
+  wizardData.current.extraPaths.forEach((ep, i) => {
+    html += `<div class="check-group">
+      <span style="color:#4ec9b0">+</span>
+      <label>${esc(ep.label)} <span class="badge badge-lang">${esc(ep.language)}</span></label>
+      <span style="font-size:11px;color:#555;font-family:monospace">${esc(ep.dir)}</span>
+      <button class="btn btn-danger btn-sm" onclick="removeExtraPath(${i})" style="margin-left:auto">Remove</button>
+    </div>`;
+  });
+  document.getElementById('extra-paths-list').innerHTML = html;
+}
+
+// ── Step 2→0: Finish adding project ────────────────────
+
+function finishAddProject() {
+  // Collect selected dirs from checkboxes
+  wizardData.current.selectedDirs = [];
+  document.querySelectorAll('#dir-checkboxes input[type="checkbox"]:checked').forEach(cb => {
+    const idx = parseInt(cb.dataset.idx);
+    wizardData.current.selectedDirs.push(wizardData.current.directories[idx]);
+  });
+  if (wizardData.current.selectedDirs.length === 0 && wizardData.current.extraPaths.length === 0) {
+    alert('Select at least one directory.');
+    return;
+  }
+
+  // Prevent duplicate projects
+  const existing = wizardData.addedProjects.find(
+    p => p.projectRoot === wizardData.current.projectRoot
+  );
+  if (existing) {
+    alert(`"${wizardData.current.projectName}" is already added.`);
+    resetCurrent();
+    showStep(0);
+    return;
+  }
+
+  // Push to addedProjects
+  wizardData.addedProjects.push({
+    projectRoot: wizardData.current.projectRoot,
+    projectName: wizardData.current.projectName,
+    selectedDirs: [...wizardData.current.selectedDirs],
+    extraPaths: [...wizardData.current.extraPaths],
+    engineRoot: wizardData.current.engineRoot,
+    engineDirs: wizardData.current.engineDirs ? [...wizardData.current.engineDirs] : [],
+  });
+
+  // Auto-detect engine from first project that has one
+  if (!wizardData.engineRoot && wizardData.current.engineRoot) {
+    wizardData.engineRoot = wizardData.current.engineRoot;
+    wizardData.engineDirs = [...wizardData.current.engineDirs];
+  }
+
+  resetCurrent();
+  renderProjectsList();
+  showStep(0);
+}
+
+// ── Step 3: Populate engine ────────────────────────────
+
+function populateEngine() {
+  const el = document.getElementById('engine-section');
+  if (wizardData.engineDirs.length > 0) {
+    let html = `<div class="info-msg">Engine root detected at: ${esc(wizardData.engineRoot)}</div><div style="margin-top:8px">`;
+    wizardData.engineDirs.forEach((d, i) => {
+      html += `<div class="check-group">
+        <input type="checkbox" id="eng-${i}" data-idx="${i}" checked>
+        <label for="eng-${i}">${esc(d.label)} <span class="badge badge-lang">${esc(d.language)}</span></label>
+      </div>`;
+    });
+    html += '</div>';
+    el.innerHTML = html;
+  } else {
+    el.innerHTML = `<div class="info-msg">No engine source detected nearby. You can skip this step or enter a path manually.</div>
+      <div class="form-group" style="margin-top:8px">
+        <label>Engine root (optional, directory containing Engine/Source)</label>
+        <input type="text" class="form-input" id="manual-engine" placeholder="D:/UE5/UE_5.4">
+      </div>
+      <button class="btn btn-secondary btn-sm" onclick="detectManualEngine()">Detect Engine Dirs</button>
+      <div id="manual-engine-dirs" style="margin-top:8px"></div>`;
+  }
+}
+
+async function detectManualEngine() {
+  const path = document.getElementById('manual-engine').value.trim();
+  if (!path) return;
+  try {
+    const resp = await fetch('/api/detect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path }),
+    });
+    const data = await resp.json();
+    if (data.engineDirectories && data.engineDirectories.length > 0) {
+      wizardData.engineDirs = data.engineDirectories;
+      wizardData.engineRoot = data.engineRoot || path.replace(/\\/g, '/');
+      let html = '';
+      data.engineDirectories.forEach((d, i) => {
+        html += `<div class="check-group">
+          <input type="checkbox" id="eng-${i}" data-idx="${i}" checked>
+          <label for="eng-${i}">${esc(d.label)} <span class="badge badge-lang">${esc(d.language)}</span></label>
+        </div>`;
+      });
+      document.getElementById('manual-engine-dirs').innerHTML = html;
+    } else {
+      document.getElementById('manual-engine-dirs').innerHTML = '<div class="info-msg">No Engine/Source or Engine/Plugins found at this path.</div>';
+    }
+  } catch (err) {
+    document.getElementById('manual-engine-dirs').innerHTML = `<div class="error-msg">${esc(err.message)}</div>`;
+  }
+}
+
+// ── Step 4: Workspace name ─────────────────────────────
+
+function populateWorkspaceName() {
+  if (!wizardData.workspaceName) {
+    const firstName = wizardData.addedProjects[0]?.projectName || 'main';
+    const defaultName = firstName.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-');
+    document.getElementById('workspace-name').value = defaultName;
+  }
+}
+
+// ── Step 5: Review ─────────────────────────────────────
+
+function populateReview() {
+  // Build preview from all added projects
+  let allProjectsPreview = [];
+  for (const p of wizardData.addedProjects) {
+    const allSelections = [...p.selectedDirs, ...p.extraPaths];
+    allProjectsPreview.push(...buildProjectsPreview(allSelections, p.projectName));
+  }
+  if (wizardData.selectedEngineDirs.length > 0) {
+    allProjectsPreview.push({ name: 'Engine', paths: wizardData.selectedEngineDirs.map(s => s.dir), language: 'cpp' });
+  }
+
+  let html = `<div style="margin-bottom:8px"><strong>Workspace:</strong> ${esc(wizardData.workspaceName)}</div>`;
+
+  // Show source projects
+  html += '<div style="margin-bottom:8px"><strong>Source projects:</strong> ';
+  html += wizardData.addedProjects.map(p => esc(p.projectName)).join(', ');
+  html += '</div>';
+
+  html += '<div><strong>Index entries:</strong></div>';
+  for (const p of allProjectsPreview) {
+    html += `<div style="padding:4px 0 4px 16px">
+      ${esc(p.name)} <span class="badge badge-lang">${esc(p.language)}</span>
+      <div style="font-size:11px;color:#555;font-family:monospace">${p.paths.map(esc).join('<br>')}</div>
+    </div>`;
+  }
+  if (wizardData.workspaceDesc) {
+    html += `<div style="margin-top:8px"><strong>Description:</strong> ${esc(wizardData.workspaceDesc)}</div>`;
+  }
+
+  document.getElementById('review-summary').innerHTML = html;
+  document.getElementById('post-save').classList.add('hidden');
+  document.getElementById('save-status').classList.add('hidden');
+  document.getElementById('save-btn').disabled = false;
+}
+
+function buildProjectsPreview(selections, projectName) {
+  const byLanguage = {};
+  for (const sel of selections) {
+    if (!byLanguage[sel.language]) byLanguage[sel.language] = [];
+    byLanguage[sel.language].push(sel.dir);
+  }
+  const projects = [];
+  if (byLanguage.angelscript) projects.push({ name: projectName, paths: byLanguage.angelscript, language: 'angelscript' });
+  if (byLanguage.cpp) projects.push({ name: `${projectName}-Cpp`, paths: byLanguage.cpp, language: 'cpp' });
+  if (byLanguage.content) projects.push({ name: `${projectName}-Content`, paths: byLanguage.content, language: 'content', contentRoot: byLanguage.content[0], extensions: ['.uasset', '.umap'] });
+  if (byLanguage.config) projects.push({ name: `${projectName}-Config`, paths: byLanguage.config, language: 'config', extensions: ['.ini'] });
+  return projects;
+}
+
+// ── Save workspace ─────────────────────────────────────
+
+async function saveWorkspace() {
+  const btn = document.getElementById('save-btn');
+  const status = document.getElementById('save-status');
+  btn.disabled = true;
+  btn.textContent = 'Saving...';
+  status.classList.remove('hidden');
+  status.innerHTML = '<span class="scan-spinner"></span> Creating workspace...';
+
+  // Build projectGroups from addedProjects
+  const projectGroups = wizardData.addedProjects.map(p => ({
+    projectName: p.projectName,
+    selections: [...p.selectedDirs, ...p.extraPaths],
+  }));
+
+  try {
+    const resp = await fetch('/api/workspaces', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: wizardData.workspaceName,
+        description: wizardData.workspaceDesc,
+        projectGroups,
+        engineSelections: wizardData.selectedEngineDirs,
+      }),
+    });
+    const data = await resp.json();
+
+    if (!resp.ok) {
+      status.innerHTML = `<div class="error-msg">${esc(data.error)}</div>`;
+      btn.textContent = 'Save & Create';
+      btn.disabled = false;
+      return;
+    }
+
+    wizardData.savedWorkspace = data;
+    status.innerHTML = `<div class="success-msg">Workspace created! Port: ${data.port}</div>`;
+    btn.textContent = 'Saved';
+
+    // Show post-save actions and auto-start build
+    document.getElementById('post-save').classList.remove('hidden');
+    populateHookTargets();
+    buildDocker();
+  } catch (err) {
+    status.innerHTML = `<div class="error-msg">Error: ${esc(err.message)}</div>`;
+    btn.textContent = 'Save & Create';
+    btn.disabled = false;
+  }
+}
+
+// ── Docker build ───────────────────────────────────────
+
+function buildDocker(terminalEl, statusEl, onDone) {
+  // Support both wizard (no args) and workspace card (explicit elements) usage
+  const btn = document.getElementById('build-btn');
+  const status = statusEl || document.getElementById('build-status');
+  const terminal = terminalEl || document.getElementById('build-terminal');
+  if (btn) btn.disabled = true;
+  status.textContent = 'Building...';
+  terminal.classList.remove('hidden');
+  terminal.textContent = '';
+
+  fetch('/api/docker/build', { method: 'POST' }).then(async resp => {
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let currentEvent = 'output';
+    let buildFailed = false;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      const lines = buffer.split('\n');
+      buffer = lines.pop(); // keep incomplete line in buffer
+
+      for (const line of lines) {
+        if (line.startsWith('event: ')) {
+          currentEvent = line.slice(7).trim();
+          if (currentEvent === 'error') buildFailed = true;
+        } else if (line.startsWith('data: ')) {
+          try {
+            const data = JSON.parse(line.slice(6));
+            if (data.line !== undefined) {
+              terminal.textContent += data.line + '\n';
+              terminal.scrollTop = terminal.scrollHeight;
+            }
+            if (currentEvent === 'done' && data.code !== 0) {
+              buildFailed = true;
+            }
+          } catch {}
+        }
+      }
+    }
+
+    if (btn) btn.disabled = false;
+
+    if (buildFailed) {
+      status.textContent = 'Build failed.';
+      if (onDone) onDone(false);
+    } else {
+      status.textContent = 'Build complete.';
+      if (onDone) {
+        onDone(true);
+      } else {
+        // Wizard flow: auto-start container
+        startContainer();
+      }
+    }
+  }).catch(err => {
+    if (btn) btn.disabled = false;
+    status.textContent = 'Build failed: ' + err.message;
+    if (onDone) onDone(false);
+  });
+}
+
+// ── Start container ────────────────────────────────────
+
+async function startContainer() {
+  const btn = document.getElementById('start-btn');
+  const status = document.getElementById('start-status');
+  btn.disabled = true;
+  status.textContent = 'Starting...';
+
+  try {
+    const resp = await fetch('/api/docker/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workspace: wizardData.workspaceName }),
+    });
+    const data = await resp.json();
+    if (data.ok) {
+      status.innerHTML = `<span class="success-msg">Started! <a href="/index.html" onclick="WorkspaceContext.onSelect('${escAttr(wizardData.workspaceName)}')" style="color:#569cd6">Open Dashboard</a></span>`;
+    } else {
+      status.textContent = 'Failed: ' + (data.error || 'unknown');
+      btn.disabled = false;
+    }
+  } catch (err) {
+    status.textContent = 'Error: ' + err.message;
+    btn.disabled = false;
+  }
+}
+
+// ── Install hooks ──────────────────────────────────────
+
+function commonParentDir(paths) {
+  if (paths.length === 0) return '';
+  if (paths.length === 1) return paths[0];
+  const parts = paths.map(p => p.replace(/\\/g, '/').split('/'));
+  const common = [];
+  for (let i = 0; i < parts[0].length; i++) {
+    const seg = parts[0][i];
+    if (parts.every(p => p[i] === seg)) {
+      common.push(seg);
+    } else {
+      break;
+    }
+  }
+  return common.join('/');
+}
+
+function populateHookTargets() {
+  const roots = wizardData.addedProjects.map(p => p.projectRoot);
+  const parent = commonParentDir(roots);
+
+  wizardData.hookTargets = [];
+  // Add common parent if it differs from every individual project root
+  if (parent && !roots.includes(parent)) {
+    wizardData.hookTargets.push({ path: parent, label: 'Workspace root (recommended)' });
+  }
+  // Add each project root
+  for (const p of wizardData.addedProjects) {
+    wizardData.hookTargets.push({ path: p.projectRoot, label: p.projectName });
+  }
+
+  renderHookTargets();
+}
+
+function renderHookTargets() {
+  const el = document.getElementById('hooks-targets');
+  let html = '';
+  for (let i = 0; i < wizardData.hookTargets.length; i++) {
+    const t = wizardData.hookTargets[i];
+    html += `<div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid #3e3e3e">
+      <div style="flex:1">
+        <div style="font-size:13px;color:#d4d4d4">${esc(t.label)}</div>
+        <div style="font-size:11px;color:#555;font-family:monospace">${esc(t.path)}</div>
+      </div>
+      <button class="btn btn-primary btn-sm" onclick="installHooksAt(${i})" id="hook-btn-${i}">Install</button>
+      <span id="hook-status-${i}" class="info-msg" style="min-width:100px"></span>
+    </div>`;
+  }
+  el.innerHTML = html;
+}
+
+function toggleCustomHookPath() {
+  document.getElementById('custom-hook-form').classList.toggle('hidden');
+}
+
+function addCustomHookTarget() {
+  const path = document.getElementById('custom-hook-path').value.trim();
+  if (!path) return;
+  const dir = path.replace(/\\/g, '/');
+  wizardData.hookTargets.push({ path: dir, label: dir.split('/').pop() });
+  document.getElementById('custom-hook-path').value = '';
+  document.getElementById('custom-hook-form').classList.add('hidden');
+  renderHookTargets();
+}
+
+async function installHooksAt(idx) {
+  const target = wizardData.hookTargets[idx];
+  const btn = document.getElementById('hook-btn-' + idx);
+  const status = document.getElementById('hook-status-' + idx);
+  await doInstallHook(target.path, btn, status);
+}
+
+// ── Workspace hooks (from overview) ────────────────────
+
+function deriveProjectRoots(config) {
+  const roots = new Set();
+  for (const project of (config.projects || [])) {
+    if (project.name === 'Engine') continue;
+    for (const p of (project.paths || [])) {
+      const parts = p.replace(/\\/g, '/').split('/');
+      parts.pop(); // Remove last segment (Script, Source, Plugins, etc.)
+      if (parts.length > 0) roots.add(parts.join('/'));
+    }
+  }
+  return [...roots];
+}
+
+function toggleWorkspaceHooks(name) {
+  const el = document.getElementById('ws-hooks-' + name);
+  if (!el.classList.contains('hidden')) {
+    el.classList.add('hidden');
+    return;
+  }
+  el.classList.remove('hidden');
+  populateWorkspaceHookTargets(name);
+}
+
+function populateWorkspaceHookTargets(name) {
+  const ws = workspacesCache[name];
+  if (!ws || !ws.config) return;
+
+  const roots = deriveProjectRoots(ws.config);
+  const parent = commonParentDir(roots);
+
+  const targets = [];
+  if (parent && roots.length > 1 && !roots.includes(parent)) {
+    targets.push({ path: parent, label: 'Common root (recommended)' });
+  }
+  for (const root of roots) {
+    targets.push({ path: root, label: root.split('/').pop() });
+  }
+
+  const el = document.getElementById('ws-hooks-targets-' + name);
+  let html = '';
+  for (const t of targets) {
+    html += `<div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid #3e3e3e">
+      <div style="flex:1">
+        <div style="font-size:13px;color:#d4d4d4">${esc(t.label)}</div>
+        <div style="font-size:11px;color:#555;font-family:monospace">${esc(t.path)}</div>
+      </div>
+      <button class="btn btn-primary btn-sm" onclick="installHookAtPath('${escAttr(t.path)}', this)">Install</button>
+      <span class="info-msg" style="min-width:100px"></span>
+    </div>`;
+  }
+  el.innerHTML = html;
+}
+
+async function addAndInstallCustomWorkspaceHook(name) {
+  const input = document.getElementById('ws-hooks-custom-' + name);
+  const path = input.value.trim();
+  if (!path) return;
+  input.value = '';
+  // Add to the targets list and install immediately
+  const el = document.getElementById('ws-hooks-targets-' + name);
+  const dir = path.replace(/\\/g, '/');
+  const label = dir.split('/').pop();
+  el.innerHTML += `<div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid #3e3e3e">
+    <div style="flex:1">
+      <div style="font-size:13px;color:#d4d4d4">${esc(label)}</div>
+      <div style="font-size:11px;color:#555;font-family:monospace">${esc(dir)}</div>
+    </div>
+    <button class="btn btn-primary btn-sm" id="custom-hook-installing" disabled>Installing...</button>
+    <span class="info-msg" style="min-width:100px" id="custom-hook-status"></span>
+  </div>`;
+  const btn = document.getElementById('custom-hook-installing');
+  const status = document.getElementById('custom-hook-status');
+  btn.removeAttribute('id');
+  status.removeAttribute('id');
+  await doInstallHook(dir, btn, status);
+}
+
+async function installHookAtPath(path, btn) {
+  const status = btn.nextElementSibling;
+  await doInstallHook(path, btn, status);
+}
+
+async function doInstallHook(path, btn, statusEl) {
+  btn.disabled = true;
+  btn.textContent = 'Installing...';
+  statusEl.textContent = '';
+
+  try {
+    const resp = await fetch('/api/hooks/install', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ projectDir: path }),
+    });
+    const data = await resp.json();
+    if (data.ok) {
+      const proxyType = data.compiled ? 'Go binary' : 'Node.js fallback';
+      btn.textContent = 'Installed';
+      btn.classList.remove('btn-primary');
+      btn.classList.add('btn-success');
+      statusEl.innerHTML = `<span class="success-msg">${proxyType}</span>`;
+    } else {
+      btn.textContent = 'Install';
+      btn.disabled = false;
+      statusEl.innerHTML = `<span class="error-msg">${esc(data.error)}</span>`;
+    }
+  } catch (err) {
+    btn.textContent = 'Install';
+    btn.disabled = false;
+    statusEl.innerHTML = `<span class="error-msg">${esc(err.message)}</span>`;
+  }
+}
+
+// ── Utilities ──────────────────────────────────────────
+
+function showError(id, msg) {
+  const el = document.getElementById(id);
+  el.textContent = msg;
+  el.classList.remove('hidden');
+}
+
+function hideError(id) {
+  document.getElementById(id).classList.add('hidden');
+}
+
+// ── Init ───────────────────────────────────────────────
+
+checkPrereqs();
+loadWorkspaces();
+initDashboard('workspaces');
+</script>
+</body>
+</html>

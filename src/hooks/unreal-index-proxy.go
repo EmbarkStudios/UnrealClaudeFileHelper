@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-const serviceURL = "http://127.0.0.1:3847"
+const defaultServiceURL = "http://127.0.0.1:3847"
 const timeout = 5 * time.Second
 
 // ── Regex patterns ───────────────────────────────────────────
@@ -188,9 +188,17 @@ func fetchJSON(u string, target interface{}) bool {
 	return json.Unmarshal(body, target) == nil
 }
 
-// ── Indexed path bypass ─────────────────────────────────────
+// ── Indexed path bypass + workspace routing ──────────────────
 
 var indexedPrefixes []string
+
+type workspaceRoute struct {
+	Port     int      `json:"port"`
+	URL      string
+	Prefixes []string `json:"prefixes"`
+}
+
+var workspaceRoutes []workspaceRoute
 
 func init() {
 	exe, err := os.Executable()
@@ -203,13 +211,44 @@ func init() {
 		return
 	}
 	var cfg struct {
-		IndexedPrefixes []string `json:"indexedPrefixes"`
+		IndexedPrefixes []string         `json:"indexedPrefixes"`
+		Workspaces      []workspaceRoute `json:"workspaces"`
 	}
 	if json.Unmarshal(data, &cfg) == nil {
 		for _, p := range cfg.IndexedPrefixes {
 			indexedPrefixes = append(indexedPrefixes, normalizePath(p))
 		}
+		for _, ws := range cfg.Workspaces {
+			var normalized []string
+			for _, p := range ws.Prefixes {
+				normalized = append(normalized, normalizePath(p))
+			}
+			workspaceRoutes = append(workspaceRoutes, workspaceRoute{
+				Port:     ws.Port,
+				URL:      fmt.Sprintf("http://127.0.0.1:%d", ws.Port),
+				Prefixes: normalized,
+			})
+		}
 	}
+}
+
+// resolveServiceURL returns the service URL for the workspace that matches the given path.
+func resolveServiceURL(path string) string {
+	if len(workspaceRoutes) > 0 && path != "" {
+		norm := normalizePath(path)
+		for _, ws := range workspaceRoutes {
+			for _, prefix := range ws.Prefixes {
+				if strings.HasPrefix(norm, prefix) || strings.HasPrefix(prefix, norm) {
+					return ws.URL
+				}
+			}
+		}
+	}
+	// Fall back to first workspace or default
+	if len(workspaceRoutes) > 0 {
+		return workspaceRoutes[0].URL
+	}
+	return defaultServiceURL
 }
 
 // normalizePath lowercases, converts backslashes to forward slashes,
@@ -283,13 +322,13 @@ func extractShellTargetPath(cmd string) string {
 
 // ── Smart routing: try find-type ─────────────────────────────
 
-func tryFindType(name string) string {
+func tryFindType(svcURL, name string) string {
 	p := url.Values{}
 	p.Set("name", name)
 	p.Set("maxResults", "20")
 
 	var data FindTypeResponse
-	if !fetchJSON(serviceURL+"/find-type?"+p.Encode(), &data) || data.Error != "" || len(data.Results) == 0 {
+	if !fetchJSON(svcURL+"/find-type?"+p.Encode(), &data) || data.Error != "" || len(data.Results) == 0 {
 		return ""
 	}
 
@@ -305,13 +344,13 @@ func tryFindType(name string) string {
 
 // ── Smart routing: try find-member ───────────────────────────
 
-func tryFindMember(name string) string {
+func tryFindMember(svcURL, name string) string {
 	p := url.Values{}
 	p.Set("name", name)
 	p.Set("maxResults", "20")
 
 	var data FindMemberResponse
-	if !fetchJSON(serviceURL+"/find-member?"+p.Encode(), &data) || data.Error != "" || len(data.Results) == 0 {
+	if !fetchJSON(svcURL+"/find-member?"+p.Encode(), &data) || data.Error != "" || len(data.Results) == 0 {
 		return ""
 	}
 
@@ -347,23 +386,25 @@ func handleGrep(ti map[string]interface{}) {
 		allow()
 	}
 
+	svcURL := resolveServiceURL(path)
+
 	// Smart routing: detect type definition patterns
 	if m := classDefRe.FindStringSubmatch(pattern); m != nil {
-		if result := tryFindType(m[1]); result != "" {
+		if result := tryFindType(svcURL, m[1]); result != "" {
 			deny(result)
 		}
 	}
 
 	// Smart routing: detect UE-prefixed type names (UAimComponent, FVector, etc.)
 	if uePrefixRe.MatchString(pattern) {
-		if result := tryFindType(pattern); result != "" {
+		if result := tryFindType(svcURL, pattern); result != "" {
 			deny(result)
 		}
 	}
 
 	// Smart routing: detect function definition patterns
 	if m := funcDefRe.FindStringSubmatch(pattern); m != nil {
-		if result := tryFindMember(m[1]); result != "" {
+		if result := tryFindMember(svcURL, m[1]); result != "" {
 			deny(result)
 		}
 	}
@@ -394,7 +435,7 @@ func handleGrep(ti map[string]interface{}) {
 	}
 
 	var data GrepResponse
-	if !fetchJSON(serviceURL+"/grep?"+p.Encode(), &data) || data.Error != "" || len(data.Results) == 0 {
+	if !fetchJSON(svcURL+"/grep?"+p.Encode(), &data) || data.Error != "" || len(data.Results) == 0 {
 		allow()
 	}
 
@@ -485,12 +526,14 @@ func handleGlob(ti map[string]interface{}) {
 		allow()
 	}
 
+	svcURL := resolveServiceURL(searchDir)
+
 	p := url.Values{}
 	p.Set("filename", cleaned)
 	p.Set("maxResults", "30")
 
 	var data FindFileResponse
-	if !fetchJSON(serviceURL+"/find-file?"+p.Encode(), &data) || data.Error != "" || len(data.Results) == 0 {
+	if !fetchJSON(svcURL+"/find-file?"+p.Encode(), &data) || data.Error != "" || len(data.Results) == 0 {
 		allow()
 	}
 
@@ -523,9 +566,12 @@ func handleBash(ti map[string]interface{}) {
 	}
 
 	// Bypass: if the command targets a path outside the indexed projects, allow through
-	if shellPath := extractShellTargetPath(trimmed); shellPath != "" && !isInsideIndex(shellPath) {
+	shellPath := extractShellTargetPath(trimmed)
+	if shellPath != "" && !isInsideIndex(shellPath) {
 		allow()
 	}
+
+	svcURL := resolveServiceURL(shellPath)
 
 	// A. Directory listing: ls, dir, tree → block, redirect to Glob
 	if lsRe.MatchString(trimmed) {
@@ -550,7 +596,7 @@ func handleBash(ti map[string]interface{}) {
 				p.Set("maxResults", "30")
 
 				var data FindFileResponse
-				if fetchJSON(serviceURL+"/find-file?"+p.Encode(), &data) && data.Error == "" && len(data.Results) > 0 {
+				if fetchJSON(svcURL+"/find-file?"+p.Encode(), &data) && data.Error == "" && len(data.Results) > 0 {
 					var files []string
 					for _, r := range data.Results {
 						files = append(files, r.File)
@@ -595,7 +641,7 @@ func handleBash(ti map[string]interface{}) {
 				p.Set("symbols", "false")
 
 				var data GrepResponse
-				if fetchJSON(serviceURL+"/grep?"+p.Encode(), &data) && data.Error == "" && len(data.Results) > 0 {
+				if fetchJSON(svcURL+"/grep?"+p.Encode(), &data) && data.Error == "" && len(data.Results) > 0 {
 					var lines []string
 					for _, r := range data.Results {
 						lines = append(lines, fmt.Sprintf("%s:%d: %s", r.File, r.Line, r.Match))
@@ -648,7 +694,7 @@ func handleBash(ti map[string]interface{}) {
 					p.Set("maxResults", "30")
 
 					var data FindFileResponse
-					if fetchJSON(serviceURL+"/find-file?"+p.Encode(), &data) && data.Error == "" && len(data.Results) > 0 {
+					if fetchJSON(svcURL+"/find-file?"+p.Encode(), &data) && data.Error == "" && len(data.Results) > 0 {
 						var files []string
 						for _, r := range data.Results {
 							files = append(files, r.File)
@@ -676,7 +722,7 @@ func handleBash(ti map[string]interface{}) {
 				p.Set("symbols", "false")
 
 				var data GrepResponse
-				if fetchJSON(serviceURL+"/grep?"+p.Encode(), &data) && data.Error == "" && len(data.Results) > 0 {
+				if fetchJSON(svcURL+"/grep?"+p.Encode(), &data) && data.Error == "" && len(data.Results) > 0 {
 					var lines []string
 					for _, r := range data.Results {
 						lines = append(lines, fmt.Sprintf("%s:%d: %s", r.File, r.Line, r.Match))
