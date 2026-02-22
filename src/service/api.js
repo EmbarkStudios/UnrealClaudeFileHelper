@@ -216,10 +216,13 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
   app.use(express.json({ limit: '50mb' }));
 
   // CORS — allow setup GUI on :3846 to fetch from service containers
+  // Skip CORS for /internal/* endpoints to prevent cross-origin access to control routes
   app.use((req, res, next) => {
-    res.header('Access-Control-Allow-Origin', '*');
-    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-    res.header('Access-Control-Allow-Headers', 'Content-Type');
+    if (!req.path.startsWith('/internal/')) {
+      res.header('Access-Control-Allow-Origin', '*');
+      res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+      res.header('Access-Control-Allow-Headers', 'Content-Type');
+    }
     if (req.method === 'OPTIONS') return res.sendStatus(204);
     next();
   });

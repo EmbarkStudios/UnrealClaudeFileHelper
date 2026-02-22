@@ -866,7 +866,9 @@ route('DELETE', '/api/workspaces/:name', async (req, res, params) => {
 
     // Remove Docker volumes if requested
     if (deleteVolumes) {
-      const volSuffixes = [`${name}-db`, `${name}-mirror`, `${name}-zoekt`];
+      const ws = workspaces.workspaces[name];
+      const volPrefix = ws.volumePrefix || name;
+      const volSuffixes = [`${volPrefix}-db`, `${volPrefix}-mirror`, `${volPrefix}-zoekt`];
       try {
         let volList;
         if (process.platform === 'win32') {

@@ -57,11 +57,9 @@ if (workspaceName) {
   }
 } else {
   // Fallback: CLI arg (URL or legacy config path), env var, or default
-  const cliArgs = process.argv.slice(2).filter((_, i, a) => {
-    // Skip --workspace and its value
-    const prevIdx = a.indexOf('--workspace');
-    return i !== prevIdx && i !== prevIdx + 1;
-  });
+  const cliArgs = process.argv.slice(2);
+  const wsArgIdx = cliArgs.indexOf('--workspace');
+  if (wsArgIdx !== -1) cliArgs.splice(wsArgIdx, 2);
   const cliArg = cliArgs[0];
 
   if (cliArg && (cliArg.startsWith('http://') || cliArg.startsWith('https://'))) {
@@ -674,7 +672,7 @@ async function main() {
       });
 
       // Check if service requested shutdown (e.g. Restart All from dashboard)
-      if (resp && resp.shutdownRequested) {
+      if (resp && resp.shutdown) {
         console.log(`${logPrefix} Shutdown requested by service — exiting...`);
         process.exit(0);
       }
