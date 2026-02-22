@@ -1,0 +1,30 @@
+{
+  "workspaces": {
+    "my-project": {
+      "port": 3847,
+      "description": "Main project workspace"
+    },
+    "secondary": {
+      "port": 3848,
+      "description": "Secondary workspace"
+    }
+  },
+  "defaultWorkspace": "my-project",
+  "dockerImage": "unreal-index:latest",
+  "shared": {
+    "exclude": [
+      "**/Intermediate/**",
+      "**/Saved/**",
+      "**/DerivedDataCache/**",
+      "**/Binaries/**"
+    ],
+    "zoekt": {
+      "parallelism": 4,
+      "reindexDebounceMs": 5000
+    },
+    "watcher": {
+      "debounceMs": 100,
+      "reconcileIntervalMinutes": 10
+    }
+  }
+}

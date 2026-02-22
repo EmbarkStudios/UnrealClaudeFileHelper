@@ -16,6 +16,11 @@ const DEFINITION_PATTERNS = [
   /^\s*(event\s+|delegate\s+)?\w+\s+\w+\s*\(/,         // AngelScript event/delegate
 ];
 
+// Pre-compiled combined regex — tests once instead of up to 12 times per line
+const DEFINITION_COMBINED = new RegExp(
+  DEFINITION_PATTERNS.map(r => `(?:${r.source})`).join('|')
+);
+
 /**
  * Check if a match line looks like a symbol definition (class, function, macro, etc.)
  */
@@ -24,7 +29,7 @@ export function isDefinitionLine(line) {
   // Skip comments
   const trimmed = line.trimStart();
   if (trimmed.startsWith('//') || trimmed.startsWith('/*') || trimmed.startsWith('*')) return false;
-  return DEFINITION_PATTERNS.some(p => p.test(line));
+  return DEFINITION_COMBINED.test(line);
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;

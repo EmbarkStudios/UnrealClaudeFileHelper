@@ -5,8 +5,7 @@
   "main": "src/service/index.js",
   "type": "module",
   "scripts": {
-    "setup": "node src/setup.js",
-    "start": "node src/service/index.js",
+    "setup": "node src/setup-gui.js",
     "watcher": "node src/watcher/watcher-client.js",
     "bridge": "node src/bridge/mcp-bridge.js",
     "legacy": "node src/server.js",
@@ -23,7 +22,6 @@
   "author": "EmbarkStudios",
   "license": "MIT",
   "dependencies": {
-    "@clack/prompts": "^1.0.0",
     "@modelcontextprotocol/sdk": "^1.0.0",
     "better-sqlite3": "^11.0.0",
     "chokidar": "^4.0.0",

@@ -93,10 +93,42 @@ export async function installHooks(projectDir, { silent = false, tryGo = true } 
 
   // ── Write indexed paths companion config ────────────────────
 
-  const configPath = join(__dirname, '..', '..', 'config.json');
-  if (existsSync(configPath)) {
+  const workspacesPath = join(__dirname, '..', '..', 'workspaces.json');
+  const legacyConfigPath = join(__dirname, '..', '..', 'config.json');
+
+  if (existsSync(workspacesPath)) {
+    // Multi-workspace mode: read workspaces.json + per-workspace configs
     try {
-      const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+      const wsConfig = JSON.parse(readFileSync(workspacesPath, 'utf-8'));
+      const allPrefixes = [];
+      const workspaces = [];
+
+      for (const [name, ws] of Object.entries(wsConfig.workspaces || {})) {
+        const wsConfigPath = join(__dirname, '..', '..', 'workspace-configs', `${name}.json`);
+        let prefixes = [];
+        if (existsSync(wsConfigPath)) {
+          try {
+            const cfg = JSON.parse(readFileSync(wsConfigPath, 'utf-8'));
+            prefixes = (cfg.projects || []).flatMap(p => p.paths || []);
+          } catch {}
+        }
+        allPrefixes.push(...prefixes);
+        workspaces.push({ port: ws.port, prefixes });
+      }
+
+      const pathsConfig = { indexedPrefixes: allPrefixes, workspaces };
+      writeFileSync(
+        join(hooksDir, 'unreal-index-paths.json'),
+        JSON.stringify(pathsConfig, null, 2) + '\n'
+      );
+      if (!silent) console.log(`  Wrote indexed paths config (${allPrefixes.length} paths, ${workspaces.length} workspaces).`);
+    } catch (err) {
+      if (!silent) console.log(`  Warning: could not write indexed paths config: ${err.message}`);
+    }
+  } else if (existsSync(legacyConfigPath)) {
+    // Legacy single-config mode
+    try {
+      const config = JSON.parse(readFileSync(legacyConfigPath, 'utf-8'));
       const indexedPrefixes = (config.projects || []).flatMap(p => p.paths || []);
       const pathsConfig = { indexedPrefixes };
       writeFileSync(

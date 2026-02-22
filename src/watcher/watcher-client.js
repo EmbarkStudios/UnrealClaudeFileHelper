@@ -5,9 +5,10 @@
  * Watches P4 directories for changes, reads + parses files, and POSTs
  * batched updates to the WSL-hosted unreal-index service.
  *
- * Usage: node src/watcher/watcher-client.js [service-url | config.json]
+ * Usage: node src/watcher/watcher-client.js [--workspace <name>] [service-url | config.json]
  *
  * Config is fetched from the service via GET /internal/config.
+ * Use --workspace <name> to target a specific workspace from workspaces.json.
  * If a legacy config.json path is passed, it is read to extract the service URL.
  */
 
@@ -15,29 +16,70 @@ import chokidar from 'chokidar';
 import { readFile, stat } from 'fs/promises';
 import { readdirSync, statSync, readFileSync, existsSync } from 'fs';
 import { join, relative } from 'path';
-import { parseFile } from '../parser.js';
+import { parseContent as parseAngelscriptContent } from '../parsers/angelscript-parser.js';
 import { parseCppContent } from '../parsers/cpp-parser.js';
 import { parseUAssetHeader } from '../parsers/uasset-parser.js';
+import { gzipSync } from 'zlib';
 
 // --- Config ---
 
-// Resolve SERVICE_URL: CLI arg (URL or legacy config path), env var, or default
-let SERVICE_URL = 'http://127.0.0.1:3847';
-const cliArg = process.argv[2];
-if (cliArg && (cliArg.startsWith('http://') || cliArg.startsWith('https://'))) {
-  SERVICE_URL = cliArg;
-} else if (cliArg && !cliArg.startsWith('-') && existsSync(cliArg)) {
-  // Legacy: treat as config.json path, extract service URL
-  try {
-    const legacyConfig = JSON.parse(readFileSync(cliArg, 'utf-8'));
-    SERVICE_URL = legacyConfig.service?.url || `http://${legacyConfig.service?.host || '127.0.0.1'}:${legacyConfig.service?.port || 3847}`;
-    console.log(`[Watcher] Using service URL from legacy config: ${SERVICE_URL}`);
-  } catch (err) {
-    console.warn(`[Watcher] Could not read legacy config ${cliArg}: ${err.message}, using default URL`);
-  }
-} else if (process.env.UNREAL_INDEX_URL) {
-  SERVICE_URL = process.env.UNREAL_INDEX_URL;
+// Parse --workspace flag
+let workspaceName = null;
+const wsIdx = process.argv.indexOf('--workspace');
+if (wsIdx !== -1 && process.argv[wsIdx + 1]) {
+  workspaceName = process.argv[wsIdx + 1];
 }
+
+// Resolve SERVICE_URL: --workspace, CLI arg (URL or legacy config path), env var, or default
+let SERVICE_URL = 'http://127.0.0.1:3847';
+
+if (workspaceName) {
+  // Resolve workspace name → port from workspaces.json
+  const wsPath = join(import.meta.dirname, '..', '..', 'workspaces.json');
+  if (existsSync(wsPath)) {
+    try {
+      const wsConfig = JSON.parse(readFileSync(wsPath, 'utf-8'));
+      const ws = wsConfig.workspaces?.[workspaceName];
+      if (ws) {
+        SERVICE_URL = `http://127.0.0.1:${ws.port}`;
+      } else {
+        const available = Object.keys(wsConfig.workspaces || {}).join(', ');
+        console.error(`[Watcher] Unknown workspace "${workspaceName}". Available: ${available}`);
+        process.exit(1);
+      }
+    } catch (err) {
+      console.error(`[Watcher] Could not read workspaces.json: ${err.message}`);
+      process.exit(1);
+    }
+  } else {
+    console.error('[Watcher] --workspace specified but workspaces.json not found. Run "npm run setup" first.');
+    process.exit(1);
+  }
+} else {
+  // Fallback: CLI arg (URL or legacy config path), env var, or default
+  const cliArgs = process.argv.slice(2);
+  const wsArgIdx = cliArgs.indexOf('--workspace');
+  if (wsArgIdx !== -1) cliArgs.splice(wsArgIdx, 2);
+  const cliArg = cliArgs[0];
+
+  if (cliArg && (cliArg.startsWith('http://') || cliArg.startsWith('https://'))) {
+    SERVICE_URL = cliArg;
+  } else if (cliArg && !cliArg.startsWith('-') && existsSync(cliArg)) {
+    // Legacy: treat as config.json path, extract service URL
+    try {
+      const legacyConfig = JSON.parse(readFileSync(cliArg, 'utf-8'));
+      SERVICE_URL = legacyConfig.service?.url || `http://${legacyConfig.service?.host || '127.0.0.1'}:${legacyConfig.service?.port || 3847}`;
+      console.log(`[Watcher] Using service URL from legacy config: ${SERVICE_URL}`);
+    } catch (err) {
+      console.warn(`[Watcher] Could not read legacy config ${cliArg}: ${err.message}, using default URL`);
+    }
+  } else if (process.env.UNREAL_INDEX_URL) {
+    SERVICE_URL = process.env.UNREAL_INDEX_URL;
+  }
+}
+
+// Workspace-prefixed logging
+const logPrefix = workspaceName ? `[Watcher:${workspaceName}]` : '[Watcher]';
 
 // Config is fetched from the service after connection — initially null
 let config = null;
@@ -161,7 +203,7 @@ async function fetchJson(url, retries = 3) {
       const code = err.code || err.cause?.code;
       if (attempt < retries && (code === 'ECONNRESET' || code === 'ECONNREFUSED' || err.message.includes('fetch failed'))) {
         const delay = attempt * 2000;
-        console.warn(`[Watcher] GET failed (${code || err.message}), retry ${attempt}/${retries} in ${delay}ms...`);
+        console.warn(`${logPrefix} GET failed (${code || err.message}), retry ${attempt}/${retries} in ${delay}ms...`);
         await new Promise(r => setTimeout(r, delay));
         continue;
       }
@@ -171,12 +213,16 @@ async function fetchJson(url, retries = 3) {
 }
 
 async function postJson(url, body, retries = 3) {
-  const payload = JSON.stringify(body);
+  const json = JSON.stringify(body);
+  const useGzip = json.length > 1024;
+  const payload = useGzip ? gzipSync(json) : json;
+  const headers = { 'Content-Type': 'application/json' };
+  if (useGzip) headers['Content-Encoding'] = 'gzip';
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
       const res = await fetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: payload
       });
       if (!res.ok) {
@@ -188,11 +234,11 @@ async function postJson(url, body, retries = 3) {
       const code = err.code || err.cause?.code;
       if (attempt < retries && (code === 'ECONNRESET' || code === 'ECONNREFUSED' || code === 'UND_ERR_SOCKET' || err.message.includes('fetch failed'))) {
         const delay = attempt * 2000;
-        console.warn(`[Watcher] POST failed (${code || err.message}), retry ${attempt}/${retries} in ${delay}ms...`);
+        console.warn(`${logPrefix} POST failed (${code || err.message}), retry ${attempt}/${retries} in ${delay}ms...`);
         await new Promise(r => setTimeout(r, delay));
         // If service crashed, wait for it to come back
         try { await fetchJson(`${url.replace(/\/internal\/.*/, '')}/health`); } catch {
-          console.log(`[Watcher] Service unavailable, waiting...`);
+          console.log(`${logPrefix} Service unavailable, waiting...`);
           await waitForService();
         }
         continue;
@@ -223,7 +269,7 @@ async function readAndParseSource(filePath, project, language) {
   if (language === 'cpp') {
     parsed = parseCppContent(content, filePath);
   } else {
-    parsed = await parseFile(filePath);
+    parsed = parseAngelscriptContent(content, filePath);
   }
 
   const types = [];
@@ -271,14 +317,33 @@ function parseAsset(filePath, project) {
   };
 }
 
+// --- Batch read+parse helper ---
+
+async function readAndParseBatch(batch, project, language) {
+  const parsed = [];
+  for (let j = 0; j < batch.length; j += MAX_CONCURRENT) {
+    const concurrent = batch.slice(j, j + MAX_CONCURRENT);
+    const results = await Promise.all(concurrent.map(async (f) => {
+      try {
+        return await readAndParseSource(f.path, project, language);
+      } catch (err) {
+        console.warn(`${logPrefix} Error parsing ${f.path}: ${err.message}`);
+        return null;
+      }
+    }));
+    parsed.push(...results.filter(Boolean));
+  }
+  return parsed;
+}
+
 // --- Health check ---
 
 async function waitForService() {
-  console.log(`[Watcher] Waiting for service at ${SERVICE_URL}...`);
+  console.log(`${logPrefix} Waiting for service at ${SERVICE_URL}...`);
   while (true) {
     try {
       const status = await fetchJson(`${SERVICE_URL}/internal/status`);
-      console.log(`[Watcher] Service connected. DB counts:`, status.counts);
+      console.log(`${logPrefix} Service connected. DB counts:`, status.counts);
       return status;
     } catch {
       await new Promise(r => setTimeout(r, 2000));
@@ -317,18 +382,20 @@ async function reconcile(project) {
       }
     }
 
+    const basePrefix = basePath.replace(/\\/g, '/');
     for (const storedPath of Object.keys(storedMtimes)) {
-      if (!diskMap.has(storedPath)) {
+      const normalized = storedPath.replace(/\\/g, '/');
+      if (normalized.startsWith(basePrefix) && !diskMap.has(storedPath)) {
         deleted.push(storedPath);
       }
     }
 
     if (changed.length === 0 && deleted.length === 0) {
-      console.log(`[Watcher] ${project.name}: up to date (${diskFiles.length} files, scan ${collectMs}ms)`);
+      console.log(`${logPrefix} ${project.name}: up to date (${diskFiles.length} files, scan ${collectMs}ms)`);
       continue;
     }
 
-    console.log(`[Watcher] ${project.name}: ${changed.length} changed, ${deleted.length} deleted (of ${diskFiles.length} on disk, scan ${collectMs}ms)`);
+    console.log(`${logPrefix} ${project.name}: ${changed.length} changed, ${deleted.length} deleted (of ${diskFiles.length} on disk, scan ${collectMs}ms)`);
 
     // Step 4: Send deletes
     if (deleted.length > 0) {
@@ -350,32 +417,35 @@ async function reconcile(project) {
           await postJson(`${SERVICE_URL}/internal/ingest`, { assets });
         }
         if ((i + batch.length) % 5000 < BATCH_SIZE * 10) {
-          console.log(`[Watcher] ${project.name}: ${i + batch.length}/${changed.length} assets reconciled`);
+          console.log(`${logPrefix} ${project.name}: ${i + batch.length}/${changed.length} assets reconciled`);
         }
       }
     } else {
+      // Pipeline: read batch N+1 while POST for batch N is in flight
+      let pendingPost = null;
       for (let i = 0; i < changed.length; i += BATCH_SIZE) {
         const batch = changed.slice(i, i + BATCH_SIZE);
-        const parsed = [];
-        for (let j = 0; j < batch.length; j += MAX_CONCURRENT) {
-          const concurrent = batch.slice(j, j + MAX_CONCURRENT);
-          const results = await Promise.all(concurrent.map(async (f) => {
-            try {
-              return await readAndParseSource(f.path, project, language);
-            } catch (err) {
-              console.warn(`[Watcher] Error parsing ${f.path}: ${err.message}`);
-              return null;
-            }
-          }));
-          parsed.push(...results.filter(Boolean));
-        }
+
+        // Start reading this batch (overlaps with previous POST)
+        const parsePromise = readAndParseBatch(batch, project, language);
+
+        // Wait for previous POST to complete
+        if (pendingPost) await pendingPost;
+
+        const parsed = await parsePromise;
+
+        // Fire POST (don't await — will await at start of next iteration)
         if (parsed.length > 0) {
-          await postJson(`${SERVICE_URL}/internal/ingest`, { files: parsed });
+          pendingPost = postJson(`${SERVICE_URL}/internal/ingest`, { files: parsed });
+        } else {
+          pendingPost = null;
         }
+
         if ((i + batch.length) % 500 < BATCH_SIZE) {
-          console.log(`[Watcher] ${project.name}: ${i + batch.length}/${changed.length} files reconciled`);
+          console.log(`${logPrefix} ${project.name}: ${i + batch.length}/${changed.length} files reconciled`);
         }
       }
+      if (pendingPost) await pendingPost;
     }
   }
 }
@@ -383,7 +453,7 @@ async function reconcile(project) {
 // --- Full scan ---
 
 async function fullScan(languages) {
-  console.log(`[Watcher] Starting full scan for empty languages: ${languages.join(', ')}`);
+  console.log(`${logPrefix} Starting full scan for empty languages: ${languages.join(', ')}`);
   const scanStart = performance.now();
 
   for (const project of config.projects) {
@@ -394,7 +464,7 @@ async function fullScan(languages) {
       const collectStart = performance.now();
       const files = collectFiles(basePath, project.name, extensions, project.language);
       const collectMs = (performance.now() - collectStart).toFixed(0);
-      console.log(`[Watcher] Collected ${files.length} files from ${project.name} (${collectMs}ms)`);
+      console.log(`${logPrefix} Collected ${files.length} files from ${project.name} (${collectMs}ms)`);
 
       if (project.language === 'content') {
         // Asset batches
@@ -408,42 +478,40 @@ async function fullScan(languages) {
             await postJson(`${SERVICE_URL}/internal/ingest`, { assets });
           }
           if ((i + batch.length) % 5000 < BATCH_SIZE * 10) {
-            console.log(`[Watcher] ${project.name}: ${i + batch.length}/${files.length} assets`);
+            console.log(`${logPrefix} ${project.name}: ${i + batch.length}/${files.length} assets`);
           }
         }
       } else {
-        // Source file batches with parallel reads
+        // Source file batches with pipelined read+POST
+        let pendingPost = null;
         for (let i = 0; i < files.length; i += BATCH_SIZE) {
           const batch = files.slice(i, i + BATCH_SIZE);
-          const parsed = [];
 
-          // Read + parse with bounded concurrency
-          for (let j = 0; j < batch.length; j += MAX_CONCURRENT) {
-            const concurrent = batch.slice(j, j + MAX_CONCURRENT);
-            const results = await Promise.all(concurrent.map(async (f) => {
-              try {
-                return await readAndParseSource(f.path, project, project.language);
-              } catch (err) {
-                console.warn(`[Watcher] Error parsing ${f.path}: ${err.message}`);
-                return null;
-              }
-            }));
-            parsed.push(...results.filter(Boolean));
-          }
+          // Start reading this batch (overlaps with previous POST)
+          const parsePromise = readAndParseBatch(batch, project, project.language);
+
+          // Wait for previous POST to complete
+          if (pendingPost) await pendingPost;
+
+          const parsed = await parsePromise;
 
           if (parsed.length > 0) {
-            await postJson(`${SERVICE_URL}/internal/ingest`, { files: parsed });
+            pendingPost = postJson(`${SERVICE_URL}/internal/ingest`, { files: parsed });
+          } else {
+            pendingPost = null;
           }
+
           if ((i + batch.length) % 500 < BATCH_SIZE) {
-            console.log(`[Watcher] ${project.name}: ${i + batch.length}/${files.length} files`);
+            console.log(`${logPrefix} ${project.name}: ${i + batch.length}/${files.length} files`);
           }
         }
+        if (pendingPost) await pendingPost;
       }
     }
   }
 
   const totalS = ((performance.now() - scanStart) / 1000).toFixed(1);
-  console.log(`[Watcher] Full scan complete (${totalS}s)`);
+  console.log(`${logPrefix} Full scan complete (${totalS}s)`);
 }
 
 // --- Incremental watcher ---
@@ -497,7 +565,7 @@ function startWatcher() {
           if (parsed) files.push(parsed);
         }
       } catch (err) {
-        console.warn(`[Watcher] Error processing ${filePath}: ${err.message}`);
+        console.warn(`${logPrefix} Error processing ${filePath}: ${err.message}`);
       }
     }
 
@@ -505,17 +573,19 @@ function startWatcher() {
       try {
         const result = await postJson(`${SERVICE_URL}/internal/ingest`, { files, assets, deletes });
         const ms = (performance.now() - start).toFixed(1);
-        console.log(`[Watcher] +${files.length} assets:${assets.length} -${deletes.length} → ${result.processed} processed (${ms}ms)`);
+        console.log(`${logPrefix} +${files.length} assets:${assets.length} -${deletes.length} → ${result.processed} processed (${ms}ms)`);
         // Update telemetry counters
         totalFilesIngested += files.length;
         totalAssetsIngested += assets.length;
         totalDeletes += deletes.length;
         lastIngestTimestamp = new Date().toISOString();
       } catch (err) {
-        console.error(`[Watcher] POST failed, re-queuing: ${err.message}`);
+        console.error(`${logPrefix} POST failed, re-queuing: ${err.message}`);
         totalErrors++;
-        // Re-queue for retry
-        for (const [k, v] of updates) pendingUpdates.set(k, v);
+        // Re-queue for retry (preserve newer events added during the async POST)
+        for (const [k, v] of updates) {
+          if (!pendingUpdates.has(k)) pendingUpdates.set(k, v);
+        }
         debounceTimer = setTimeout(processUpdates, 5000);
       }
     }
@@ -534,9 +604,9 @@ function startWatcher() {
   watcher.on('add', path => queueUpdate(path, 'add'));
   watcher.on('change', path => queueUpdate(path, 'change'));
   watcher.on('unlink', path => queueUpdate(path, 'unlink'));
-  watcher.on('error', err => console.error('[Watcher] Error:', err));
+  watcher.on('error', err => console.error(logPrefix, 'Error:', err));
 
-  console.log(`[Watcher] Watching ${watchPaths.length} paths for changes`);
+  console.log(`${logPrefix} Watching ${watchPaths.length} paths for changes`);
   return watcher;
 }
 
@@ -551,54 +621,29 @@ async function fetchConfigFromService() {
 }
 
 async function main() {
-  console.log(`[Watcher] Connecting to service at ${SERVICE_URL}...`);
+  console.log(`${logPrefix} Connecting to service at ${SERVICE_URL}...`);
 
   const status = await waitForService();
 
   // Fetch config from service (single source of truth)
   try {
     config = await fetchConfigFromService();
-    console.log(`[Watcher] Config from service: ${config.projects.length} projects`);
+    console.log(`${logPrefix} Config from service: ${config.projects.length} projects`);
   } catch (err) {
     // Fallback: try local config.json if service doesn't have the endpoint (older version)
-    console.warn(`[Watcher] Could not fetch config from service: ${err.message}`);
+    console.warn(`${logPrefix} Could not fetch config from service: ${err.message}`);
     const fallbackPath = join(import.meta.dirname, '..', '..', 'config.json');
     if (existsSync(fallbackPath)) {
       config = JSON.parse(readFileSync(fallbackPath, 'utf-8'));
-      console.log(`[Watcher] Config from local fallback: ${config.projects.length} projects`);
+      console.log(`${logPrefix} Config from local fallback: ${config.projects.length} projects`);
     } else {
       throw new Error('No config available: service /internal/config failed and no local config.json found');
     }
   }
 
-  // Determine which languages need full scan vs reconciliation
-  const configuredLanguages = [...new Set(config.projects.map(p => p.language))];
-  const emptyLanguages = configuredLanguages.filter(lang => !status.counts[lang]);
-  const populatedLanguages = configuredLanguages.filter(lang => status.counts[lang]);
-
-  if (emptyLanguages.length > 0) {
-    await fullScan(emptyLanguages);
-  }
-
-  // Reconcile populated languages: compare disk mtimes vs DB, re-ingest only changes
-  if (populatedLanguages.length > 0) {
-    console.log(`[Watcher] Reconciling populated languages: ${populatedLanguages.join(', ')}`);
-    const reconcileStart = performance.now();
-    for (const project of config.projects) {
-      if (!populatedLanguages.includes(project.language)) continue;
-      try {
-        await reconcile(project);
-      } catch (err) {
-        console.error(`[Watcher] Reconcile failed for ${project.name}: ${err.message}`);
-      }
-    }
-    const reconcileS = ((performance.now() - reconcileStart) / 1000).toFixed(1);
-    console.log(`[Watcher] Reconciliation complete (${reconcileS}s)`);
-  }
-
-  startWatcher();
-
   // --- Heartbeat: send watcher status to service every 15s ---
+  // Start heartbeat immediately so the dashboard shows "watcher connected"
+  // even during the initial reconciliation which can take several minutes.
 
   async function sendHeartbeat() {
     try {
@@ -626,20 +671,28 @@ async function main() {
         }
       });
 
+      // Check if service requested shutdown (e.g. Restart All from dashboard)
+      if (resp && resp.shutdown) {
+        console.log(`${logPrefix} Shutdown requested by service — exiting...`);
+        process.exit(0);
+      }
+
       // Check if config changed on the service
       if (resp && resp.configVersion && resp.configVersion !== lastConfigVersion) {
-        console.log(`[Watcher] Config changed on service (version ${lastConfigVersion} -> ${resp.configVersion}), reloading...`);
+        console.log(`${logPrefix} Config changed on service (version ${lastConfigVersion} -> ${resp.configVersion}), reloading...`);
         try {
           const newConfig = await fetchConfigFromService();
           const projectsChanged = JSON.stringify(newConfig.projects) !== JSON.stringify(config.projects);
           config = newConfig;
           if (projectsChanged) {
-            console.log('[Watcher] Projects changed — restart watcher to apply new watch paths');
+            console.log(`${logPrefix} Projects changed — restarting file watches...`);
+            await activeWatcher.close();
+            activeWatcher = startWatcher();
           } else {
-            console.log('[Watcher] Config updated (no project path changes)');
+            console.log(`${logPrefix} Config updated (no project path changes)`);
           }
         } catch (err) {
-          console.warn(`[Watcher] Config reload failed: ${err.message}`);
+          console.warn(`${logPrefix} Config reload failed: ${err.message}`);
         }
       }
     } catch {
@@ -649,7 +702,34 @@ async function main() {
 
   sendHeartbeat();
   setInterval(sendHeartbeat, HEARTBEAT_INTERVAL_MS);
-  console.log(`[Watcher] Heartbeat started (every ${HEARTBEAT_INTERVAL_MS / 1000}s)`);
+  console.log(`${logPrefix} Heartbeat started (every ${HEARTBEAT_INTERVAL_MS / 1000}s)`);
+
+  // --- Initial scan / reconciliation ---
+
+  const configuredLanguages = [...new Set(config.projects.map(p => p.language))];
+  const emptyLanguages = configuredLanguages.filter(lang => !status.counts[lang]);
+  const populatedLanguages = configuredLanguages.filter(lang => status.counts[lang]);
+
+  if (emptyLanguages.length > 0) {
+    await fullScan(emptyLanguages);
+  }
+
+  if (populatedLanguages.length > 0) {
+    console.log(`${logPrefix} Reconciling populated languages: ${populatedLanguages.join(', ')}`);
+    const reconcileStart = performance.now();
+    for (const project of config.projects) {
+      if (!populatedLanguages.includes(project.language)) continue;
+      try {
+        await reconcile(project);
+      } catch (err) {
+        console.error(`${logPrefix} Reconcile failed for ${project.name}: ${err.message}`);
+      }
+    }
+    const reconcileS = ((performance.now() - reconcileStart) / 1000).toFixed(1);
+    console.log(`${logPrefix} Reconciliation complete (${reconcileS}s)`);
+  }
+
+  let activeWatcher = startWatcher();
 
   // --- Periodic reconciliation: catch missed file changes ---
 
@@ -657,26 +737,26 @@ async function main() {
   nextReconcileTimestamp = new Date(Date.now() + getReconcileIntervalMs()).toISOString();
 
   async function periodicReconcile() {
-    console.log(`[Watcher] Starting periodic reconciliation...`);
+    console.log(`${logPrefix} Starting periodic reconciliation...`);
     const start = performance.now();
     for (const project of config.projects) {
       try {
         await reconcile(project);
       } catch (err) {
-        console.error(`[Watcher] Periodic reconcile failed for ${project.name}: ${err.message}`);
+        console.error(`${logPrefix} Periodic reconcile failed for ${project.name}: ${err.message}`);
       }
     }
     const s = ((performance.now() - start) / 1000).toFixed(1);
-    console.log(`[Watcher] Periodic reconciliation complete (${s}s)`);
+    console.log(`${logPrefix} Periodic reconciliation complete (${s}s)`);
     lastReconcileTimestamp = new Date().toISOString();
     nextReconcileTimestamp = new Date(Date.now() + getReconcileIntervalMs()).toISOString();
   }
 
   setInterval(periodicReconcile, getReconcileIntervalMs());
-  console.log(`[Watcher] Periodic reconciliation scheduled (every ${getReconcileIntervalMs() / 60000}min)`);
+  console.log(`${logPrefix} Periodic reconciliation scheduled (every ${getReconcileIntervalMs() / 60000}min)`);
 }
 
 main().catch(err => {
-  console.error('[Watcher] Fatal error:', err);
+  console.error(logPrefix, 'Fatal error:', err);
   process.exit(1);
 });

@@ -43,15 +43,20 @@ COPY --from=node-builder /app/node_modules ./node_modules
 # Copy application source
 COPY package.json ./
 COPY src ./src
-COPY public ./public
 COPY config.docker.json ./config.docker.json
 COPY docker-entrypoint.sh ./docker-entrypoint.sh
+
+# Bake git hash into image for version tracking (passed via --build-arg)
+ARG BUILD_GIT_HASH=unknown
+RUN echo "${BUILD_GIT_HASH}" > /app/.git-hash
 
 # Fix Windows CRLF line endings (build context may come from Windows filesystem)
 RUN sed -i 's/\r$//' ./docker-entrypoint.sh && chmod +x ./docker-entrypoint.sh
 
 # Create data directories
 RUN mkdir -p /data/db /data/mirror /data/zoekt-index
+
+ENV INSIDE_CONTAINER=1
 
 EXPOSE 3847
 

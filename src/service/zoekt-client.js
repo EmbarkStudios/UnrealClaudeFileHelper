@@ -107,7 +107,7 @@ export class ZoektClient {
       Opts: {
         MaxDocDisplayCount: maxResults,
         NumContextLines: contextLines,
-        TotalMaxMatchCount: Math.max(maxResults * 50, 1000),
+        TotalMaxMatchCount: Math.max(maxResults * 10, 200),
         ChunkMatches: false
       }
     };

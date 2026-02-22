@@ -3,14 +3,10 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Unreal Index — Dashboard</title>
+  <title>Unreal Index — Analytics</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: 'Segoe UI', system-ui, sans-serif; background: #1e1e1e; color: #d4d4d4; padding: 20px; max-width: 1200px; margin: 0 auto; }
-    .header { display: flex; align-items: center; gap: 16px; margin-bottom: 24px; }
-    h1 { font-size: 1.4em; color: #569cd6; }
-    .nav-link { font-size: 13px; color: #808080; text-decoration: none; }
-    .nav-link:hover { color: #569cd6; }
     h2 { font-size: 1.1em; color: #9cdcfe; margin-bottom: 12px; }
     .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 24px; }
     .card { background: #252526; border: 1px solid #3e3e3e; border-radius: 6px; padding: 16px; }
@@ -47,17 +43,13 @@
     .range-btn:last-child { border-radius: 0 3px 3px 0; }
     .range-btn:hover { background: #3e3e3e; color: #d4d4d4; }
     .range-btn.active { background: #264f78; color: #9cdcfe; border-color: #264f78; }
-    .latency-compare { display: flex; gap: 12px; align-items: flex-end; margin-top: 8px; }
-    .latency-bar { display: flex; flex-direction: column; align-items: center; gap: 4px; }
-    .latency-bar-inner { width: 60px; border-radius: 3px 3px 0 0; }
-    .latency-label { font-size: 11px; color: #808080; }
-    .latency-value { font-size: 13px; font-family: 'Cascadia Code', 'Consolas', monospace; }
   </style>
 </head>
 <body>
-  <div class="header">
-    <h1>Unreal Index</h1>
-    <a class="nav-link" href="/search.html">Search</a>
+  <script src="/dashboard.js"></script>
+
+  <!-- Toolbar -->
+  <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
     <div class="range-filter">
       <button class="range-btn" onclick="setRange('day')" id="range-day">Day</button>
       <button class="range-btn" onclick="setRange('week')" id="range-week">Week</button>
@@ -65,29 +57,10 @@
       <button class="range-btn active" onclick="setRange('all')" id="range-all">All</button>
     </div>
     <button class="refresh-btn" onclick="loadAll()">Refresh</button>
-    <span id="version-badge" style="margin-left:auto;font-size:11px;color:#555;font-family:'Cascadia Code','Consolas',monospace"></span>
   </div>
 
   <div class="grid">
-    <!-- Watcher Status -->
-    <div class="card">
-      <h2>Watcher Status</h2>
-      <div id="watcher" class="loading">Loading...</div>
-    </div>
-
-    <!-- Health & Status -->
-    <div class="card">
-      <h2>Service Health</h2>
-      <div id="health" class="loading">Loading...</div>
-    </div>
-
-    <!-- Project Freshness -->
-    <div class="card card-full">
-      <h2>Project Freshness</h2>
-      <div id="freshness" class="loading">Loading...</div>
-    </div>
-
-    <!-- Overview stats -->
+    <!-- Query Overview -->
     <div class="card">
       <h2 style="display:flex;align-items:center;gap:12px">Query Overview
         <button onclick="resetStats()" id="reset-stats-btn"
@@ -168,12 +141,15 @@
       currentRange = range;
       document.querySelectorAll('.range-btn').forEach(b => b.classList.remove('active'));
       document.getElementById('range-' + range).classList.add('active');
-      loadAnalytics();
-      loadMcpAnalytics();
+      loadAll();
     }
 
     async function loadAll() {
-      await Promise.all([loadHealth(), loadAnalytics(), loadWatcher(), loadMcpAnalytics()]);
+      if (!WorkspaceContext.active) {
+        await WorkspaceContext.load();
+      }
+      if (!WorkspaceContext.active) return;
+      await Promise.all([loadAnalytics(), loadMcpAnalytics()]);
     }
 
     async function resetStats() {
@@ -182,7 +158,7 @@
       btn.disabled = true;
       btn.textContent = 'Clearing...';
       try {
-        const resp = await fetch('/query-analytics?all=true', { method: 'DELETE' });
+        const resp = await WorkspaceContext.serviceFetch('/query-analytics?all=true', { method: 'DELETE' });
         const data = await resp.json();
         btn.textContent = `Cleared ${data.deleted}`;
         setTimeout(() => { btn.textContent = 'Reset Stats'; btn.disabled = false; }, 2000);
@@ -190,150 +166,6 @@
       } catch (err) {
         btn.textContent = 'Error';
         setTimeout(() => { btn.textContent = 'Reset Stats'; btn.disabled = false; }, 2000);
-      }
-    }
-
-    async function startWatcher() {
-      const btn = document.getElementById('start-watcher-btn');
-      const msg = document.getElementById('start-watcher-msg');
-      if (btn) btn.disabled = true;
-      if (msg) msg.textContent = 'Starting...';
-      try {
-        const resp = await fetch('/internal/start-watcher', { method: 'POST' });
-        const data = await resp.json();
-        if (!resp.ok) {
-          if (msg) msg.textContent = data.error || 'Failed to start';
-          if (btn) btn.disabled = false;
-          return;
-        }
-        if (msg) msg.textContent = 'Started! Waiting for heartbeat...';
-        // Poll until watcher becomes active (up to 30s)
-        let attempts = 0;
-        const poll = setInterval(async () => {
-          attempts++;
-          try {
-            const sr = await fetch('/watcher-status');
-            const sd = await sr.json();
-            if (sd.hasActiveWatcher) {
-              clearInterval(poll);
-              loadWatcher();
-            }
-          } catch {}
-          if (attempts >= 15) {
-            clearInterval(poll);
-            if (msg) msg.textContent = 'Started but no heartbeat yet — check console';
-            if (btn) btn.disabled = false;
-          }
-        }, 2000);
-      } catch (err) {
-        if (msg) msg.textContent = 'Error: ' + err.message;
-        if (btn) btn.disabled = false;
-      }
-    }
-
-    async function loadWatcher() {
-      const watcherEl = document.getElementById('watcher');
-      const freshnessEl = document.getElementById('freshness');
-      try {
-        const resp = await fetch('/watcher-status');
-        const data = await resp.json();
-        const active = data.hasActiveWatcher;
-        const w = data.watchers[0]; // primary watcher
-
-        if (w) {
-          const uptime = w.startedAt ? formatRelative(w.startedAt) : '—';
-          const lastIngest = w.counters?.lastIngestAt ? formatRelative(w.counters.lastIngestAt) : 'never';
-          const nextReconcile = w.reconciliation?.nextRunAt ? formatRelative(w.reconciliation.nextRunAt, true) : '—';
-          const wGit = w.gitHash || '—';
-          const sGit = data.serviceGitHash || '—';
-          const versionMismatch = wGit !== '—' && sGit !== '—' && wGit !== sGit;
-          const versionClass = versionMismatch ? 'health-warn' : '';
-          const versionNote = versionMismatch
-            ? `<div class="stat-row"><span class="stat-label health-warn">Version mismatch</span><span class="stat-value health-warn">Watcher (${esc(wGit)}) differs from service (${esc(sGit)}) — restart watcher to pick up parser/ingest fixes</span></div>`
-            : '';
-          watcherEl.innerHTML = `
-            <div class="stat-row">
-              <span class="stat-label">Status</span>
-              <span class="stat-value ${active ? 'health-ok' : 'health-err'}">${active ? 'active' : 'inactive'}</span>
-            </div>
-            <div class="stat-row"><span class="stat-label">Version</span><span class="stat-value ${versionClass}">${esc(w.version || '—')} (${esc(wGit)})</span></div>
-            ${versionNote}
-            <div class="stat-row"><span class="stat-label">Watcher ID</span><span class="stat-value">${esc(w.watcherId)}</span></div>
-            <div class="stat-row"><span class="stat-label">Started</span><span class="stat-value">${uptime}</span></div>
-            <div class="stat-row"><span class="stat-label">Files ingested</span><span class="stat-value">${(w.counters?.filesIngested || 0).toLocaleString()}</span></div>
-            <div class="stat-row"><span class="stat-label">Assets ingested</span><span class="stat-value">${(w.counters?.assetsIngested || 0).toLocaleString()}</span></div>
-            <div class="stat-row"><span class="stat-label">Errors</span><span class="stat-value ${w.counters?.errorsCount > 0 ? 'health-warn' : ''}">${w.counters?.errorsCount || 0}</span></div>
-            <div class="stat-row"><span class="stat-label">Last ingest</span><span class="stat-value">${lastIngest}</span></div>
-            <div class="stat-row"><span class="stat-label">Next reconcile</span><span class="stat-value">${nextReconcile}</span></div>
-            ${data.watchers.length > 1 ? `<div class="stat-row"><span class="stat-label health-warn">Warning</span><span class="stat-value health-warn">${data.watchers.length} watchers connected</span></div>` : ''}
-          `;
-        } else {
-          watcherEl.innerHTML = `
-            <div class="stat-row">
-              <span class="stat-label">Status</span>
-              <span class="stat-value health-err">no watcher connected</span>
-            </div>
-            <div style="margin-top:12px;display:flex;align-items:center;gap:12px">
-              <button onclick="startWatcher()" id="start-watcher-btn"
-                style="padding:6px 16px;background:#0e639c;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:13px">
-                Start Watcher
-              </button>
-              <span id="start-watcher-msg" style="font-size:12px;color:#808080"></span>
-            </div>
-          `;
-        }
-
-        // Project freshness table
-        if (data.projectFreshness && data.projectFreshness.length > 0) {
-          freshnessEl.innerHTML = `
-            <table>
-              <tr><th>Project</th><th>Last File Modified</th><th>Last Ingest</th></tr>
-              ${data.projectFreshness.map(p => {
-                const age = p.lastFileModified ? formatRelative(p.lastFileModified) : '—';
-                const ageMs = p.lastFileModified ? Date.now() - new Date(p.lastFileModified).getTime() : Infinity;
-                const cls = ageMs > 86400000 ? 'health-err' : ageMs > 3600000 ? 'health-warn' : 'health-ok';
-                return `<tr>
-                  <td>${esc(p.project)}</td>
-                  <td class="${cls}">${age}</td>
-                  <td>${data.lastIngestAt ? formatRelative(data.lastIngestAt) : '—'}</td>
-                </tr>`;
-              }).join('')}
-            </table>
-          `;
-        } else {
-          freshnessEl.innerHTML = '<span class="loading">No project data</span>';
-        }
-      } catch (err) {
-        watcherEl.innerHTML = `<span class="error">Failed to load: ${esc(err.message)}</span>`;
-        freshnessEl.innerHTML = `<span class="error">Failed to load</span>`;
-      }
-    }
-
-    async function loadHealth() {
-      const el = document.getElementById('health');
-      try {
-        const resp = await fetch('/health');
-        const data = await resp.json();
-
-        const zoekt = data.zoekt || {};
-        const zoektStatus = (zoekt.running || zoekt.available) ? 'running' : 'stopped';
-        const zoektClass = (zoekt.running || zoekt.available) ? 'health-ok' : 'health-err';
-
-        // Update version badge in header
-        const vBadge = document.getElementById('version-badge');
-        if (vBadge) vBadge.textContent = `v${data.version || '?'} (${data.gitHash || '?'})`;
-
-        el.innerHTML = `
-          <div class="stat-row"><span class="stat-label">Status</span><span class="stat-value health-ok">${data.status}</span></div>
-          <div class="stat-row"><span class="stat-label">Version</span><span class="stat-value">${esc(data.version || '—')} (${esc(data.gitHash || '—')})</span></div>
-          <div class="stat-row"><span class="stat-label">Uptime</span><span class="stat-value">${formatUptime(data.uptimeSeconds)}</span></div>
-          <div class="stat-row"><span class="stat-label">Memory (RSS)</span><span class="stat-value">${data.memoryMB.rss} MB</span></div>
-          <div class="stat-row"><span class="stat-label">Heap used</span><span class="stat-value">${data.memoryMB.heapUsed} / ${data.memoryMB.heapTotal} MB</span></div>
-          <div class="stat-row"><span class="stat-label">Zoekt</span><span class="stat-value ${zoektClass}">${zoektStatus}</span></div>
-          ${zoekt.shardCount != null ? `<div class="stat-row"><span class="stat-label">Zoekt shards</span><span class="stat-value">${zoekt.shardCount}</span></div>` : ''}
-        `;
-      } catch (err) {
-        el.innerHTML = `<span class="error">Failed to load: ${esc(err.message)}</span>`;
       }
     }
 
@@ -347,7 +179,7 @@
       try {
         const since = getSinceParam();
         const url = '/query-analytics?summary=true' + (since ? '&since=' + encodeURIComponent(since) : '');
-        const resp = await fetch(url);
+        const resp = await WorkspaceContext.serviceFetch(url);
         const data = await resp.json();
 
         // Overview
@@ -355,10 +187,10 @@
         const methods = data.byMethod || [];
         const avgMs = methods.length > 0
           ? (methods.reduce((s, m) => s + m.avg_ms * m.count, 0) / totalQueries).toFixed(1)
-          : '—';
+          : '\u2014';
         const maxMs = methods.length > 0
           ? Math.max(...methods.map(m => m.max_ms)).toFixed(1)
-          : '—';
+          : '\u2014';
 
         overviewEl.innerHTML = `
           <div class="stat-big">${totalQueries.toLocaleString()}</div>
@@ -368,7 +200,7 @@
           <div class="stat-row"><span class="stat-label">Endpoints tracked</span><span class="stat-value">${methods.length}</span></div>
         `;
 
-        // Queries by method — bar chart
+        // Queries by method
         if (methods.length === 0) {
           methodEl.innerHTML = '<span class="loading">No query data yet</span>';
         } else {
@@ -382,7 +214,7 @@
           `).join('') + '</div>';
         }
 
-        // Latency by method — bar chart
+        // Latency by method
         if (methods.length === 0) {
           latencyEl.innerHTML = '<span class="loading">No query data yet</span>';
         } else {
@@ -399,7 +231,7 @@
           }).join('') + '</div>';
         }
 
-        // Slowest queries table
+        // Slowest queries
         const slowest = data.slowest || [];
         if (slowest.length === 0) {
           slowestEl.innerHTML = '<span class="loading">No slow queries recorded</span>';
@@ -456,7 +288,7 @@
       btn.disabled = true;
       btn.textContent = 'Clearing...';
       try {
-        const resp = await fetch('/mcp-tool-analytics?all=true', { method: 'DELETE' });
+        const resp = await WorkspaceContext.serviceFetch('/mcp-tool-analytics?all=true', { method: 'DELETE' });
         const data = await resp.json();
         btn.textContent = `Cleared ${data.deleted}`;
         setTimeout(() => { btn.textContent = 'Reset'; btn.disabled = false; }, 2000);
@@ -476,7 +308,7 @@
       try {
         const since = getSinceParam();
         const url = '/mcp-tool-analytics?summary=true' + (since ? '&since=' + encodeURIComponent(since) : '');
-        const resp = await fetch(url);
+        const resp = await WorkspaceContext.serviceFetch(url);
         const data = await resp.json();
 
         // Overview
@@ -485,7 +317,7 @@
         const sessions = data.bySessions || [];
         const avgMs = tools.length > 0
           ? (tools.reduce((s, t) => s + (t.avg_ms || 0) * t.count, 0) / Math.max(total, 1)).toFixed(1)
-          : '—';
+          : '\u2014';
 
         overviewEl.innerHTML = `
           <div class="stat-big">${total.toLocaleString()}</div>
@@ -495,7 +327,7 @@
           <div class="stat-row"><span class="stat-label">Sessions</span><span class="stat-value">${sessions.length}</span></div>
         `;
 
-        // By tool — bar chart
+        // By tool
         if (tools.length === 0) {
           byToolEl.innerHTML = '<span class="loading">No MCP tool data yet</span>';
         } else {
@@ -525,7 +357,7 @@
                   <td>${esc(c.tool_name.replace('unreal_', ''))}</td>
                   <td class="mono">${esc(truncate(c.args_summary, 60))}</td>
                   <td class="mono" style="color:${(c.duration_ms || 0) > 200 ? '#f44747' : '#4ec9b0'}">${(c.duration_ms || 0).toFixed(0)} ms</td>
-                  <td class="mono">${c.result_size ? (c.result_size / 1024).toFixed(1) + 'K' : '—'}</td>
+                  <td class="mono">${c.result_size ? (c.result_size / 1024).toFixed(1) + 'K' : '\u2014'}</td>
                   <td style="color:#808080">${formatTime(c.timestamp)}</td>
                 </tr>
               `).join('')}
@@ -560,47 +392,11 @@
       }
     }
 
-    function formatUptime(seconds) {
-      if (seconds < 60) return seconds + 's';
-      if (seconds < 3600) return Math.floor(seconds / 60) + 'm ' + (seconds % 60) + 's';
-      const h = Math.floor(seconds / 3600);
-      const m = Math.floor((seconds % 3600) / 60);
-      return h + 'h ' + m + 'm';
-    }
+    window.onWorkspaceChanged = () => loadAll();
 
-    function formatTime(ts) {
-      if (!ts) return '—';
-      const d = new Date(ts);
-      return d.toLocaleTimeString();
-    }
-
-    function truncate(s, max) {
-      if (!s) return '';
-      return s.length > max ? s.slice(0, max) + '...' : s;
-    }
-
-    function formatRelative(ts, future = false) {
-      if (!ts) return '—';
-      const diff = future
-        ? new Date(ts).getTime() - Date.now()
-        : Date.now() - new Date(ts).getTime();
-      if (diff < 0 && !future) return 'just now';
-      const abs = Math.abs(diff);
-      if (abs < 60000) return Math.round(abs / 1000) + 's ago';
-      if (abs < 3600000) return Math.round(abs / 60000) + 'm ago';
-      if (abs < 86400000) return Math.round(abs / 3600000) + 'h ago';
-      return Math.round(abs / 86400000) + 'd ago';
-    }
-
-    function esc(s) {
-      if (!s) return '';
-      const d = document.createElement('div');
-      d.textContent = s;
-      return d.innerHTML;
-    }
-
-    loadAll();
-    setInterval(loadAll, 15000); // Auto-refresh every 15s
+    initDashboard('analytics');
+    WorkspaceContext.load().then(() => loadAll());
+    setInterval(loadAll, 15000);
   </script>
 </body>
 </html>

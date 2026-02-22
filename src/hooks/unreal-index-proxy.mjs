@@ -5,18 +5,26 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const SERVICE_URL = 'http://localhost:3847';
+const DEFAULT_SERVICE_URL = 'http://localhost:3847';
 
 // File extensions that indicate a specific file (skip — unreal-index greps whole project)
 const FILE_EXT = /\.(as|cpp|h|hpp|cs|py|ini|json|xml|yaml|yml|toml|md|txt)$/i;
 
-// ── Indexed path bypass ─────────────────────────────────────
+// ── Indexed path bypass + workspace routing ──────────────────
 
 const __hookDir = dirname(fileURLToPath(import.meta.url));
 let indexedPrefixes = [];
+let workspaceRoutes = []; // [{port, prefixes: [normalized...]}]
 try {
   const cfg = JSON.parse(readFileSync(join(__hookDir, 'unreal-index-paths.json'), 'utf-8'));
   indexedPrefixes = (cfg.indexedPrefixes || []).map(normalizePath);
+  if (cfg.workspaces) {
+    workspaceRoutes = cfg.workspaces.map(ws => ({
+      port: ws.port,
+      url: `http://localhost:${ws.port}`,
+      prefixes: (ws.prefixes || []).map(normalizePath),
+    }));
+  }
 } catch {}
 
 function normalizePath(p) {
@@ -34,6 +42,19 @@ function isInsideIndex(path) {
   return indexedPrefixes.some(prefix =>
     norm.startsWith(prefix) || prefix.startsWith(norm)
   );
+}
+
+function resolveServiceUrl(path) {
+  if (workspaceRoutes.length > 0 && path) {
+    const norm = normalizePath(path);
+    for (const ws of workspaceRoutes) {
+      if (ws.prefixes.some(prefix => norm.startsWith(prefix) || prefix.startsWith(norm))) {
+        return ws.url;
+      }
+    }
+  }
+  // Fall back to first workspace or default
+  return workspaceRoutes[0]?.url || DEFAULT_SERVICE_URL;
 }
 
 let input;
@@ -81,7 +102,8 @@ async function handleGrep() {
   if (!isInsideIndex(path)) { allow(); return; }        // outside indexed dirs
 
   try {
-    const url = new URL('/grep', SERVICE_URL);
+    const serviceUrl = resolveServiceUrl(path);
+    const url = new URL('/grep', serviceUrl);
     url.searchParams.set('pattern', pattern);
     url.searchParams.set('maxResults', String(head_limit || 30));
     url.searchParams.set('grouped', 'false');
@@ -151,7 +173,8 @@ async function handleGlob() {
   if (cleaned.length < 3) { allow(); return; }
 
   try {
-    const url = new URL('/find-file', SERVICE_URL);
+    const serviceUrl = resolveServiceUrl(searchDir);
+    const url = new URL('/find-file', serviceUrl);
     url.searchParams.set('filename', cleaned);
     url.searchParams.set('maxResults', '30');
 
@@ -238,7 +261,8 @@ async function handleBash() {
       if (dotIdx >= 0) name = name.slice(0, dotIdx);
       if (name.length >= 3) {
         try {
-          const url = new URL('/find-file', SERVICE_URL);
+          const serviceUrl = resolveServiceUrl(shellPath);
+          const url = new URL('/find-file', serviceUrl);
           url.searchParams.set('filename', name);
           url.searchParams.set('maxResults', '30');
           const res = await fetch(url, { signal: AbortSignal.timeout(5000) });
@@ -270,7 +294,8 @@ async function handleBash() {
     const patternMatch = cmd.match(/-Pattern\s+['"]?([^'"\s]+)['"]?/i);
     if (patternMatch && patternMatch[1].length >= 2) {
       try {
-        const url = new URL('/grep', SERVICE_URL);
+        const serviceUrl = resolveServiceUrl(shellPath);
+        const url = new URL('/grep', serviceUrl);
         url.searchParams.set('pattern', patternMatch[1]);
         url.searchParams.set('maxResults', '30');
         url.searchParams.set('grouped', 'false');
