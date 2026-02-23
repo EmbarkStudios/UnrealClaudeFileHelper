@@ -19,7 +19,7 @@ const __dirname = dirname(__filename);
 
 if (process.platform === 'win32') {
   console.error('ERROR: The index service must run on Linux (WSL or Docker), not Windows.');
-  console.error('Use: docker compose up -d   OR   ./start-service.sh');
+  console.error('Use: docker compose up -d');
   process.exit(1);
 }
 

@@ -1,6 +1,7 @@
 @echo off
-REM Start the unreal-index service (Docker-first, WSL fallback) and the file watcher.
+REM Start the unreal-index Docker containers.
 REM Double-click this file or run from a command prompt.
+REM For full management, use the setup GUI: npm run setup (http://localhost:3846)
 
 setlocal enabledelayedexpansion
 cd /d "%~dp0"
@@ -10,29 +11,22 @@ echo  Unreal Index Service
 echo  ====================
 echo.
 
-if not exist config.json (
-    echo config.json not found.
-    echo Run setup.bat to create your config, or copy config.example.json to config.json and edit it.
-    pause
-    exit /b 1
-)
-
-REM Check if WSL is available
+REM Check if WSL/Docker is available
 wsl --status >nul 2>&1
 if %ERRORLEVEL% NEQ 0 (
     echo ERROR: WSL is not installed or not running.
+    echo Docker Desktop with WSL 2 backend is required.
     echo Install WSL: https://learn.microsoft.com/en-us/windows/wsl/install
     pause
     exit /b 1
 )
 
-REM Check if already running
-for /f "tokens=*" %%i in ('wsl -- bash -c "curl -s http://127.0.0.1:3847/health 2>/dev/null && echo OK || echo DOWN"') do set "HEALTH=%%i"
-
-echo !HEALTH! | findstr /C:"OK" >nul 2>&1
-if !ERRORLEVEL! EQU 0 (
-    echo  Service is already running.
-    goto start_watcher
+wsl -- bash -c "docker compose version" >nul 2>&1
+if !ERRORLEVEL! NEQ 0 (
+    echo ERROR: Docker Compose not found in WSL.
+    echo Install Docker Desktop with WSL 2 backend.
+    pause
+    exit /b 1
 )
 
 REM Convert Windows path to WSL /mnt/c/... path for Docker Compose
@@ -40,41 +34,40 @@ set "WIN_DIR=%~dp0"
 set "WIN_DIR=%WIN_DIR:\=/%"
 set "WSL_DIR=/mnt/c/%WIN_DIR:~3%"
 
-REM Try Docker first (via WSL since Docker CLI is in WSL)
-echo  Checking for Docker...
-wsl -- bash -c "docker compose version" >nul 2>&1
+REM Check if containers are already running
+for /f "tokens=*" %%i in ('wsl -- bash -c "curl -s http://127.0.0.1:3847/health 2>/dev/null && echo OK || echo DOWN"') do set "HEALTH=%%i"
+
+echo !HEALTH! | findstr /C:"OK" >nul 2>&1
 if !ERRORLEVEL! EQU 0 (
-    echo  Docker detected. Starting container...
-    echo.
-    wsl -- bash -c "cd '%WSL_DIR%' && docker compose up -d"
-    if !ERRORLEVEL! EQU 0 (
-        goto wait_loop
-    )
-    echo  Docker start failed, falling back to WSL...
-    echo.
+    echo  Service is already running.
+    echo  Open the dashboard at http://localhost:3846 to manage workspaces.
+    pause
+    exit /b 0
 )
 
-REM Fallback: Start via WSL systemd/screen
-echo  Starting service in WSL...
+REM Start Docker containers
+echo  Starting Docker containers...
 echo.
-wsl -- bash -c "export PATH=$HOME/local/node22/bin:$HOME/go/bin:/usr/local/go/bin:$PATH; for d in /mnt/c/Users/*/.[cC]laude/repos/embark-claude-index $HOME/.claude/repos/embark-claude-index $HOME/repos/unreal-index $HOME/.claude/repos/unreal-index; do if [ -f $d/start-service.sh ]; then cd $d && bash start-service.sh --bg; exit; fi; done; echo ERROR: Repo not found in WSL"
+wsl -- bash -c "cd '%WSL_DIR%' && docker compose up -d"
 
 if !ERRORLEVEL! NEQ 0 (
     echo.
-    echo  Failed to start service. Check logs:
-    echo    wsl -- journalctl --user -u unreal-index -n 50 --no-pager
+    echo  Failed to start containers. Check logs:
+    echo    docker compose logs
     echo.
+    echo  Or run the setup GUI to configure workspaces:
+    echo    npm run setup
     pause
     exit /b 1
 )
 
 REM Wait for service to come up
-:wait_loop
 echo  Waiting for service on port 3847...
 set TRIES=0
 :wait_check
-if %TRIES% GEQ 30 (
-    echo ERROR: Service did not start within 30s
+if %TRIES% GEQ 60 (
+    echo ERROR: Service did not start within 60s
+    echo Check logs: docker compose logs
     pause
     exit /b 1
 )
@@ -85,8 +78,9 @@ goto wait_check
 
 :service_up
 echo  Service is running.
-
-:start_watcher
-echo  Starting file watcher...
 echo.
-node src/watcher/watcher-client.js
+echo  To start file watchers, use the setup GUI dashboard:
+echo    npm run setup
+echo    http://localhost:3846
+echo.
+pause
