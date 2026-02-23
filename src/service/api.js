@@ -28,6 +28,14 @@ try {
     if (hash && hash !== 'unknown') SERVICE_GIT_HASH = hash;
   } catch {}
 }
+let SERVICE_GIT_TIMESTAMP = 0;
+try {
+  SERVICE_GIT_TIMESTAMP = parseInt(execSync('git log -1 --format=%ct HEAD', { cwd: join(__dirname, '..', '..'), encoding: 'utf-8' }).trim(), 10) || 0;
+} catch {
+  try {
+    SERVICE_GIT_TIMESTAMP = parseInt(readFileSync(join(__dirname, '..', '..', '.git-timestamp'), 'utf-8').trim(), 10) || 0;
+  } catch {}
+}
 
 // LRU+TTL cache for /grep results — agents often repeat the same search
 class GrepCache {
@@ -353,6 +361,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       status: 'ok',
       version: SERVICE_VERSION,
       gitHash: SERVICE_GIT_HASH,
+      gitTimestamp: SERVICE_GIT_TIMESTAMP,
       timestamp: new Date().toISOString(),
       uptimeSeconds: Math.round(process.uptime()),
       memoryMB: {
@@ -453,7 +462,8 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       ingestCounts: watcherState.ingestCounts,
       projectFreshness,
       serviceVersion: SERVICE_VERSION,
-      serviceGitHash: SERVICE_GIT_HASH
+      serviceGitHash: SERVICE_GIT_HASH,
+      serviceGitTimestamp: SERVICE_GIT_TIMESTAMP
     });
   });
 

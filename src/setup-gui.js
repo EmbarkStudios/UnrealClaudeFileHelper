@@ -1122,19 +1122,23 @@ route('POST', '/api/docker/build', (req, res) => {
 
   const wslRoot = fwd(ROOT).replace(/^([A-Za-z]):/, (_, d) => `/mnt/${d.toLowerCase()}`);
 
-  // Resolve git hash at build time for version tracking inside the container
+  // Resolve git hash and timestamp at build time for version tracking inside the container
   let gitHash = 'unknown';
   try {
     gitHash = execSync('git rev-parse --short HEAD', { cwd: ROOT, encoding: 'utf-8', timeout: 5000 }).trim();
+  } catch {}
+  let gitTimestamp = '0';
+  try {
+    gitTimestamp = execSync('git log -1 --format=%ct HEAD', { cwd: ROOT, encoding: 'utf-8', timeout: 5000 }).trim();
   } catch {}
 
   // Use spawn to bypass cmd.exe shell interpretation on Windows
   // (cmd.exe splits on && inside single quotes, breaking the bash command)
   let child;
   if (process.platform === 'win32') {
-    child = spawn('wsl', ['--', 'bash', '-c', `cd "${wslRoot}" && docker compose build --build-arg BUILD_GIT_HASH=${gitHash} 2>&1`]);
+    child = spawn('wsl', ['--', 'bash', '-c', `cd "${wslRoot}" && docker compose build --build-arg BUILD_GIT_HASH=${gitHash} --build-arg BUILD_GIT_TIMESTAMP=${gitTimestamp} 2>&1`]);
   } else {
-    child = spawn('docker', ['compose', 'build', '--build-arg', `BUILD_GIT_HASH=${gitHash}`], { cwd: ROOT });
+    child = spawn('docker', ['compose', 'build', '--build-arg', `BUILD_GIT_HASH=${gitHash}`, '--build-arg', `BUILD_GIT_TIMESTAMP=${gitTimestamp}`], { cwd: ROOT });
   }
 
   child.stdout?.on('data', data => {
@@ -1306,10 +1310,11 @@ route('POST', '/api/watcher/stop', async (req, res) => {
     const serviceUrl = `http://127.0.0.1:${wsConfig.port}`;
 
     // Tell the service to signal watchers to shut down
+    // If a specific watcherId is provided, only stop that one; otherwise stop all
     const resp = await fetch(`${serviceUrl}/internal/stop-watcher`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({})
+      body: JSON.stringify({ watcherId: body.watcherId || undefined })
     });
     const data = await resp.json();
     console.log(`[Setup] Watcher stop requested for ${wsName}: ${JSON.stringify(data)}`);

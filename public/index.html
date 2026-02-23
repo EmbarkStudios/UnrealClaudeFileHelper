@@ -243,6 +243,31 @@
       }
     }
 
+    async function stopSpecificWatcher(watcherId, btn) {
+      btn.disabled = true;
+      btn.textContent = 'Stopping...';
+      try {
+        await fetch('/api/watcher/stop', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ workspace: WorkspaceContext.active, watcherId })
+        });
+        // Poll until this watcher disappears (up to 20s)
+        for (let i = 0; i < 10; i++) {
+          await new Promise(r => setTimeout(r, 2000));
+          const sr = await WorkspaceContext.serviceFetch('/watcher-status');
+          const sd = await sr.json();
+          const still = (sd.watchers || []).find(w => w.watcherId === watcherId && w.status === 'active');
+          if (!still) { loadWatcher(); loadOverview(); return; }
+        }
+        btn.textContent = 'Timed out';
+        setTimeout(() => { btn.textContent = 'Stop'; btn.disabled = false; }, 3000);
+      } catch (err) {
+        btn.textContent = 'Error';
+        setTimeout(() => { btn.textContent = 'Stop'; btn.disabled = false; }, 3000);
+      }
+    }
+
     async function loadWatcher() {
       const watcherEl = document.getElementById('watcher');
       try {
@@ -275,7 +300,26 @@
             <div class="stat-row"><span class="stat-label">Errors</span><span class="stat-value ${w.counters?.errorsCount > 0 ? 'health-warn' : ''}">${w.counters?.errorsCount || 0}</span></div>
             <div class="stat-row"><span class="stat-label">Last ingest</span><span class="stat-value">${lastIngest}</span></div>
             <div class="stat-row"><span class="stat-label">Next reconcile</span><span class="stat-value">${nextReconcile}</span></div>
-            ${data.watchers.filter(x => x.status === 'active').length > 1 ? `<div class="stat-row"><span class="stat-label health-warn">Warning</span><span class="stat-value health-warn">${data.watchers.filter(x => x.status === 'active').length} watchers connected</span></div>` : ''}
+            <div style="margin-top:10px;display:flex;align-items:center;gap:8px">
+              <button class="action-btn action-btn-warn" onclick="stopAndRestartWatcher(this)" style="font-size:11px;padding:4px 12px">Restart Watcher</button>
+              <span id="watcher-restart-status" style="font-size:12px;color:#808080"></span>
+            </div>
+            ${activeWatchers.length > 1 ? `
+              <div class="stat-row"><span class="stat-label health-warn">Warning</span><span class="stat-value health-warn">${activeWatchers.length} watchers connected</span></div>
+              <div style="margin-top:8px;border-top:1px solid #3e3e3e;padding-top:8px">
+                <div style="font-size:12px;color:#808080;margin-bottom:6px">Active watchers — stop duplicates to avoid redundant indexing:</div>
+                ${activeWatchers.map(aw => {
+                  const id = aw.watcherId || 'unknown';
+                  const started = aw.startedAt ? formatRelative(aw.startedAt) : '?';
+                  const files = (aw.counters?.filesIngested || 0).toLocaleString();
+                  return `<div style="display:flex;align-items:center;gap:8px;padding:4px 0;font-size:12px">
+                    <code style="color:#ce9178;background:#2d2d2d;padding:2px 6px;border-radius:3px">${esc(id)}</code>
+                    <span style="color:#808080">started ${started} · ${files} files</span>
+                    <button class="action-btn action-btn-warn" style="margin-left:auto;font-size:11px;padding:2px 10px" onclick="stopSpecificWatcher('${esc(id)}', this)">Stop</button>
+                  </div>`;
+                }).join('')}
+              </div>
+            ` : ''}
           `;
         } else {
           watcherEl.innerHTML = `
@@ -420,17 +464,33 @@
       }
 
       // Version mismatch detection
+      const serviceGitTimestamp = healthData?.gitTimestamp || 0;
+      const watcherGitTimestamp = w?.gitTimestamp || 0;
       const mismatch = serviceGitHash && watcherGitHash
         && serviceGitHash !== 'unknown' && watcherGitHash !== 'unknown'
         && serviceGitHash !== watcherGitHash;
       if (mismatch) {
+        let message, actionHtml;
+        if (serviceGitTimestamp && watcherGitTimestamp && serviceGitTimestamp !== watcherGitTimestamp) {
+          if (serviceGitTimestamp < watcherGitTimestamp) {
+            message = 'Service is outdated';
+            actionHtml = '<button class="btn-primary" onclick="overviewRebuildAndRestart(this)">Rebuild & Restart Service</button>';
+          } else {
+            message = 'Watcher is outdated';
+            actionHtml = '<button class="btn-primary" onclick="stopAndRestartWatcher(this)">Restart Watcher</button>';
+          }
+        } else {
+          message = 'Version mismatch';
+          actionHtml = `
+            <button class="btn-primary" onclick="stopAndRestartWatcher(this)">Restart Watcher</button>
+            <button class="btn-primary" onclick="overviewRebuildAndRestart(this)">Rebuild Service</button>`;
+        }
         versionAlert.classList.add('visible');
         document.getElementById('version-alert-hashes').textContent =
           `Service (${serviceGitHash}) \u00b7 Watcher (${watcherGitHash})`;
-        const actionsEl = document.getElementById('version-alert-actions');
-        actionsEl.innerHTML = `
-          <button class="btn-primary" onclick="stopAndRestartWatcher(this)">Restart Watcher</button>
-          <span class="version-alert-status" id="version-alert-status"></span>`;
+        document.querySelector('.version-alert-header .label').textContent = message;
+        document.getElementById('version-alert-actions').innerHTML =
+          actionHtml + '<span class="version-alert-status" id="version-alert-status"></span>';
       } else {
         versionAlert.classList.remove('visible');
       }
@@ -606,6 +666,75 @@
           btn.disabled = false;
         }
       }, 2000);
+    }
+
+    async function overviewRebuildAndRestart(btn) {
+      const status = document.getElementById('version-alert-status');
+      btn.disabled = true;
+      btn.textContent = 'Rebuilding...';
+      if (status) status.textContent = '';
+      try {
+        // Step 1: Trigger Docker rebuild via SSE
+        const buildResp = await new Promise((resolve, reject) => {
+          const evtSource = new EventSource('/api/docker/build');
+          let lastLine = '';
+          evtSource.addEventListener('output', e => {
+            const data = JSON.parse(e.data);
+            lastLine = data.line;
+            if (status) status.textContent = lastLine;
+          });
+          evtSource.addEventListener('done', e => {
+            const data = JSON.parse(e.data);
+            evtSource.close();
+            resolve(data);
+          });
+          evtSource.addEventListener('error', e => {
+            evtSource.close();
+            reject(new Error('Build stream error'));
+          });
+          evtSource.onerror = () => { evtSource.close(); reject(new Error('Build connection lost')); };
+        });
+        if (buildResp.code !== 0) {
+          if (status) status.textContent = 'Build failed (exit code ' + buildResp.code + ')';
+          btn.textContent = 'Rebuild & Restart Service';
+          btn.disabled = false;
+          return;
+        }
+        // Step 2: Restart container
+        btn.textContent = 'Restarting...';
+        if (status) status.textContent = 'Restarting container...';
+        const startResp = await fetch('/api/docker/start', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ workspace: WorkspaceContext.active })
+        });
+        if (!startResp.ok) {
+          const err = await startResp.json();
+          if (status) status.textContent = err.error || 'Container restart failed';
+          btn.textContent = 'Rebuild & Restart Service';
+          btn.disabled = false;
+          return;
+        }
+        // Step 3: Wait for service to come back
+        if (status) status.textContent = 'Waiting for service...';
+        for (let i = 0; i < 30; i++) {
+          await new Promise(r => setTimeout(r, 2000));
+          try {
+            const resp = await WorkspaceContext.serviceFetch('/health');
+            if (resp.ok) {
+              loadAllWithOverview();
+              return;
+            }
+          } catch {}
+        }
+        if (status) status.textContent = 'Service did not come back. Check Docker logs.';
+        btn.textContent = 'Rebuild & Restart Service';
+        btn.disabled = false;
+      } catch (err) {
+        if (status) status.textContent = 'Error: ' + err.message;
+        btn.textContent = 'Rebuild & Restart Service';
+        btn.disabled = false;
+      }
     }
 
     // --- Projects card (merged config + stats + freshness) ---

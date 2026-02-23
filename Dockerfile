@@ -46,9 +46,11 @@ COPY src ./src
 COPY config.docker.json ./config.docker.json
 COPY docker-entrypoint.sh ./docker-entrypoint.sh
 
-# Bake git hash into image for version tracking (passed via --build-arg)
+# Bake git hash and timestamp into image for version tracking (passed via --build-arg)
 ARG BUILD_GIT_HASH=unknown
 RUN echo "${BUILD_GIT_HASH}" > /app/.git-hash
+ARG BUILD_GIT_TIMESTAMP=0
+RUN echo "${BUILD_GIT_TIMESTAMP}" > /app/.git-timestamp
 
 # Fix Windows CRLF line endings (build context may come from Windows filesystem)
 RUN sed -i 's/\r$//' ./docker-entrypoint.sh && chmod +x ./docker-entrypoint.sh

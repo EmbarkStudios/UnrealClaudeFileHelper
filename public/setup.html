@@ -92,6 +92,17 @@
     .error-msg { color: #f44747; font-size: 13px; margin-top: 4px; }
     .success-msg { color: #4ec9b0; font-size: 13px; margin-top: 4px; }
     .info-msg { color: #808080; font-size: 12px; margin-top: 4px; }
+
+    .watcher-status { margin-top: 8px; padding: 8px 12px; background: #1e1e1e; border: 1px solid #3e3e3e; border-radius: 4px; font-size: 12px; }
+    .watcher-status .ws-label { color: #808080; margin-bottom: 4px; }
+    .watcher-status .ws-label .dot { vertical-align: middle; }
+    .watcher-progress-row { display: flex; align-items: center; gap: 8px; padding: 3px 0; font-family: 'Cascadia Code', 'Consolas', monospace; }
+    .watcher-progress-row .proj-name { width: 140px; color: #d4d4d4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .watcher-progress-bar { flex: 1; height: 10px; background: #2d2d2d; border-radius: 3px; overflow: hidden; max-width: 200px; }
+    .watcher-progress-bar .fill { height: 100%; background: #4ec9b0; border-radius: 3px; transition: width 0.4s ease; }
+    .watcher-progress-pct { width: 50px; text-align: right; color: #9cdcfe; }
+    .watcher-progress-count { color: #808080; }
+    .watcher-progress-done { color: #4ec9b0; }
   </style>
 </head>
 <body>
@@ -408,6 +419,9 @@ async function loadWorkspaces() {
             <button class="btn btn-secondary btn-sm" onclick="toggleMemoryConfig('${esc(name)}')">Memory</button>
             <button class="btn btn-danger btn-sm" onclick="deleteWorkspace('${esc(name)}')" style="margin-left:auto">Delete</button>
           </div>
+          <div id="ws-watcher-${esc(name)}" class="watcher-status${ws.running ? '' : ' hidden'}">
+            <div class="ws-label"><span class="dot dot-gray"></span> Watcher: checking...</div>
+          </div>
           <div id="ws-hooks-${esc(name)}" class="hidden" style="margin-top:12px; padding-top:12px; border-top:1px solid #3e3e3e">
             <p class="info-msg" style="margin-bottom:8px">Installs a Claude Code hook that routes MCP tool calls (find_type, grep, etc.) to this workspace's container. Creates a <code>.claude/</code> directory with hook config and a proxy binary.</p>
             <div id="ws-hooks-targets-${esc(name)}"></div>
@@ -567,6 +581,16 @@ async function deleteWorkspace(name) {
   if (!result) return;
 
   try {
+    // Stop the watcher before deleting so it doesn't keep reconnecting
+    try {
+      await fetch('/api/watcher/stop', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspace: name })
+      });
+      // Brief wait for the shutdown signal to reach the watcher via heartbeat
+      await new Promise(r => setTimeout(r, 2000));
+    } catch { /* watcher may not be running, that's fine */ }
     const qs = result.deleteVolumes ? '?deleteVolumes=true' : '';
     await fetch(`/api/workspaces/${name}${qs}`, { method: 'DELETE' });
     loadWorkspaces();
@@ -1420,7 +1444,23 @@ async function startContainer() {
     });
     const data = await resp.json();
     if (data.ok) {
-      status.innerHTML = `<span class="success-msg">Started! <a href="/index.html" onclick="WorkspaceContext.onSelect('${escAttr(wizardData.workspaceName)}')" style="color:#569cd6">Open Dashboard</a></span>`;
+      status.innerHTML = `<span class="success-msg">Container started!</span> <span class="scan-spinner"></span> Starting watcher...`;
+      // Auto-start the watcher after the container is up
+      try {
+        const watcherResp = await fetch('/api/watcher/start', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ workspace: wizardData.workspaceName })
+        });
+        const watcherData = await watcherResp.json();
+        if (watcherResp.ok && watcherData.ok) {
+          status.innerHTML = `<span class="success-msg">Container and watcher started!</span> <a href="/index.html" onclick="WorkspaceContext.onSelect('${escAttr(wizardData.workspaceName)}')" style="color:#569cd6">Open Dashboard</a>`;
+        } else {
+          status.innerHTML = `<span class="success-msg">Container started!</span> <span style="color:#ce9178">Watcher: ${esc(watcherData.error || 'failed to start')}</span> <a href="/index.html" onclick="WorkspaceContext.onSelect('${escAttr(wizardData.workspaceName)}')" style="color:#569cd6">Open Dashboard</a>`;
+        }
+      } catch {
+        status.innerHTML = `<span class="success-msg">Container started!</span> <span style="color:#ce9178">Could not auto-start watcher</span> <a href="/index.html" onclick="WorkspaceContext.onSelect('${escAttr(wizardData.workspaceName)}')" style="color:#569cd6">Open Dashboard</a>`;
+      }
     } else {
       const errMsg = data.error || 'unknown';
       if (errMsg.includes('address already in use')) {
@@ -1661,6 +1701,103 @@ function showError(id, msg) {
 function hideError(id) {
   document.getElementById(id).classList.add('hidden');
 }
+
+// ── Watcher Progress Polling ───────────────────────────
+
+let watcherPollTimer = null;
+
+function formatCount(n) {
+  if (n >= 1000) return (n / 1000).toFixed(n >= 10000 ? 0 : 1).replace(/\.0$/, '') + 'k';
+  return String(n);
+}
+
+function renderWatcherProgress(name, data) {
+  const el = document.getElementById('ws-watcher-' + name);
+  if (!el) return;
+
+  if (!data || !data.hasActiveWatcher) {
+    el.innerHTML = '<div class="ws-label"><span class="dot dot-gray"></span> No watcher connected</div>';
+    return;
+  }
+
+  const watcher = data.watchers[0];
+  const progress = watcher.scanProgress || {};
+  const projectNames = Object.keys(progress);
+
+  if (projectNames.length === 0) {
+    el.innerHTML = '<div class="ws-label"><span class="dot dot-green"></span> Watcher: connected</div>';
+    return;
+  }
+
+  let html = '<div class="ws-label"><span class="dot dot-green"></span> Watcher: connected</div>';
+
+  for (const proj of projectNames) {
+    const p = progress[proj];
+    const total = p.discovered || 0;
+    const done = p.processed || 0;
+    const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+    const lang = (p.language === 'angelscript' ? 'AS' : p.language === 'content' ? 'assets' : p.language || '').toUpperCase();
+    const isActive = p.phase === 'scanning' || p.phase === 'reconciling';
+    const isDone = p.phase === 'watching' || p.phase === 'done';
+
+    html += '<div class="watcher-progress-row">';
+    html += `<span class="proj-name" title="${esc(proj)}">${esc(proj)}</span>`;
+
+    if (isActive) {
+      html += `<div class="watcher-progress-bar"><div class="fill" style="width:${pct}%"></div></div>`;
+      html += `<span class="watcher-progress-pct">${pct}%</span>`;
+      html += `<span class="watcher-progress-count">(${formatCount(done)}/${formatCount(total)} ${esc(lang)})</span>`;
+    } else if (isDone) {
+      html += `<div class="watcher-progress-bar"><div class="fill" style="width:100%"></div></div>`;
+      html += `<span class="watcher-progress-done">done (${formatCount(total)} files)</span>`;
+    } else {
+      html += `<span class="watcher-progress-count">${esc(p.phase || 'idle')}</span>`;
+    }
+
+    html += '</div>';
+  }
+
+  el.innerHTML = html;
+}
+
+async function pollWatcherStatus() {
+  const entries = Object.entries(workspacesCache);
+  for (const [name, ws] of entries) {
+    if (!ws.running) continue;
+    try {
+      const resp = await fetch(`/api/service-proxy/watcher-status?workspace=${encodeURIComponent(name)}`);
+      if (resp.ok) {
+        const data = await resp.json();
+        renderWatcherProgress(name, data);
+      }
+    } catch {
+      // Silently ignore — container may not be ready yet
+    }
+  }
+}
+
+function startWatcherPolling() {
+  if (watcherPollTimer) return;
+  const hasRunning = Object.values(workspacesCache).some(ws => ws.running);
+  if (!hasRunning) return;
+  pollWatcherStatus();
+  watcherPollTimer = setInterval(pollWatcherStatus, 5000);
+}
+
+function stopWatcherPolling() {
+  if (watcherPollTimer) {
+    clearInterval(watcherPollTimer);
+    watcherPollTimer = null;
+  }
+}
+
+// Hook into loadWorkspaces to start/stop polling
+const _origLoadWorkspaces = loadWorkspaces;
+loadWorkspaces = async function() {
+  await _origLoadWorkspaces();
+  stopWatcherPolling();
+  startWatcherPolling();
+};
 
 // ── Init ───────────────────────────────────────────────
 
