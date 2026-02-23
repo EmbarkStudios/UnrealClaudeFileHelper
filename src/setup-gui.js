@@ -938,6 +938,7 @@ route('GET', '/api/scan', (req, res) => {
       for (const project of scanForUProjects(startDirs, 4)) {
         if (seen.has(project.dir)) continue;
         seen.add(project.dir);
+        project.hasEngine = !!detectEngineRoot(project.dir);
         sseSend(res, 'project', project);
       }
     } catch (err) {
@@ -1002,6 +1003,7 @@ route('GET', '/api/p4clients', (req, res) => {
       const found = [];
       for (const project of scanForUProjects([root], 4)) {
         found.push(project);
+        project.hasEngine = !!detectEngineRoot(project.dir);
         sseSend(res, 'project', { ...project, p4client: client.name });
         totalProjects++;
       }

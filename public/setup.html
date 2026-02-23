@@ -891,13 +891,17 @@ function startScan() {
   status.innerHTML = '<span class="scan-spinner"></span> Scanning drives...';
   results.innerHTML = '';
 
+  const scanResults = [];
   const evtSource = new EventSource('/api/scan');
   evtSource.addEventListener('project', e => {
-    const p = JSON.parse(e.data);
-    results.innerHTML += makeProjectCard(p);
+    scanResults.push(JSON.parse(e.data));
+    status.innerHTML = `<span class="scan-spinner"></span> Scanning drives... (${scanResults.length} found)`;
   });
   evtSource.addEventListener('done', e => {
     const d = JSON.parse(e.data);
+    // Sort: projects with engine source first
+    scanResults.sort((a, b) => (b.hasEngine ? 1 : 0) - (a.hasEngine ? 1 : 0));
+    results.innerHTML = scanResults.map(p => makeProjectCard(p)).join('');
     status.innerHTML = `Found ${d.total} project(s).`;
     btn.disabled = false;
     evtSource.close();
@@ -908,6 +912,9 @@ function startScan() {
     evtSource.close();
   });
   evtSource.onerror = () => {
+    // Sort whatever we have so far
+    scanResults.sort((a, b) => (b.hasEngine ? 1 : 0) - (a.hasEngine ? 1 : 0));
+    results.innerHTML = scanResults.map(p => makeProjectCard(p)).join('');
     status.innerHTML = `Scan complete.`;
     btn.disabled = false;
     evtSource.close();
@@ -925,14 +932,14 @@ function startP4Scan() {
   status.innerHTML = '<span class="scan-spinner"></span> Scanning P4 clients...';
   results.innerHTML = '';
 
+  const p4Results = [];
   const evtSource = new EventSource('/api/p4clients');
   evtSource.addEventListener('info', e => {
     const d = JSON.parse(e.data);
     status.innerHTML = `<span class="scan-spinner"></span> ${esc(d.message)}`;
   });
   evtSource.addEventListener('project', e => {
-    const p = JSON.parse(e.data);
-    results.innerHTML += makeProjectCard(p);
+    p4Results.push(JSON.parse(e.data));
   });
   evtSource.addEventListener('error', e => {
     const d = JSON.parse(e.data);
@@ -941,11 +948,16 @@ function startP4Scan() {
   });
   evtSource.addEventListener('done', e => {
     const d = JSON.parse(e.data);
+    // Sort: projects with engine source first
+    p4Results.sort((a, b) => (b.hasEngine ? 1 : 0) - (a.hasEngine ? 1 : 0));
+    results.innerHTML = p4Results.map(p => makeProjectCard(p)).join('');
     status.innerHTML = `Found ${d.total} project(s) in ${d.clientCount || 0} client(s).`;
     btn.disabled = false;
     evtSource.close();
   });
   evtSource.onerror = () => {
+    p4Results.sort((a, b) => (b.hasEngine ? 1 : 0) - (a.hasEngine ? 1 : 0));
+    results.innerHTML = p4Results.map(p => makeProjectCard(p)).join('');
     status.innerHTML = 'P4 scan complete.';
     btn.disabled = false;
     evtSource.close();
@@ -955,9 +967,10 @@ function startP4Scan() {
 function makeProjectCard(p) {
   const dir = (p.dir || '').replace(/\\/g, '/');
   const p4 = p.p4client ? `<div class="p4">P4 client: ${esc(p.p4client)}</div>` : '';
+  const engineBadge = p.hasEngine ? ' <span class="badge" style="background:#2d4a2d;color:#4ec9b0">Engine</span>' : '';
   return `<div class="project-card" onclick="selectProject('${escAttr(dir)}')">
     <div style="flex:1">
-      <div class="name">${esc(p.name)}</div>
+      <div class="name">${esc(p.name)}${engineBadge}</div>
       <div class="path">${esc(dir)}</div>
       ${p4}
     </div>
