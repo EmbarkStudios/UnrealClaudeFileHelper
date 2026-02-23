@@ -524,32 +524,54 @@
     }
 
     async function stopAndRestartWatcher(btn) {
-      const status = document.getElementById('version-alert-status');
+      // Find the nearest status element — works from version alert or watcher card
+      const status = document.getElementById('version-alert-status')
+        || document.getElementById('watcher-restart-status')
+        || btn.parentElement?.querySelector('span');
+      const setStatus = msg => { if (status) status.textContent = msg; };
       btn.disabled = true;
       btn.textContent = 'Stopping watcher...';
-      status.textContent = '';
+      setStatus('');
       try {
-        await fetch('/api/watcher/stop', {
+        // Stop via setup-gui (uses direct PID kill — instant, no heartbeat delay)
+        const stopResp = await fetch('/api/watcher/stop', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ workspace: WorkspaceContext.active })
         });
-        status.textContent = 'Waiting for watcher to stop...';
-        let stopped = false;
-        for (let i = 0; i < 20; i++) {
-          await new Promise(r => setTimeout(r, 1000));
-          const sr = await WorkspaceContext.serviceFetch('/watcher-status');
-          const sd = await sr.json();
-          if (!sd.hasActiveWatcher) { stopped = true; break; }
+        const stopData = await stopResp.json();
+        const wasKilled = stopData.method === 'pid-kill';
+
+        // Brief wait for process to die (PID kill is ~instant, heartbeat needs longer)
+        const waitMs = wasKilled ? 1000 : 5000;
+        setStatus(wasKilled ? 'Process killed, starting new watcher...' : 'Waiting for watcher to stop...');
+        await new Promise(r => setTimeout(r, waitMs));
+
+        // If heartbeat-based, poll until the old watcher is gone
+        if (!wasKilled) {
+          let stopped = false;
+          for (let i = 0; i < 15; i++) {
+            try {
+              const sr = await WorkspaceContext.serviceFetch('/watcher-status');
+              const sd = await sr.json();
+              if (!sd.hasActiveWatcher) { stopped = true; break; }
+            } catch {
+              // Service unreachable — watcher is likely already gone
+              stopped = true; break;
+            }
+            await new Promise(r => setTimeout(r, 1000));
+          }
+          if (!stopped) {
+            setStatus('Watcher did not stop in time. Try closing it manually.');
+            btn.textContent = 'Restart Watcher';
+            btn.disabled = false;
+            return;
+          }
         }
-        if (!stopped) {
-          status.textContent = 'Watcher did not stop in time. Try closing it manually.';
-          btn.textContent = 'Restart Watcher';
-          btn.disabled = false;
-          return;
-        }
+
+        // Start a new watcher
         btn.textContent = 'Starting watcher...';
-        status.textContent = '';
+        setStatus('');
         const startResp = await fetch('/api/watcher/start', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -557,23 +579,27 @@
         });
         if (!startResp.ok) {
           const err = await startResp.json();
-          status.textContent = err.error || 'Failed to start watcher';
+          setStatus(err.error || 'Failed to start watcher');
           btn.textContent = 'Restart Watcher';
           btn.disabled = false;
           return;
         }
-        status.textContent = 'Waiting for new watcher...';
+        setStatus('Waiting for new watcher to connect...');
         for (let i = 0; i < 30; i++) {
           await new Promise(r => setTimeout(r, 2000));
-          const sr = await WorkspaceContext.serviceFetch('/watcher-status');
-          const sd = await sr.json();
-          if (sd.hasActiveWatcher) { loadAllWithOverview(); return; }
+          try {
+            const sr = await WorkspaceContext.serviceFetch('/watcher-status');
+            const sd = await sr.json();
+            if (sd.hasActiveWatcher) { loadAllWithOverview(); return; }
+          } catch {
+            // Service might still be starting — keep polling
+          }
         }
-        status.textContent = 'Watcher started but still reconciling. Refresh shortly.';
+        setStatus('Watcher started but still connecting. Refresh shortly.');
         btn.textContent = 'Restart Watcher';
         btn.disabled = false;
       } catch (err) {
-        status.textContent = 'Error: ' + err.message;
+        setStatus('Error: ' + err.message);
         btn.textContent = 'Restart Watcher';
         btn.disabled = false;
       }

@@ -20,6 +20,10 @@ const DOCKER_COMPOSE_PATH = join(ROOT, 'docker-compose.yml');
 const PUBLIC_DIR = join(ROOT, 'public');
 const PORT = parseInt(process.argv[2]) || 3846;
 
+// Track spawned watcher PIDs so we can kill them directly (no heartbeat delay)
+// Map<workspaceName, { pid: number, logFd: number }>
+const watcherProcesses = new Map();
+
 // ── Utilities ──────────────────────────────────────────────
 
 function fwd(path) {
@@ -1252,9 +1256,13 @@ route('POST', '/api/watcher/start', async (req, res) => {
     });
     child.on('exit', (code, signal) => {
       closeSync(logFd);
+      watcherProcesses.delete(wsName);
       console.error(`[Setup] Watcher for ${wsName} exited (code=${code}, signal=${signal})`);
     });
     child.unref();
+
+    // Track PID for direct kill on stop (no heartbeat delay)
+    watcherProcesses.set(wsName, { pid: child.pid, logFd });
     console.log(`[Setup] Started watcher for ${wsName} (PID ${child.pid}, port ${wsConfig.port}, log: ${logPath})`);
 
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -1291,7 +1299,7 @@ route('GET', '/api/watcher/logs/:workspace', async (req, res, params) => {
   }
 });
 
-// POST /api/watcher/stop — Stop watcher by signaling via service heartbeat
+// POST /api/watcher/stop — Stop watcher: direct PID kill (instant) with heartbeat fallback
 route('POST', '/api/watcher/stop', async (req, res) => {
   try {
     const body = await parseJsonBody(req);
@@ -1307,20 +1315,46 @@ route('POST', '/api/watcher/stop', async (req, res) => {
       return;
     }
 
-    const serviceUrl = `http://127.0.0.1:${wsConfig.port}`;
+    let method = 'none';
 
-    // Tell the service to signal watchers to shut down
-    // If a specific watcherId is provided, only stop that one; otherwise stop all
-    const resp = await fetch(`${serviceUrl}/internal/stop-watcher`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ watcherId: body.watcherId || undefined })
-    });
-    const data = await resp.json();
-    console.log(`[Setup] Watcher stop requested for ${wsName}: ${JSON.stringify(data)}`);
+    // Strategy 1: Direct PID kill (instant, works even if service is down)
+    const tracked = watcherProcesses.get(wsName);
+    if (tracked && !body.watcherId) {
+      try {
+        process.kill(tracked.pid, 'SIGTERM');
+        method = 'pid-kill';
+        console.log(`[Setup] Killed watcher for ${wsName} via PID ${tracked.pid}`);
+        watcherProcesses.delete(wsName);
+      } catch (err) {
+        // Process already dead or permission issue
+        console.warn(`[Setup] PID kill failed for ${wsName} (PID ${tracked.pid}): ${err.message}`);
+        watcherProcesses.delete(wsName);
+      }
+    }
+
+    // Strategy 2: Heartbeat-based shutdown (for watchers started outside setup-gui, or specific watcherId)
+    if (method === 'none' || body.watcherId) {
+      try {
+        const serviceUrl = `http://127.0.0.1:${wsConfig.port}`;
+        const resp = await fetch(`${serviceUrl}/internal/stop-watcher`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ watcherId: body.watcherId || undefined })
+        });
+        const data = await resp.json();
+        if (method === 'none') method = 'heartbeat';
+        console.log(`[Setup] Watcher stop requested for ${wsName} via heartbeat: ${JSON.stringify(data)}`);
+      } catch (err) {
+        // Service is down — if we already killed via PID that's fine
+        if (method === 'none') {
+          console.warn(`[Setup] Could not reach service for ${wsName} to stop watcher: ${err.message}`);
+          method = 'unreachable';
+        }
+      }
+    }
 
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ ok: true, workspace: wsName }));
+    res.end(JSON.stringify({ ok: true, workspace: wsName, method }));
   } catch (err) {
     res.writeHead(500, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: err.message }));

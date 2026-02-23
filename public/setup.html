@@ -588,8 +588,8 @@ async function deleteWorkspace(name) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ workspace: name })
       });
-      // Brief wait for the shutdown signal to reach the watcher via heartbeat
-      await new Promise(r => setTimeout(r, 2000));
+      // Brief wait for process to die (PID kill is instant, heartbeat fallback needs longer)
+      await new Promise(r => setTimeout(r, 1500));
     } catch { /* watcher may not be running, that's fine */ }
     const qs = result.deleteVolumes ? '?deleteVolumes=true' : '';
     await fetch(`/api/workspaces/${name}${qs}`, { method: 'DELETE' });
