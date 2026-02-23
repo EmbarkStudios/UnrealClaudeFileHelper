@@ -24,6 +24,39 @@ const PORT = parseInt(process.argv[2]) || 3846;
 // Map<workspaceName, { pid: number, logFd: number }>
 const watcherProcesses = new Map();
 
+/**
+ * Find and kill watcher-client.js processes for a workspace by scanning OS process list.
+ * This catches orphaned watchers that survived a setup-gui restart (detached processes
+ * whose PIDs we no longer track).
+ * Returns the number of processes killed.
+ */
+function killWatcherProcesses(workspaceName) {
+  let killed = 0;
+  try {
+    // wmic CSV format: "hostname,CommandLine,ProcessId" — PID is the last number on each line
+    const cmd = process.platform === 'win32'
+      ? 'wmic process where "name=\'node.exe\'" get ProcessId,CommandLine /format:csv 2>nul'
+      : 'ps aux';
+    const output = execSync(cmd, { encoding: 'utf-8', timeout: 5000, stdio: ['pipe', 'pipe', 'pipe'] });
+    const needle = `watcher-client.js --workspace ${workspaceName}`;
+    for (const line of output.split('\n')) {
+      if (!line.includes(needle)) continue;
+      // Extract PID: last number on the line (works for both wmic CSV and ps aux)
+      const pidMatch = line.match(/(\d+)\s*$/);
+      const pid = pidMatch ? parseInt(pidMatch[1], 10) : 0;
+      if (!pid || pid === process.pid) continue;
+      try {
+        process.kill(pid, 'SIGTERM');
+        killed++;
+        console.log(`[Setup] Killed orphan watcher for ${workspaceName} (PID ${pid})`);
+      } catch {}
+    }
+  } catch (err) {
+    console.warn(`[Setup] Process scan failed: ${err.message}`);
+  }
+  return killed;
+}
+
 // ── Utilities ──────────────────────────────────────────────
 
 function fwd(path) {
@@ -856,15 +889,13 @@ route('DELETE', '/api/workspaces/:name', async (req, res, params) => {
       return;
     }
 
-    // Kill the watcher before removing the container
+    // Kill the watcher before removing the container (tracked PIDs + orphan scan)
     const tracked = watcherProcesses.get(name);
     if (tracked) {
-      try {
-        process.kill(tracked.pid, 'SIGTERM');
-        console.log(`[Setup] Killed watcher for ${name} (PID ${tracked.pid}) before deleting workspace`);
-      } catch {}
+      try { process.kill(tracked.pid, 'SIGTERM'); } catch {}
       watcherProcesses.delete(name);
     }
+    killWatcherProcesses(name);
 
     // Stop and remove the Docker container before updating config
     try {
@@ -1214,25 +1245,25 @@ route('POST', '/api/docker/stop', async (req, res) => {
     const body = await parseJsonBody(req);
     const workspace = body.workspace;
 
-    // Kill the watcher first (instant via PID, no point keeping it running without a service)
+    // Kill watchers before stopping container (tracked PIDs + orphan scan)
     if (workspace) {
       const tracked = watcherProcesses.get(workspace);
       if (tracked) {
-        try {
-          process.kill(tracked.pid, 'SIGTERM');
-          console.log(`[Setup] Killed watcher for ${workspace} (PID ${tracked.pid}) before stopping container`);
-          watcherProcesses.delete(workspace);
-        } catch { watcherProcesses.delete(workspace); }
+        try { process.kill(tracked.pid, 'SIGTERM'); } catch {}
+        watcherProcesses.delete(workspace);
       }
+      killWatcherProcesses(workspace);
     } else {
-      // Stopping all containers — kill all tracked watchers
+      // Stopping all containers — kill all tracked watchers + scan for orphans
       for (const [ws, tracked] of watcherProcesses) {
-        try {
-          process.kill(tracked.pid, 'SIGTERM');
-          console.log(`[Setup] Killed watcher for ${ws} (PID ${tracked.pid}) before stopping container`);
-        } catch {}
+        try { process.kill(tracked.pid, 'SIGTERM'); } catch {}
       }
       watcherProcesses.clear();
+      // Read workspace names to scan for orphans
+      try {
+        const wsData = JSON.parse(readFileSync(WORKSPACES_PATH, 'utf-8'));
+        for (const ws of Object.keys(wsData.workspaces || {})) killWatcherProcesses(ws);
+      } catch {}
     }
 
     const service = workspace ? ` ${workspace}` : '';
@@ -1347,23 +1378,30 @@ route('POST', '/api/watcher/stop', async (req, res) => {
     }
 
     let method = 'none';
+    let killed = 0;
 
-    // Strategy 1: Direct PID kill (instant, works even if service is down)
+    // Strategy 1: Direct PID kill from tracked map (instant)
     const tracked = watcherProcesses.get(wsName);
     if (tracked && !body.watcherId) {
       try {
         process.kill(tracked.pid, 'SIGTERM');
+        killed++;
         method = 'pid-kill';
-        console.log(`[Setup] Killed watcher for ${wsName} via PID ${tracked.pid}`);
-        watcherProcesses.delete(wsName);
-      } catch (err) {
-        // Process already dead or permission issue
-        console.warn(`[Setup] PID kill failed for ${wsName} (PID ${tracked.pid}): ${err.message}`);
-        watcherProcesses.delete(wsName);
+        console.log(`[Setup] Killed watcher for ${wsName} via tracked PID ${tracked.pid}`);
+      } catch {}
+      watcherProcesses.delete(wsName);
+    }
+
+    // Strategy 2: Scan OS process list for orphan watchers (survives setup-gui restart)
+    if (!body.watcherId) {
+      const orphans = killWatcherProcesses(wsName);
+      if (orphans > 0) {
+        killed += orphans;
+        if (method === 'none') method = 'process-scan';
       }
     }
 
-    // Strategy 2: Heartbeat-based shutdown (for watchers started outside setup-gui, or specific watcherId)
+    // Strategy 3: Heartbeat-based shutdown (for specific watcherId, or as last resort)
     if (method === 'none' || body.watcherId) {
       try {
         const serviceUrl = `http://127.0.0.1:${wsConfig.port}`;
@@ -1376,7 +1414,6 @@ route('POST', '/api/watcher/stop', async (req, res) => {
         if (method === 'none') method = 'heartbeat';
         console.log(`[Setup] Watcher stop requested for ${wsName} via heartbeat: ${JSON.stringify(data)}`);
       } catch (err) {
-        // Service is down — if we already killed via PID that's fine
         if (method === 'none') {
           console.warn(`[Setup] Could not reach service for ${wsName} to stop watcher: ${err.message}`);
           method = 'unreachable';
@@ -1385,7 +1422,7 @@ route('POST', '/api/watcher/stop', async (req, res) => {
     }
 
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ ok: true, workspace: wsName, method }));
+    res.end(JSON.stringify({ ok: true, workspace: wsName, method, killed }));
   } catch (err) {
     res.writeHead(500, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: err.message }));
