@@ -25,6 +25,23 @@ const PORT = parseInt(process.argv[2]) || 3846;
 const watcherProcesses = new Map();
 
 /**
+ * Force-kill a process by PID. On Windows, uses taskkill /F which reliably
+ * terminates detached processes (process.kill + SIGTERM is unreliable on Windows).
+ */
+function killPid(pid) {
+  try {
+    if (process.platform === 'win32') {
+      execSync(`taskkill /F /PID ${pid} 2>nul`, { encoding: 'utf-8', timeout: 5000, stdio: 'pipe' });
+    } else {
+      process.kill(pid, 'SIGTERM');
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Find and kill watcher-client.js processes for a workspace by scanning OS process list.
  * This catches orphaned watchers that survived a setup-gui restart (detached processes
  * whose PIDs we no longer track).
@@ -45,11 +62,10 @@ function killWatcherProcesses(workspaceName) {
       const pidMatch = line.match(/(\d+)\s*$/);
       const pid = pidMatch ? parseInt(pidMatch[1], 10) : 0;
       if (!pid || pid === process.pid) continue;
-      try {
-        process.kill(pid, 'SIGTERM');
+      if (killPid(pid)) {
         killed++;
         console.log(`[Setup] Killed orphan watcher for ${workspaceName} (PID ${pid})`);
-      } catch {}
+      }
     }
   } catch (err) {
     console.warn(`[Setup] Process scan failed: ${err.message}`);
@@ -892,7 +908,7 @@ route('DELETE', '/api/workspaces/:name', async (req, res, params) => {
     // Kill the watcher before removing the container (tracked PIDs + orphan scan)
     const tracked = watcherProcesses.get(name);
     if (tracked) {
-      try { process.kill(tracked.pid, 'SIGTERM'); } catch {}
+      killPid(tracked.pid);
       watcherProcesses.delete(name);
     }
     killWatcherProcesses(name);
@@ -1249,14 +1265,14 @@ route('POST', '/api/docker/stop', async (req, res) => {
     if (workspace) {
       const tracked = watcherProcesses.get(workspace);
       if (tracked) {
-        try { process.kill(tracked.pid, 'SIGTERM'); } catch {}
+        killPid(tracked.pid);
         watcherProcesses.delete(workspace);
       }
       killWatcherProcesses(workspace);
     } else {
       // Stopping all containers — kill all tracked watchers + scan for orphans
       for (const [ws, tracked] of watcherProcesses) {
-        try { process.kill(tracked.pid, 'SIGTERM'); } catch {}
+        killPid(tracked.pid);
       }
       watcherProcesses.clear();
       // Read workspace names to scan for orphans
@@ -1383,12 +1399,11 @@ route('POST', '/api/watcher/stop', async (req, res) => {
     // Strategy 1: Direct PID kill from tracked map (instant)
     const tracked = watcherProcesses.get(wsName);
     if (tracked && !body.watcherId) {
-      try {
-        process.kill(tracked.pid, 'SIGTERM');
+      if (killPid(tracked.pid)) {
         killed++;
         method = 'pid-kill';
         console.log(`[Setup] Killed watcher for ${wsName} via tracked PID ${tracked.pid}`);
-      } catch {}
+      }
       watcherProcesses.delete(wsName);
     }
 
