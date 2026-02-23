@@ -20,7 +20,7 @@ Trigger this skill when:
 ## Prerequisites
 
 - **Node.js 20.18+** (22+ recommended) on Windows
-- **Docker Desktop** with WSL 2 backend
+- **Docker Engine** in WSL 2 (not Docker Desktop — no license needed)
 - **WSL 2** installed
 
 ### Auto-install missing prerequisites
@@ -33,43 +33,35 @@ wsl --status > /dev/null 2>&1 || powershell.exe -Command "Start-Process wsl -Arg
 ```
 Tell the user a **reboot is required** after WSL installation, then re-run `/embark-claude-index:setup`.
 
-#### If Docker is missing:
-Check if Docker Desktop is installed:
-```bash
-powershell.exe -Command "Get-Command 'C:\Program Files\Docker\Docker\Docker Desktop.exe' -ErrorAction SilentlyContinue && echo 'DOCKER_INSTALLED' || echo 'DOCKER_NOT_INSTALLED'"
-```
-
-If not installed, install it via winget:
-```bash
-powershell.exe -Command "winget install -e --id Docker.DockerDesktop --accept-source-agreements --accept-package-agreements"
-```
-
-If winget is not available, download and run the installer:
-```bash
-curl -Lo "$USERPROFILE/Downloads/DockerDesktopInstaller.exe" "https://desktop.docker.com/win/main/amd64/Docker%20Desktop%20Installer.exe" && powershell.exe -Command "Start-Process '$env:USERPROFILE\Downloads\DockerDesktopInstaller.exe' -ArgumentList 'install','--quiet','--accept-license' -Verb RunAs -Wait"
-```
-
-After installation, tell the user to:
-1. **Launch Docker Desktop** (it may auto-start, or find it in the Start menu)
-2. Wait for Docker Desktop to finish starting (the whale icon in the system tray stops animating)
-3. Then continue setup
-
-#### If Docker is installed but not available in WSL:
+#### If Docker is missing in WSL:
+Check if Docker is available:
 ```bash
 wsl -- bash -c 'docker compose version 2>/dev/null && echo "DOCKER_OK" || echo "DOCKER_MISSING"'
 ```
 
-If `DOCKER_MISSING` but Docker Desktop is installed:
-1. Start Docker Desktop if not running:
-   ```bash
-   powershell.exe -Command "Start-Process 'C:\Program Files\Docker\Docker\Docker Desktop.exe'"
-   ```
-2. Wait for it to start (poll until docker responds):
-   ```bash
-   for i in $(seq 1 60); do wsl -- bash -c 'docker info > /dev/null 2>&1' && echo "DOCKER_READY" && break || sleep 2; done
-   ```
-3. If still not working, enable WSL integration:
-   - Tell the user: Open Docker Desktop → Settings → Resources → WSL Integration → Enable for your distro → Apply & Restart
+If `DOCKER_MISSING`, install Docker Engine directly in WSL (no Docker Desktop needed):
+```bash
+wsl -- bash -c 'sudo apt-get update && sudo apt-get install -y ca-certificates curl && sudo install -m 0755 -d /etc/apt/keyrings && sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc && sudo chmod a+r /etc/apt/keyrings/docker.asc && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo $VERSION_CODENAME) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null && sudo apt-get update && sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin'
+```
+
+After installation, start the Docker daemon and add the user to the docker group:
+```bash
+wsl -- bash -c 'sudo usermod -aG docker $USER && sudo service docker start'
+```
+
+**Note:** The `usermod` change requires a new WSL session. Run:
+```bash
+wsl --shutdown
+```
+Then re-run the setup. The agent should verify docker works after restart:
+```bash
+wsl -- bash -c 'docker run --rm hello-world 2>/dev/null && echo "DOCKER_OK" || (sudo service docker start && docker run --rm hello-world 2>/dev/null && echo "DOCKER_OK" || echo "DOCKER_FAILED")'
+```
+
+#### If Docker daemon is not running (docker installed but commands fail):
+```bash
+wsl -- bash -c 'sudo service docker start'
+```
 
 #### If Node.js is missing or too old:
 ```bash
@@ -168,7 +160,7 @@ Tell the user:
 
 ### Docker Issues
 
-- **"docker compose" not found in WSL**: Install Docker Desktop with WSL 2 backend, or install Docker Engine in WSL (`sudo apt install docker.io docker-compose-v2`)
+- **"docker compose" not found in WSL**: Install Docker Engine in WSL — re-run `/embark-claude-index:setup` and it will install automatically
 - **Container exits immediately**: Check logs with `docker compose logs <workspace-name>` — usually a config syntax error or port conflict
 - **Out of memory**: Increase Docker/WSL memory limit, or reduce memory limit per workspace in the setup GUI
 - **First build is slow**: Normal — Go compiles Zoekt from source (3-5 min). Cached on subsequent builds
