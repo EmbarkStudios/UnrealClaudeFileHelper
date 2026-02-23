@@ -109,6 +109,10 @@ try {
 try {
   watcherGitHash = execSync('git rev-parse --short HEAD', { cwd: join(import.meta.dirname, '..', '..'), encoding: 'utf-8' }).trim();
 } catch {}
+let watcherGitTimestamp = 0;
+try {
+  watcherGitTimestamp = parseInt(execSync('git log -1 --format=%ct HEAD', { cwd: join(import.meta.dirname, '..', '..'), encoding: 'utf-8' }).trim(), 10) || 0;
+} catch {}
 let totalFilesIngested = 0;
 let totalAssetsIngested = 0;
 let totalDeletes = 0;
@@ -116,6 +120,10 @@ let totalErrors = 0;
 let lastIngestTimestamp = null;
 let lastReconcileTimestamp = null;
 let nextReconcileTimestamp = null;
+
+// Per-project scan progress (sent in heartbeat for dashboard display)
+// { "ProjectName": { phase, discovered, processed, language } }
+let scanProgress = {};
 
 // --- Utility functions ---
 
@@ -392,10 +400,13 @@ async function reconcile(project) {
 
     if (changed.length === 0 && deleted.length === 0) {
       console.log(`${logPrefix} ${project.name}: up to date (${diskFiles.length} files, scan ${collectMs}ms)`);
+      scanProgress[project.name] = { phase: 'watching', discovered: diskFiles.length, processed: diskFiles.length, language };
       continue;
     }
 
     console.log(`${logPrefix} ${project.name}: ${changed.length} changed, ${deleted.length} deleted (of ${diskFiles.length} on disk, scan ${collectMs}ms)`);
+
+    scanProgress[project.name] = { phase: 'reconciling', discovered: changed.length, processed: 0, language };
 
     // Step 4: Send deletes
     if (deleted.length > 0) {
@@ -416,6 +427,7 @@ async function reconcile(project) {
         if (assets.length > 0) {
           await postJson(`${SERVICE_URL}/internal/ingest`, { assets });
         }
+        scanProgress[project.name].processed = i + batch.length;
         if ((i + batch.length) % 5000 < BATCH_SIZE * 10) {
           console.log(`${logPrefix} ${project.name}: ${i + batch.length}/${changed.length} assets reconciled`);
         }
@@ -441,12 +453,15 @@ async function reconcile(project) {
           pendingPost = null;
         }
 
+        scanProgress[project.name].processed = i + batch.length;
         if ((i + batch.length) % 500 < BATCH_SIZE) {
           console.log(`${logPrefix} ${project.name}: ${i + batch.length}/${changed.length} files reconciled`);
         }
       }
       if (pendingPost) await pendingPost;
     }
+
+    scanProgress[project.name].phase = 'watching';
   }
 }
 
@@ -466,6 +481,8 @@ async function fullScan(languages) {
       const collectMs = (performance.now() - collectStart).toFixed(0);
       console.log(`${logPrefix} Collected ${files.length} files from ${project.name} (${collectMs}ms)`);
 
+      scanProgress[project.name] = { phase: 'scanning', discovered: files.length, processed: 0, language: project.language };
+
       if (project.language === 'content') {
         // Asset batches
         for (let i = 0; i < files.length; i += BATCH_SIZE * 10) {
@@ -477,6 +494,7 @@ async function fullScan(languages) {
           if (assets.length > 0) {
             await postJson(`${SERVICE_URL}/internal/ingest`, { assets });
           }
+          scanProgress[project.name].processed = i + batch.length;
           if ((i + batch.length) % 5000 < BATCH_SIZE * 10) {
             console.log(`${logPrefix} ${project.name}: ${i + batch.length}/${files.length} assets`);
           }
@@ -501,12 +519,15 @@ async function fullScan(languages) {
             pendingPost = null;
           }
 
+          scanProgress[project.name].processed = i + batch.length;
           if ((i + batch.length) % 500 < BATCH_SIZE) {
             console.log(`${logPrefix} ${project.name}: ${i + batch.length}/${files.length} files`);
           }
         }
         if (pendingPost) await pendingPost;
       }
+
+      scanProgress[project.name].phase = 'done';
     }
   }
 
@@ -651,6 +672,7 @@ async function main() {
         watcherId,
         version: watcherVersion,
         gitHash: watcherGitHash,
+        gitTimestamp: watcherGitTimestamp,
         startedAt: startupTimestamp,
         watchedPaths: config.projects.reduce((n, p) => n + p.paths.length, 0),
         projects: config.projects.map(p => ({
@@ -668,7 +690,8 @@ async function main() {
         reconciliation: {
           lastRunAt: lastReconcileTimestamp,
           nextRunAt: nextReconcileTimestamp
-        }
+        },
+        scanProgress
       });
 
       // Check if service requested shutdown (e.g. Restart All from dashboard)
@@ -727,6 +750,15 @@ async function main() {
     }
     const reconcileS = ((performance.now() - reconcileStart) / 1000).toFixed(1);
     console.log(`${logPrefix} Reconciliation complete (${reconcileS}s)`);
+  }
+
+  // Mark all projects as watching now that initial scan/reconcile is done
+  for (const project of config.projects) {
+    if (!scanProgress[project.name]) {
+      scanProgress[project.name] = { phase: 'watching', discovered: 0, processed: 0, language: project.language };
+    } else if (scanProgress[project.name].phase === 'done') {
+      scanProgress[project.name].phase = 'watching';
+    }
   }
 
   let activeWatcher = startWatcher();

@@ -20,6 +20,59 @@ const DOCKER_COMPOSE_PATH = join(ROOT, 'docker-compose.yml');
 const PUBLIC_DIR = join(ROOT, 'public');
 const PORT = parseInt(process.argv[2]) || 3846;
 
+// Track spawned watcher PIDs so we can kill them directly (no heartbeat delay)
+// Map<workspaceName, { pid: number, logFd: number }>
+const watcherProcesses = new Map();
+
+/**
+ * Force-kill a process by PID. On Windows, uses taskkill /F which reliably
+ * terminates detached processes (process.kill + SIGTERM is unreliable on Windows).
+ */
+function killPid(pid) {
+  try {
+    if (process.platform === 'win32') {
+      execSync(`taskkill /F /PID ${pid} 2>nul`, { encoding: 'utf-8', timeout: 5000, stdio: 'pipe' });
+    } else {
+      process.kill(pid, 'SIGTERM');
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Find and kill watcher-client.js processes for a workspace by scanning OS process list.
+ * This catches orphaned watchers that survived a setup-gui restart (detached processes
+ * whose PIDs we no longer track).
+ * Returns the number of processes killed.
+ */
+function killWatcherProcesses(workspaceName) {
+  let killed = 0;
+  try {
+    // wmic CSV format: "hostname,CommandLine,ProcessId" — PID is the last number on each line
+    const cmd = process.platform === 'win32'
+      ? 'wmic process where "name=\'node.exe\'" get ProcessId,CommandLine /format:csv 2>nul'
+      : 'ps aux';
+    const output = execSync(cmd, { encoding: 'utf-8', timeout: 5000, stdio: ['pipe', 'pipe', 'pipe'] });
+    const needle = `watcher-client.js --workspace ${workspaceName}`;
+    for (const line of output.split('\n')) {
+      if (!line.includes(needle)) continue;
+      // Extract PID: last number on the line (works for both wmic CSV and ps aux)
+      const pidMatch = line.match(/(\d+)\s*$/);
+      const pid = pidMatch ? parseInt(pidMatch[1], 10) : 0;
+      if (!pid || pid === process.pid) continue;
+      if (killPid(pid)) {
+        killed++;
+        console.log(`[Setup] Killed orphan watcher for ${workspaceName} (PID ${pid})`);
+      }
+    }
+  } catch (err) {
+    console.warn(`[Setup] Process scan failed: ${err.message}`);
+  }
+  return killed;
+}
+
 // ── Utilities ──────────────────────────────────────────────
 
 function fwd(path) {
@@ -852,6 +905,14 @@ route('DELETE', '/api/workspaces/:name', async (req, res, params) => {
       return;
     }
 
+    // Kill the watcher before removing the container (tracked PIDs + orphan scan)
+    const tracked = watcherProcesses.get(name);
+    if (tracked) {
+      killPid(tracked.pid);
+      watcherProcesses.delete(name);
+    }
+    killWatcherProcesses(name);
+
     // Stop and remove the Docker container before updating config
     try {
       if (process.platform === 'win32') {
@@ -1122,19 +1183,23 @@ route('POST', '/api/docker/build', (req, res) => {
 
   const wslRoot = fwd(ROOT).replace(/^([A-Za-z]):/, (_, d) => `/mnt/${d.toLowerCase()}`);
 
-  // Resolve git hash at build time for version tracking inside the container
+  // Resolve git hash and timestamp at build time for version tracking inside the container
   let gitHash = 'unknown';
   try {
     gitHash = execSync('git rev-parse --short HEAD', { cwd: ROOT, encoding: 'utf-8', timeout: 5000 }).trim();
+  } catch {}
+  let gitTimestamp = '0';
+  try {
+    gitTimestamp = execSync('git log -1 --format=%ct HEAD', { cwd: ROOT, encoding: 'utf-8', timeout: 5000 }).trim();
   } catch {}
 
   // Use spawn to bypass cmd.exe shell interpretation on Windows
   // (cmd.exe splits on && inside single quotes, breaking the bash command)
   let child;
   if (process.platform === 'win32') {
-    child = spawn('wsl', ['--', 'bash', '-c', `cd "${wslRoot}" && docker compose build --build-arg BUILD_GIT_HASH=${gitHash} 2>&1`]);
+    child = spawn('wsl', ['--', 'bash', '-c', `cd "${wslRoot}" && docker compose build --build-arg BUILD_GIT_HASH=${gitHash} --build-arg BUILD_GIT_TIMESTAMP=${gitTimestamp} 2>&1`]);
   } else {
-    child = spawn('docker', ['compose', 'build', '--build-arg', `BUILD_GIT_HASH=${gitHash}`], { cwd: ROOT });
+    child = spawn('docker', ['compose', 'build', '--build-arg', `BUILD_GIT_HASH=${gitHash}`, '--build-arg', `BUILD_GIT_TIMESTAMP=${gitTimestamp}`], { cwd: ROOT });
   }
 
   child.stdout?.on('data', data => {
@@ -1190,11 +1255,32 @@ route('POST', '/api/docker/start', async (req, res) => {
   }
 });
 
-// POST /api/docker/stop — Stop workspace container(s)
+// POST /api/docker/stop — Stop workspace container(s) and their watchers
 route('POST', '/api/docker/stop', async (req, res) => {
   try {
     const body = await parseJsonBody(req);
     const workspace = body.workspace;
+
+    // Kill watchers before stopping container (tracked PIDs + orphan scan)
+    if (workspace) {
+      const tracked = watcherProcesses.get(workspace);
+      if (tracked) {
+        killPid(tracked.pid);
+        watcherProcesses.delete(workspace);
+      }
+      killWatcherProcesses(workspace);
+    } else {
+      // Stopping all containers — kill all tracked watchers + scan for orphans
+      for (const [ws, tracked] of watcherProcesses) {
+        killPid(tracked.pid);
+      }
+      watcherProcesses.clear();
+      // Read workspace names to scan for orphans
+      try {
+        const wsData = JSON.parse(readFileSync(WORKSPACES_PATH, 'utf-8'));
+        for (const ws of Object.keys(wsData.workspaces || {})) killWatcherProcesses(ws);
+      } catch {}
+    }
 
     const service = workspace ? ` ${workspace}` : '';
 
@@ -1248,9 +1334,13 @@ route('POST', '/api/watcher/start', async (req, res) => {
     });
     child.on('exit', (code, signal) => {
       closeSync(logFd);
+      watcherProcesses.delete(wsName);
       console.error(`[Setup] Watcher for ${wsName} exited (code=${code}, signal=${signal})`);
     });
     child.unref();
+
+    // Track PID for direct kill on stop (no heartbeat delay)
+    watcherProcesses.set(wsName, { pid: child.pid, logFd });
     console.log(`[Setup] Started watcher for ${wsName} (PID ${child.pid}, port ${wsConfig.port}, log: ${logPath})`);
 
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -1287,7 +1377,7 @@ route('GET', '/api/watcher/logs/:workspace', async (req, res, params) => {
   }
 });
 
-// POST /api/watcher/stop — Stop watcher by signaling via service heartbeat
+// POST /api/watcher/stop — Stop watcher: direct PID kill (instant) with heartbeat fallback
 route('POST', '/api/watcher/stop', async (req, res) => {
   try {
     const body = await parseJsonBody(req);
@@ -1303,19 +1393,51 @@ route('POST', '/api/watcher/stop', async (req, res) => {
       return;
     }
 
-    const serviceUrl = `http://127.0.0.1:${wsConfig.port}`;
+    let method = 'none';
+    let killed = 0;
 
-    // Tell the service to signal watchers to shut down
-    const resp = await fetch(`${serviceUrl}/internal/stop-watcher`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({})
-    });
-    const data = await resp.json();
-    console.log(`[Setup] Watcher stop requested for ${wsName}: ${JSON.stringify(data)}`);
+    // Strategy 1: Direct PID kill from tracked map (instant)
+    const tracked = watcherProcesses.get(wsName);
+    if (tracked && !body.watcherId) {
+      if (killPid(tracked.pid)) {
+        killed++;
+        method = 'pid-kill';
+        console.log(`[Setup] Killed watcher for ${wsName} via tracked PID ${tracked.pid}`);
+      }
+      watcherProcesses.delete(wsName);
+    }
+
+    // Strategy 2: Scan OS process list for orphan watchers (survives setup-gui restart)
+    if (!body.watcherId) {
+      const orphans = killWatcherProcesses(wsName);
+      if (orphans > 0) {
+        killed += orphans;
+        if (method === 'none') method = 'process-scan';
+      }
+    }
+
+    // Strategy 3: Heartbeat-based shutdown (for specific watcherId, or as last resort)
+    if (method === 'none' || body.watcherId) {
+      try {
+        const serviceUrl = `http://127.0.0.1:${wsConfig.port}`;
+        const resp = await fetch(`${serviceUrl}/internal/stop-watcher`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ watcherId: body.watcherId || undefined })
+        });
+        const data = await resp.json();
+        if (method === 'none') method = 'heartbeat';
+        console.log(`[Setup] Watcher stop requested for ${wsName} via heartbeat: ${JSON.stringify(data)}`);
+      } catch (err) {
+        if (method === 'none') {
+          console.warn(`[Setup] Could not reach service for ${wsName} to stop watcher: ${err.message}`);
+          method = 'unreachable';
+        }
+      }
+    }
 
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ ok: true, workspace: wsName }));
+    res.end(JSON.stringify({ ok: true, workspace: wsName, method, killed }));
   } catch (err) {
     res.writeHead(500, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: err.message }));
