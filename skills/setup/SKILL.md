@@ -34,12 +34,23 @@ wsl --status > /dev/null 2>&1 || powershell.exe -Command "Start-Process wsl -Arg
 Tell the user a **reboot is required** after WSL installation, then re-run `/embark-claude-index:setup`.
 
 #### If Docker is missing in WSL:
-Check if Docker is available:
+
+Check Docker engine and Compose plugin **separately** to determine what's needed:
 ```bash
-wsl -- bash -c 'docker compose version 2>/dev/null && echo "DOCKER_OK" || echo "DOCKER_MISSING"'
+wsl -- bash -c 'docker --version 2>/dev/null && echo "DOCKER_ENGINE_OK" || echo "DOCKER_ENGINE_MISSING"'
+wsl -- bash -c 'docker compose version 2>/dev/null && echo "COMPOSE_OK" || echo "COMPOSE_MISSING"'
 ```
 
-If `DOCKER_MISSING`, install Docker Engine directly in WSL (no Docker Desktop needed):
+**Scenario A — Only Compose plugin missing** (Docker engine already installed, e.g. via Ubuntu's `docker.io` package):
+
+Install the Compose v2 plugin to the user's home directory (**no sudo required**):
+```bash
+wsl -- bash -c 'mkdir -p ~/.docker/cli-plugins && curl -SL "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64" -o ~/.docker/cli-plugins/docker-compose && chmod +x ~/.docker/cli-plugins/docker-compose && docker compose version'
+```
+
+**Scenario B — Docker engine is also missing** (neither `docker` nor `docker compose` available):
+
+Install Docker Engine from Docker's official repos. **Note:** These commands require `sudo`, which will prompt for a password. In non-interactive shells (like Claude Code's Bash tool), `sudo` will hang indefinitely. If the commands appear to hang, **tell the user to run them manually in a WSL terminal**:
 ```bash
 wsl -- bash -c 'sudo apt-get update && sudo apt-get install -y ca-certificates curl && sudo install -m 0755 -d /etc/apt/keyrings && sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc && sudo chmod a+r /etc/apt/keyrings/docker.asc && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo $VERSION_CODENAME) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null && sudo apt-get update && sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin'
 ```
@@ -55,10 +66,17 @@ wsl --shutdown
 ```
 Then re-run the setup. The agent should verify docker works after restart:
 ```bash
-wsl -- bash -c 'docker run --rm hello-world 2>/dev/null && echo "DOCKER_OK" || (sudo service docker start && docker run --rm hello-world 2>/dev/null && echo "DOCKER_OK" || echo "DOCKER_FAILED")'
+wsl -- bash -c 'docker compose version 2>/dev/null && echo "DOCKER_OK" || echo "DOCKER_FAILED"'
 ```
 
 #### If Docker daemon is not running (docker installed but commands fail):
+
+Check if the daemon is running first:
+```bash
+wsl -- bash -c 'docker info >/dev/null 2>&1 && echo "DAEMON_OK" || echo "DAEMON_NOT_RUNNING"'
+```
+
+If not running, start it (**requires sudo** — tell the user to run manually if this hangs):
 ```bash
 wsl -- bash -c 'sudo service docker start'
 ```
