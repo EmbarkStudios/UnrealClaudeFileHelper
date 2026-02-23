@@ -856,6 +856,16 @@ route('DELETE', '/api/workspaces/:name', async (req, res, params) => {
       return;
     }
 
+    // Kill the watcher before removing the container
+    const tracked = watcherProcesses.get(name);
+    if (tracked) {
+      try {
+        process.kill(tracked.pid, 'SIGTERM');
+        console.log(`[Setup] Killed watcher for ${name} (PID ${tracked.pid}) before deleting workspace`);
+      } catch {}
+      watcherProcesses.delete(name);
+    }
+
     // Stop and remove the Docker container before updating config
     try {
       if (process.platform === 'win32') {
@@ -1198,11 +1208,32 @@ route('POST', '/api/docker/start', async (req, res) => {
   }
 });
 
-// POST /api/docker/stop — Stop workspace container(s)
+// POST /api/docker/stop — Stop workspace container(s) and their watchers
 route('POST', '/api/docker/stop', async (req, res) => {
   try {
     const body = await parseJsonBody(req);
     const workspace = body.workspace;
+
+    // Kill the watcher first (instant via PID, no point keeping it running without a service)
+    if (workspace) {
+      const tracked = watcherProcesses.get(workspace);
+      if (tracked) {
+        try {
+          process.kill(tracked.pid, 'SIGTERM');
+          console.log(`[Setup] Killed watcher for ${workspace} (PID ${tracked.pid}) before stopping container`);
+          watcherProcesses.delete(workspace);
+        } catch { watcherProcesses.delete(workspace); }
+      }
+    } else {
+      // Stopping all containers — kill all tracked watchers
+      for (const [ws, tracked] of watcherProcesses) {
+        try {
+          process.kill(tracked.pid, 'SIGTERM');
+          console.log(`[Setup] Killed watcher for ${ws} (PID ${tracked.pid}) before stopping container`);
+        } catch {}
+      }
+      watcherProcesses.clear();
+    }
 
     const service = workspace ? ` ${workspace}` : '';
 
