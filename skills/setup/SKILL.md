@@ -21,13 +21,61 @@ Trigger this skill when:
 
 - **Node.js 20.18+** (22+ recommended) on Windows
 - **Docker Desktop** with WSL 2 backend
+- **WSL 2** installed
 
-Verify Docker is available:
+### Auto-install missing prerequisites
+
+The agent should **automatically fix** missing prerequisites rather than just reporting them. Follow these steps in order:
+
+#### If WSL is missing:
+```bash
+wsl --status > /dev/null 2>&1 || powershell.exe -Command "Start-Process wsl -ArgumentList '--install' -Verb RunAs -Wait"
+```
+Tell the user a **reboot is required** after WSL installation, then re-run `/embark-claude-index:setup`.
+
+#### If Docker is missing:
+Check if Docker Desktop is installed:
+```bash
+powershell.exe -Command "Get-Command 'C:\Program Files\Docker\Docker\Docker Desktop.exe' -ErrorAction SilentlyContinue && echo 'DOCKER_INSTALLED' || echo 'DOCKER_NOT_INSTALLED'"
+```
+
+If not installed, install it via winget:
+```bash
+powershell.exe -Command "winget install -e --id Docker.DockerDesktop --accept-source-agreements --accept-package-agreements"
+```
+
+If winget is not available, download and run the installer:
+```bash
+curl -Lo "$USERPROFILE/Downloads/DockerDesktopInstaller.exe" "https://desktop.docker.com/win/main/amd64/Docker%20Desktop%20Installer.exe" && powershell.exe -Command "Start-Process '$env:USERPROFILE\Downloads\DockerDesktopInstaller.exe' -ArgumentList 'install','--quiet','--accept-license' -Verb RunAs -Wait"
+```
+
+After installation, tell the user to:
+1. **Launch Docker Desktop** (it may auto-start, or find it in the Start menu)
+2. Wait for Docker Desktop to finish starting (the whale icon in the system tray stops animating)
+3. Then continue setup
+
+#### If Docker is installed but not available in WSL:
 ```bash
 wsl -- bash -c 'docker compose version 2>/dev/null && echo "DOCKER_OK" || echo "DOCKER_MISSING"'
 ```
 
-If `DOCKER_MISSING`, the user must install Docker Desktop first.
+If `DOCKER_MISSING` but Docker Desktop is installed:
+1. Start Docker Desktop if not running:
+   ```bash
+   powershell.exe -Command "Start-Process 'C:\Program Files\Docker\Docker\Docker Desktop.exe'"
+   ```
+2. Wait for it to start (poll until docker responds):
+   ```bash
+   for i in $(seq 1 60); do wsl -- bash -c 'docker info > /dev/null 2>&1' && echo "DOCKER_READY" && break || sleep 2; done
+   ```
+3. If still not working, enable WSL integration:
+   - Tell the user: Open Docker Desktop → Settings → Resources → WSL Integration → Enable for your distro → Apply & Restart
+
+#### If Node.js is missing or too old:
+```bash
+powershell.exe -Command "winget install -e --id OpenJS.NodeJS.LTS --accept-source-agreements --accept-package-agreements"
+```
+Tell the user to **restart their terminal** after Node.js installation.
 
 ---
 
