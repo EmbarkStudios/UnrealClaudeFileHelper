@@ -1,5 +1,24 @@
+# Dev overlay for live reload during development.
+#
+# Usage: docker compose -f docker-compose.yml -f docker-compose.dev.yml up <workspace-name>
+#
+# The service name below must match a workspace name in your generated docker-compose.yml.
+# For example, if your workspace is named "discovery":
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up discovery
+#
+# To use with a different workspace, either:
+#   1. Duplicate the block below with your workspace name, or
+#   2. Use the workspace name directly — Compose merges by service name
+#
+# Example for a workspace named "my-project":
+#   services:
+#     my-project:
+#       volumes: [same as below]
+#       ports: ["6070:6070"]
+#       command: ["node", "--watch", "src/service/index.js"]
+
 services:
-  unreal-index:
+  discovery:
     volumes:
       - ./src:/app/src:ro
       - ./public:/app/public:ro
