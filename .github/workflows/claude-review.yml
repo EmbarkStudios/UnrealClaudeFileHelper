@@ -7,30 +7,13 @@ on:
 jobs:
   review:
     if: github.event.pull_request.draft == false
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: write
-      issues: write
-      id-token: write
-      actions: read
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-
-      - name: Run Claude PR Review
-        uses: anthropics/claude-code-action@v1
-        with:
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          claude_args: "--model sonnet"
-          prompt: |
-            Review this PR. Focus on:
-            - Code quality and potential bugs
-            - Security issues
-            - Test coverage gaps
-            Approve the PR if everything looks good, or request changes if there are issues.
-          additional_permissions: |
-            actions: read
-            pull-requests: write
+    uses: EmbarkStudios/johlander-claude-workflows/.github/workflows/claude-code-review.yml@main
+    with:
+      review_prompt: |
+        Review this PR. Focus on:
+        - Code quality and potential bugs
+        - Security issues
+        - Test coverage gaps
+        Approve the PR if everything looks good, or request changes if there are issues.
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
