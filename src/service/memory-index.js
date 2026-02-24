@@ -73,7 +73,7 @@ export class MemoryIndex {
 
     // Stats counters
     this._stats = {
-      totalFiles: 0, totalTypes: 0, totalMembers: 0, totalAssets: 0,
+      totalFiles: 0, totalTypes: 0, totalMembers: 0, totalAssets: 0, blueprintCount: 0,
       byKind: {}, byMemberKind: {}, byLanguage: {}, projects: {}
     };
 
@@ -348,6 +348,7 @@ export class MemoryIndex {
     this._addToMultiMap(this.assetsByFolder, rec.folder, rec.id);
     this._addToMultiMap(this.assetsByProject, rec.project, rec.id);
     this._stats.totalAssets++;
+    if (rec.parentClass) this._stats.blueprintCount++;
   }
 
   _removeAssetRecord(assetId) {
@@ -361,6 +362,7 @@ export class MemoryIndex {
     this._removeFromMultiMap(this.assetsByFolder, rec.folder, assetId);
     this._removeFromMultiMap(this.assetsByProject, rec.project, assetId);
     this._stats.totalAssets--;
+    if (rec.parentClass) this._stats.blueprintCount--;
   }
 
   _buildTrigramIndexes() {
@@ -1376,34 +1378,12 @@ export class MemoryIndex {
       totalFiles: this._stats.totalFiles,
       totalTypes: this._stats.totalTypes,
       totalMembers: this._stats.totalMembers,
+      totalAssets: this._stats.totalAssets,
+      blueprintCount: this._stats.blueprintCount,
       byKind: { ...this._stats.byKind },
       byMemberKind: { ...this._stats.byMemberKind },
       byLanguage: { ...this._stats.byLanguage },
       projects: { ...this._stats.projects }
-    };
-  }
-
-  getAssetStats() {
-    const byProject = new Map();
-    const byExtension = new Map();
-    const byAssetClass = new Map();
-    let blueprintCount = 0;
-
-    for (const [, a] of this.assetsById) {
-      byProject.set(a.project, (byProject.get(a.project) || 0) + 1);
-      byExtension.set(a.extension, (byExtension.get(a.extension) || 0) + 1);
-      const cls = a.assetClass || 'Unknown';
-      byAssetClass.set(cls, (byAssetClass.get(cls) || 0) + 1);
-      if (a.parentClass) blueprintCount++;
-    }
-
-    return {
-      total: this.assetsById.size,
-      byProject: [...byProject.entries()].map(([project, count]) => ({ project, count })),
-      byExtension: [...byExtension.entries()].map(([extension, count]) => ({ extension, count })),
-      byAssetClass: [...byAssetClass.entries()].map(([asset_class, count]) => ({ asset_class, count }))
-        .sort((a, b) => b.count - a.count),
-      blueprintCount
     };
   }
 
@@ -1484,6 +1464,7 @@ export class MemoryIndex {
       totalTypes: this.typesById.size,
       totalMembers: this.membersById.size,
       totalAssets: this.assetsById.size,
+      blueprintCount: 0,
       byKind: {},
       byMemberKind: {},
       byLanguage: {},
@@ -1511,6 +1492,11 @@ export class MemoryIndex {
     // Member stats
     for (const [, m] of this.membersById) {
       this._stats.byMemberKind[m.memberKind] = (this._stats.byMemberKind[m.memberKind] || 0) + 1;
+    }
+
+    // Asset stats
+    for (const [, a] of this.assetsById) {
+      if (a.parentClass) this._stats.blueprintCount++;
     }
   }
 

@@ -184,7 +184,7 @@ async function main() {
   // Asset searches
   console.log('\n  --- Asset Searches ---');
   await runBenchmark('/find-asset exact', '/find-asset?name=BP_&fuzzy=true&maxResults=20');
-  await runBenchmark('/asset-stats', '/asset-stats');
+  // /asset-stats removed — asset counts now in /stats
 
   // Grep (trigram index)
   console.log('\n  --- Content Search (Grep) ---');

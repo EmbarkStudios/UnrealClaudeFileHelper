@@ -17,8 +17,7 @@ const ALLOWED_METHODS = new Set([
   'listModules',
   'browseAssetFolder',
   'listAssetFolders',
-  'getStats',
-  'getAssetStats'
+  'getStats'
 ]);
 
 parentPort.on('message', (msg) => {

@@ -323,7 +323,7 @@ describe('findTypeByName with Blueprint assets', () => {
   });
 });
 
-describe('getAssetStats with Blueprint info', () => {
+describe('getStats includes asset counts', () => {
   let db;
 
   before(() => {
@@ -343,11 +343,9 @@ describe('getAssetStats with Blueprint info', () => {
     teardown();
   });
 
-  it('reports asset class breakdown', () => {
-    const stats = db.getAssetStats();
-    assert.equal(stats.total, 3);
+  it('reports totalAssets and blueprintCount in getStats', () => {
+    const stats = db.getStats();
+    assert.equal(stats.totalAssets, 3);
     assert.equal(stats.blueprintCount, 2);
-    assert.ok(stats.byAssetClass.some(r => r.asset_class === 'BlueprintGeneratedClass' && r.count === 2));
-    assert.ok(stats.byAssetClass.some(r => r.asset_class === 'Material' && r.count === 1));
   });
 });

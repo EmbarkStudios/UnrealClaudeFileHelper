@@ -1385,13 +1385,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
     }
   });
 
-  app.get('/asset-stats', (req, res) => {
-    try {
-      res.json((memoryIndex && memoryIndex.isLoaded) ? memoryIndex.getAssetStats() : database.getAssetStats());
-    } catch (err) {
-      res.status(500).json({ error: err.message });
-    }
-  });
+  // /asset-stats removed — asset counts folded into /stats (totalAssets, blueprintCount)
 
   // --- Query Analytics ---
 

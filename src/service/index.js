@@ -292,7 +292,6 @@ class UnrealIndexService {
 
   printIndexSummary() {
     const stats = this.database.getStats();
-    const assetStats = this.database.getAssetStats();
 
     console.log('--- Index Summary ---');
     for (const [lang, langStats] of Object.entries(stats.byLanguage)) {
@@ -304,9 +303,9 @@ class UnrealIndexService {
       }
     }
 
-    if (assetStats.total > 0) {
-      const bpCount = assetStats.blueprintCount || 0;
-      console.log(`  assets: ${assetStats.total} files (${bpCount} with class hierarchy)`);
+    if (stats.totalAssets > 0) {
+      const bpCount = stats.blueprintCount || 0;
+      console.log(`  assets: ${stats.totalAssets} files (${bpCount} with class hierarchy)`);
     }
 
     const kindEntries = Object.entries(stats.byKind);
