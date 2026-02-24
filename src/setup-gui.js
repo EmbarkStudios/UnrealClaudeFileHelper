@@ -699,6 +699,29 @@ route('GET', '/api/prerequisites', (req, res) => {
   res.end(JSON.stringify(prereqs));
 });
 
+// Fetch watcher status from a running workspace service
+async function fetchWatcherStatus(port) {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 3000);
+    const resp = await fetch(`http://127.0.0.1:${port}/watcher-status`, { signal: controller.signal });
+    clearTimeout(timeout);
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    const activeWatchers = (data.watchers || []).filter(w => w.status === 'active');
+    const w = activeWatchers[0];
+    if (!w) return { hasActiveWatcher: false };
+    const progress = w.progress || {};
+    return {
+      hasActiveWatcher: true,
+      phase: progress.phase || 'unknown',
+      projectProgress: progress.projectProgress || [],
+    };
+  } catch {
+    return null;
+  }
+}
+
 // GET /api/workspaces — Load workspaces + per-workspace configs + live status
 route('GET', '/api/workspaces', async (req, res) => {
   let wsConfig = loadWorkspacesConfig();
@@ -711,6 +734,7 @@ route('GET', '/api/workspaces', async (req, res) => {
 
   const result = { ...wsConfig };
   // Enrich each workspace with config, status, and memory info
+  const watcherFetches = [];
   for (const [name, ws] of Object.entries(result.workspaces)) {
     ws.config = loadWorkspaceConfig(name);
     const status = checkService(name);
@@ -720,6 +744,16 @@ route('GET', '/api/workspaces', async (req, res) => {
     ws.memLimit = status.memLimit || null;
     ws.memPercent = status.memPercent || null;
     ws.computedMemLimitGB = getWorkspaceMemoryLimitGB(wsConfig, name);
+    // Fetch watcher status for running workspaces
+    if (ws.running) {
+      watcherFetches.push(
+        fetchWatcherStatus(ws.port).then(watcherStatus => { ws.watcherStatus = watcherStatus; })
+      );
+    }
+  }
+  // Await all watcher status fetches (with overall timeout)
+  if (watcherFetches.length > 0) {
+    await Promise.allSettled(watcherFetches);
   }
 
   res.writeHead(200, { 'Content-Type': 'application/json' });
