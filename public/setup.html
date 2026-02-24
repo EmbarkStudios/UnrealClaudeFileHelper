@@ -713,7 +713,7 @@ async function loadWorkspaces() {
             ${ws.running
               ? `<a class="btn btn-primary btn-sm" href="/index.html" onclick="WorkspaceContext.onSelect('${escAttr(name)}')">Dashboard</a>
                  <button class="btn btn-secondary btn-sm" onclick="stopWorkspace('${esc(name)}', this)">Stop</button>`
-              : `<button class="btn btn-success btn-sm" onclick="startWorkspace('${esc(name)}', this)">Start</button>
+              : `<button class="btn btn-success btn-sm" data-workspace="${escAttr(name)}" onclick="startWorkspace('${esc(name)}', this)">Start</button>
                  <span class="ws-start-error error-msg" style="font-size:12px"></span>`}
             <button class="btn btn-secondary btn-sm" onclick="rebuildWorkspace('${esc(name)}')">Rebuild</button>
             <button class="btn btn-secondary btn-sm" onclick="viewWorkspaceLogs('${esc(name)}')">Logs</button>
@@ -811,10 +811,10 @@ async function startWorkspace(name, btn, opts) {
       btn.textContent = 'Start';
       btn.disabled = false;
       const c = data.portConflicts[0];
-      const procInfo = c.process ? `${esc(c.process)} (PID ${c.pid})` : 'unknown process';
-      statusEl.innerHTML = `Port ${c.port} is in use by ${procInfo}. `
-        + `<button class="btn btn-danger btn-sm" onclick="startWorkspace('${escAttr(name)}', this.closest('.ws-actions').querySelector('.btn-success, .btn-primary'), {killConflicts:true})" style="margin-left:4px">Kill &amp; Start</button> `
-        + `<button class="btn btn-secondary btn-sm" onclick="startWorkspace('${escAttr(name)}', this.closest('.ws-actions').querySelector('.btn-success, .btn-primary'), {force:true})" style="margin-left:4px">Start Anyway</button>`;
+      const procInfo = c.process ? `${esc(c.process)} (PID ${esc(String(c.pid))})` : 'unknown process';
+      statusEl.innerHTML = `Port ${esc(String(c.port))} is in use by ${procInfo}. `
+        + `<button class="btn btn-danger btn-sm" onclick="startWorkspace('${escAttr(name)}', document.querySelector('[data-workspace=&quot;${escAttr(name)}&quot;]'), {killConflicts:true})" style="margin-left:4px">Kill &amp; Start</button> `
+        + `<button class="btn btn-secondary btn-sm" onclick="startWorkspace('${escAttr(name)}', document.querySelector('[data-workspace=&quot;${escAttr(name)}&quot;]'), {force:true})" style="margin-left:4px">Start Anyway</button>`;
       return;
     }
 
@@ -828,8 +828,8 @@ async function startWorkspace(name, btn, opts) {
         const port = portMatch ? portMatch[1] : null;
         if (port) {
           statusEl.innerHTML = `Port ${esc(port)} is in use. `
-            + `<button class="btn btn-danger btn-sm" onclick="startWorkspace('${escAttr(name)}', this.closest('.ws-actions').querySelector('.btn-success, .btn-primary'), {killConflicts:true})" style="margin-left:4px">Kill &amp; Start</button> `
-            + `<button class="btn btn-secondary btn-sm" onclick="startWorkspace('${escAttr(name)}', this.closest('.ws-actions').querySelector('.btn-success, .btn-primary'), {force:true})" style="margin-left:4px">Start Anyway</button>`;
+            + `<button class="btn btn-danger btn-sm" onclick="startWorkspace('${escAttr(name)}', document.querySelector('[data-workspace=&quot;${escAttr(name)}&quot;]'), {killConflicts:true})" style="margin-left:4px">Kill &amp; Start</button> `
+            + `<button class="btn btn-secondary btn-sm" onclick="startWorkspace('${escAttr(name)}', document.querySelector('[data-workspace=&quot;${escAttr(name)}&quot;]'), {force:true})" style="margin-left:4px">Start Anyway</button>`;
         } else {
           statusEl.textContent = errMsg;
         }
@@ -1057,8 +1057,8 @@ function startAfterRebuild(name, opts) {
     // Proactive port conflict detection
     if (data.portConflicts && data.portConflicts.length > 0) {
       const c = data.portConflicts[0];
-      const procInfo = c.process ? `${esc(c.process)} (PID ${c.pid})` : 'unknown process';
-      status.innerHTML = `Port ${c.port} is in use by ${procInfo}. `
+      const procInfo = c.process ? `${esc(c.process)} (PID ${esc(String(c.pid))})` : 'unknown process';
+      status.innerHTML = `Port ${esc(String(c.port))} is in use by ${procInfo}. `
         + `<button class="btn btn-danger btn-sm" onclick="startAfterRebuild('${escAttr(name)}', {killConflicts:true})" style="margin-left:4px">Kill &amp; Start</button> `
         + `<button class="btn btn-secondary btn-sm" onclick="startAfterRebuild('${escAttr(name)}', {force:true})" style="margin-left:4px">Start Anyway</button>`;
       return;
@@ -1833,10 +1833,11 @@ async function startContainer(opts) {
     // Proactive port conflict detection
     if (data.portConflicts && data.portConflicts.length > 0) {
       const c = data.portConflicts[0];
-      const procInfo = c.process ? `${esc(c.process)} (PID ${c.pid})` : 'unknown process';
-      status.innerHTML = `<span class="error-msg">Port ${c.port} is in use by ${procInfo}.</span> `
+      const procInfo = c.process ? `${esc(c.process)} (PID ${esc(String(c.pid))})` : 'unknown process';
+      status.innerHTML = `<span class="error-msg">Port ${esc(String(c.port))} is in use by ${procInfo}.</span> `
         + `<button class="btn btn-danger btn-sm" onclick="startContainer({killConflicts:true})">Kill &amp; Start</button> `
         + `<button class="btn btn-secondary btn-sm" onclick="startContainer({force:true})">Start Anyway</button>`;
+      btn.textContent = 'Start Container';
       btn.disabled = false;
       return;
     }

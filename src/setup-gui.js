@@ -1277,8 +1277,8 @@ route('POST', '/api/docker/start', async (req, res) => {
           for (const c of conflicts) {
             try { killPort(c.port); } catch { /* best effort */ }
           }
-          // Brief wait for ports to free up
-          await new Promise(r => setTimeout(r, 500));
+          // Wait for ports to free up (WSL processes can take time to release)
+          await new Promise(r => setTimeout(r, 1000));
         } else {
           // Return conflicts so the frontend can offer kill/force options
           res.writeHead(200, { 'Content-Type': 'application/json' });
