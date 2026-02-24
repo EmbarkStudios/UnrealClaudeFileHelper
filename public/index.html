@@ -37,7 +37,7 @@
     .btn-primary { padding: 6px 16px; background: #0e639c; color: #fff; border: none; border-radius: 3px; cursor: pointer; font-size: 12px; }
     .btn-primary:hover { background: #1177bb; }
     .btn-primary:disabled { background: #333; color: #666; cursor: default; }
-    .version-alert-status { font-size: 12px; color: #808080; }
+
     .overview-bar { display: flex; gap: 16px; margin-bottom: 20px; }
     .overview-item { flex: 1; background: #252526; border: 1px solid #3e3e3e; border-radius: 6px; padding: 14px 16px; display: flex; align-items: center; gap: 12px; }
     .overview-dot { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; }
@@ -442,8 +442,7 @@
           `Service (${serviceGitHash}) \u00b7 Watcher (${watcherGitHash})`;
         const actionsEl = document.getElementById('version-alert-actions');
         actionsEl.innerHTML = `
-          <button class="btn-primary" onclick="overviewRestartWatcher(this)">Restart Watcher</button>
-          <span class="version-alert-status" id="version-alert-status"></span>`;
+          <button class="btn-primary" onclick="overviewRestartWatcher(this)">Restart Watcher</button>`;
       } else {
         versionAlert.classList.remove('visible');
       }
@@ -508,18 +507,25 @@
     }
 
     async function overviewRestartWatcher(btn) {
+      const originalText = btn.textContent;
       btn.disabled = true;
       btn.textContent = 'Restarting...';
       try {
-        await fetch('/api/watcher/stop', {
+        const stopResp = await fetch('/api/watcher/stop', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ workspace: WorkspaceContext.active })
         });
+        if (!stopResp.ok) {
+          const data = await stopResp.json().catch(() => ({}));
+          btn.textContent = data.error || 'Stop failed';
+          setTimeout(() => { btn.textContent = originalText; btn.disabled = false; }, 5000);
+          return;
+        }
         const stopped = await waitForWatcherState(false, { maxAttempts: 20, intervalMs: 1000 });
         if (!stopped) {
           btn.textContent = 'Stop timed out';
-          setTimeout(() => { btn.textContent = 'Restart'; btn.disabled = false; }, 5000);
+          setTimeout(() => { btn.textContent = originalText; btn.disabled = false; }, 5000);
           return;
         }
         const startResp = await fetch('/api/watcher/start', {
@@ -528,9 +534,9 @@
           body: JSON.stringify({ workspace: WorkspaceContext.active })
         });
         if (!startResp.ok) {
-          const data = await startResp.json();
+          const data = await startResp.json().catch(() => ({}));
           btn.textContent = data.error || 'Failed';
-          setTimeout(() => { btn.textContent = 'Restart'; btn.disabled = false; }, 5000);
+          setTimeout(() => { btn.textContent = originalText; btn.disabled = false; }, 5000);
           return;
         }
         const started = await waitForWatcherState(true);
@@ -538,11 +544,11 @@
           loadAllWithOverview();
         } else {
           btn.textContent = 'Timed out';
-          setTimeout(() => { btn.textContent = 'Restart'; btn.disabled = false; }, 5000);
+          setTimeout(() => { btn.textContent = originalText; btn.disabled = false; }, 5000);
         }
       } catch (err) {
         btn.textContent = 'Error';
-        setTimeout(() => { btn.textContent = 'Restart'; btn.disabled = false; }, 5000);
+        setTimeout(() => { btn.textContent = originalText; btn.disabled = false; }, 5000);
       }
     }
 
