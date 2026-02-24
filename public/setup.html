@@ -793,7 +793,7 @@ async function loadWorkspaces() {
   }
 }
 
-async function startWorkspace(name, btn) {
+async function startWorkspace(name, btn, opts) {
   btn.disabled = true;
   btn.textContent = 'Starting...';
   const statusEl = btn.parentElement.querySelector('.ws-start-error');
@@ -802,19 +802,34 @@ async function startWorkspace(name, btn) {
     const resp = await fetch('/api/docker/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ workspace: name }),
+      body: JSON.stringify({ workspace: name, ...opts }),
     });
     const data = await resp.json();
+
+    // Proactive port conflict detection
+    if (data.portConflicts && data.portConflicts.length > 0 && statusEl) {
+      btn.textContent = 'Start';
+      btn.disabled = false;
+      const c = data.portConflicts[0];
+      const procInfo = c.process ? `${esc(c.process)} (PID ${c.pid})` : 'unknown process';
+      statusEl.innerHTML = `Port ${c.port} is in use by ${procInfo}. `
+        + `<button class="btn btn-danger btn-sm" onclick="startWorkspace('${escAttr(name)}', this.closest('.ws-actions').querySelector('.btn-success, .btn-primary'), {killConflicts:true})" style="margin-left:4px">Kill &amp; Start</button> `
+        + `<button class="btn btn-secondary btn-sm" onclick="startWorkspace('${escAttr(name)}', this.closest('.ws-actions').querySelector('.btn-success, .btn-primary'), {force:true})" style="margin-left:4px">Start Anyway</button>`;
+      return;
+    }
+
     if (!resp.ok || !data.ok) {
       btn.textContent = 'Start';
       btn.disabled = false;
       const errMsg = data.error || 'Failed to start container';
-      // Detect port conflict and offer to kill the blocking process
+      // Fallback: detect port conflict from Docker error
       if (errMsg.includes('address already in use') && statusEl) {
         const portMatch = errMsg.match(/host port for [^:]*:(\d+)/);
         const port = portMatch ? portMatch[1] : null;
         if (port) {
-          statusEl.innerHTML = `Port ${esc(port)} is in use. <button class="btn btn-danger btn-sm" onclick="killPortProcess(${port}, '${escAttr(name)}', this)" style="margin-left:4px">Kill blocking process</button>`;
+          statusEl.innerHTML = `Port ${esc(port)} is in use. `
+            + `<button class="btn btn-danger btn-sm" onclick="startWorkspace('${escAttr(name)}', this.closest('.ws-actions').querySelector('.btn-success, .btn-primary'), {killConflicts:true})" style="margin-left:4px">Kill &amp; Start</button> `
+            + `<button class="btn btn-secondary btn-sm" onclick="startWorkspace('${escAttr(name)}', this.closest('.ws-actions').querySelector('.btn-success, .btn-primary'), {force:true})" style="margin-left:4px">Start Anyway</button>`;
         } else {
           statusEl.textContent = errMsg;
         }
@@ -831,43 +846,6 @@ async function startWorkspace(name, btn) {
     btn.disabled = false;
     if (statusEl) statusEl.textContent = err.message;
     else alert('Start error: ' + err.message);
-  }
-}
-
-async function killPortProcess(port, workspaceName, btn) {
-  btn.disabled = true;
-  btn.textContent = 'Killing...';
-  try {
-    // Check what's on the port first
-    const checkResp = await fetch(`/api/port-check/${port}`);
-    const checkData = await checkResp.json();
-    if (!checkData.inUse) {
-      btn.parentElement.innerHTML = '<span class="success-msg">Port is free now.</span>';
-      return;
-    }
-    // Kill it
-    const killResp = await fetch('/api/port-kill', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ port }),
-    });
-    const killData = await killResp.json();
-    if (killData.ok) {
-      const procInfo = checkData.process ? ` (${checkData.process} PID ${checkData.pid})` : '';
-      btn.parentElement.innerHTML = `<span class="success-msg">Killed process${esc(procInfo)}. Retrying...</span>`;
-      // Auto-retry starting the workspace
-      setTimeout(() => {
-        const startBtn = btn.closest('.ws-actions')?.querySelector('.btn-success');
-        if (startBtn) startWorkspace(workspaceName, startBtn);
-        else loadWorkspaces();
-      }, 1500);
-    } else {
-      btn.textContent = 'Failed';
-      btn.disabled = false;
-    }
-  } catch (err) {
-    btn.textContent = 'Error';
-    btn.disabled = false;
   }
 }
 
@@ -1063,22 +1041,36 @@ async function rebuildWorkspace(name) {
 
   buildDocker(terminal, status, (success) => {
     if (success) {
-      status.textContent = 'Restarting container...';
-      fetch('/api/docker/start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ workspace: name }),
-      }).then(resp => resp.json()).then(data => {
-        if (data.ok) {
-          status.innerHTML = '<span class="success-msg">Rebuilt and started!</span>';
-          setTimeout(loadWorkspaces, 3000);
-        } else {
-          status.textContent = 'Start failed: ' + (data.error || 'unknown');
-        }
-      }).catch(err => {
-        status.textContent = 'Start error: ' + err.message;
-      });
+      startAfterRebuild(name);
     }
+  });
+}
+
+function startAfterRebuild(name, opts) {
+  const status = document.getElementById('ws-rebuild-status-' + name);
+  status.textContent = 'Restarting container...';
+  fetch('/api/docker/start', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ workspace: name, ...opts }),
+  }).then(resp => resp.json()).then(data => {
+    // Proactive port conflict detection
+    if (data.portConflicts && data.portConflicts.length > 0) {
+      const c = data.portConflicts[0];
+      const procInfo = c.process ? `${esc(c.process)} (PID ${c.pid})` : 'unknown process';
+      status.innerHTML = `Port ${c.port} is in use by ${procInfo}. `
+        + `<button class="btn btn-danger btn-sm" onclick="startAfterRebuild('${escAttr(name)}', {killConflicts:true})" style="margin-left:4px">Kill &amp; Start</button> `
+        + `<button class="btn btn-secondary btn-sm" onclick="startAfterRebuild('${escAttr(name)}', {force:true})" style="margin-left:4px">Start Anyway</button>`;
+      return;
+    }
+    if (data.ok) {
+      status.innerHTML = '<span class="success-msg">Rebuilt and started!</span>';
+      setTimeout(loadWorkspaces, 3000);
+    } else {
+      status.textContent = 'Start failed: ' + (data.error || 'unknown');
+    }
+  }).catch(err => {
+    status.textContent = 'Start error: ' + err.message;
   });
 }
 
@@ -1824,7 +1816,7 @@ function buildDocker(terminalEl, statusEl, onDone) {
 
 // ── Start container ────────────────────────────────────
 
-async function startContainer() {
+async function startContainer(opts) {
   const btn = document.getElementById('start-btn');
   const status = document.getElementById('start-status');
   btn.disabled = true;
@@ -1834,18 +1826,33 @@ async function startContainer() {
     const resp = await fetch('/api/docker/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ workspace: wizardData.workspaceName }),
+      body: JSON.stringify({ workspace: wizardData.workspaceName, ...opts }),
     });
     const data = await resp.json();
+
+    // Proactive port conflict detection
+    if (data.portConflicts && data.portConflicts.length > 0) {
+      const c = data.portConflicts[0];
+      const procInfo = c.process ? `${esc(c.process)} (PID ${c.pid})` : 'unknown process';
+      status.innerHTML = `<span class="error-msg">Port ${c.port} is in use by ${procInfo}.</span> `
+        + `<button class="btn btn-danger btn-sm" onclick="startContainer({killConflicts:true})">Kill &amp; Start</button> `
+        + `<button class="btn btn-secondary btn-sm" onclick="startContainer({force:true})">Start Anyway</button>`;
+      btn.disabled = false;
+      return;
+    }
+
     if (data.ok) {
       status.innerHTML = `<span class="success-msg">Started! <a href="/index.html" onclick="WorkspaceContext.onSelect('${escAttr(wizardData.workspaceName)}')" style="color:#569cd6">Open Dashboard</a></span>`;
     } else {
       const errMsg = data.error || 'unknown';
+      // Fallback: detect port conflict from Docker error
       if (errMsg.includes('address already in use')) {
         const portMatch = errMsg.match(/host port for [^:]*:(\d+)/);
         const port = portMatch ? portMatch[1] : null;
         if (port) {
-          status.innerHTML = `<span class="error-msg">Port ${esc(port)} is in use.</span> <button class="btn btn-danger btn-sm" onclick="killPortAndRetryWizard(${port})">Kill blocking process & retry</button>`;
+          status.innerHTML = `<span class="error-msg">Port ${esc(port)} is in use.</span> `
+            + `<button class="btn btn-danger btn-sm" onclick="startContainer({killConflicts:true})">Kill &amp; Start</button> `
+            + `<button class="btn btn-secondary btn-sm" onclick="startContainer({force:true})">Start Anyway</button>`;
         } else {
           status.textContent = 'Failed: ' + errMsg;
         }
@@ -1857,27 +1864,6 @@ async function startContainer() {
   } catch (err) {
     status.textContent = 'Error: ' + err.message;
     btn.disabled = false;
-  }
-}
-
-async function killPortAndRetryWizard(port) {
-  const status = document.getElementById('start-status');
-  status.innerHTML = '<span class="scan-spinner"></span> Killing process...';
-  try {
-    const checkResp = await fetch(`/api/port-check/${port}`);
-    const checkData = await checkResp.json();
-    if (checkData.inUse) {
-      await fetch('/api/port-kill', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ port }),
-      });
-      const procInfo = checkData.process ? ` (${checkData.process} PID ${checkData.pid})` : '';
-      status.innerHTML = `<span class="success-msg">Killed${esc(procInfo)}. Retrying...</span>`;
-    }
-    setTimeout(startContainer, 1500);
-  } catch (err) {
-    status.innerHTML = `<span class="error-msg">Failed to kill process: ${esc(err.message)}</span>`;
   }
 }
 
