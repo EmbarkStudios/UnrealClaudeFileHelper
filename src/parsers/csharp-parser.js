@@ -21,7 +21,6 @@ export function parseCSharpContent(content, filePath = '') {
   let braceDepth = 0;
   let typeStartDepth = 0;
   let inEnum = false;
-  let currentNamespace = null;
   let pendingAttributes = [];
 
   for (let i = 0; i < lines.length; i++) {
@@ -61,7 +60,6 @@ export function parseCSharpContent(content, filePath = '') {
     // File-scoped namespace: namespace X.Y;
     const fileScopedNs = trimmed.match(/^\s*namespace\s+([\w.]+)\s*;/);
     if (fileScopedNs) {
-      currentNamespace = fileScopedNs[1];
       braceDepth += braceDelta;
       pendingAttributes = [];
       continue;
@@ -70,7 +68,6 @@ export function parseCSharpContent(content, filePath = '') {
     // Block namespace: namespace X.Y { }
     const blockNs = trimmed.match(/^\s*namespace\s+([\w.]+)/);
     if (blockNs && !fileScopedNs) {
-      currentNamespace = blockNs[1];
       braceDepth += braceDelta;
       pendingAttributes = [];
       continue;
@@ -348,8 +345,19 @@ function countBraces(line) {
   let inString = false;
   let stringChar = '';
   let isVerbatim = false;
+  let inBlockComment = false;
   for (let i = 0; i < line.length; i++) {
     const ch = line[i];
+
+    // Inside block comment — look for */
+    if (inBlockComment) {
+      if (ch === '*' && i + 1 < line.length && line[i + 1] === '/') {
+        inBlockComment = false;
+        i++; // skip /
+      }
+      continue;
+    }
+
     if (inString) {
       if (isVerbatim) {
         // Verbatim string @"..." — "" escapes a quote, no backslash escaping
@@ -367,16 +375,26 @@ function countBraces(line) {
       if (ch === stringChar) inString = false;
       continue;
     }
+    // Verbatim string: @"..." (also handles @$"..." combination)
     if (ch === '@' && i + 1 < line.length && line[i + 1] === '"') {
       inString = true;
       isVerbatim = true;
+      stringChar = '"';
+      i++; // skip the quote
+    // Interpolated string: $"..." — treat as regular string (braces inside are ignored)
+    } else if (ch === '$' && i + 1 < line.length && line[i + 1] === '"') {
+      inString = true;
+      isVerbatim = false;
       stringChar = '"';
       i++; // skip the quote
     } else if (ch === '"' || ch === '\'') {
       inString = true;
       stringChar = ch;
     } else if (ch === '/' && i + 1 < line.length && line[i + 1] === '/') {
-      break;
+      break; // line comment — rest of line is ignored
+    } else if (ch === '/' && i + 1 < line.length && line[i + 1] === '*') {
+      inBlockComment = true;
+      i++; // skip *
     } else if (ch === '{') {
       delta++;
     } else if (ch === '}') {

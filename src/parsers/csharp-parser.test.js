@@ -213,6 +213,32 @@ public class Builder
     assert.equal(result.delegates[0].name, 'BuildCompleted');
   });
 
+  it('handles interpolated strings with braces correctly', () => {
+    const content = `
+public class InterpolatedTest
+{
+    public string GetMsg(string name) => $"Hello {name}!";
+    public int Count;
+}`;
+    const result = parseCSharpContent(content, 'test.cs');
+    assert.equal(result.classes.length, 1);
+    const count = result.members.find(m => m.name === 'Count');
+    assert.ok(count, 'Count field should be parsed after interpolated string member');
+  });
+
+  it('handles inline block comments with braces correctly', () => {
+    const content = `
+public class BlockCommentTest
+{
+    int x = 1; /* { extra brace */
+    public int Count;
+}`;
+    const result = parseCSharpContent(content, 'test.cs');
+    assert.equal(result.classes.length, 1);
+    const count = result.members.find(m => m.name === 'Count');
+    assert.ok(count, 'Count field should be parsed despite block comment braces');
+  });
+
   it('handles verbatim strings with braces correctly', () => {
     const content = `
 public class VerbatimTest
