@@ -6,3 +6,5 @@ workspaces.json
 workspace-configs/*.json
 !workspace-configs/.gitkeep
 docker-compose.yml
+install-docker.sh
+install-docker.bat
