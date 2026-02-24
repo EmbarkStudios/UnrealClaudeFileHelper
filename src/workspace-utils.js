@@ -20,11 +20,9 @@ export function getWslRoot(rootDir) {
 export function loadWorkspacesConfig(rootDir) {
   const wsPath = join(rootDir, 'workspaces.json');
   if (!existsSync(wsPath)) return null;
-  try {
-    return JSON.parse(readFileSync(wsPath, 'utf-8'));
-  } catch {
-    return null;
-  }
+  // Let JSON parse errors propagate so callers can distinguish
+  // "file missing" (null) from "file has syntax errors" (thrown error).
+  return JSON.parse(readFileSync(wsPath, 'utf-8'));
 }
 
 export function ensureWorkspacesDefaults(wsConfig) {

@@ -47,7 +47,11 @@ function findUProjectFile(dir) {
 // Thin wrappers around workspace-utils.js that bind ROOT and add caching.
 
 function loadWorkspacesConfig() {
-  return _loadWorkspacesConfig(ROOT);
+  try {
+    return _loadWorkspacesConfig(ROOT);
+  } catch {
+    return null;
+  }
 }
 
 function saveWorkspacesConfig(wsConfig) {

@@ -18,7 +18,7 @@
 import { writeFileSync, existsSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { execFileSync, execSync } from 'child_process';
+import { execFileSync } from 'child_process';
 
 import {
   loadWorkspacesConfig,
@@ -46,6 +46,7 @@ function fatal(msg) {
   console.error(`${RED}ERROR${RESET} ${msg}`);
   process.exit(1);
 }
+function error(msg) { console.error(`${RED}ERROR${RESET} ${msg}`); }
 function warn(msg) { console.warn(`${YELLOW}WARN${RESET}  ${msg}`); }
 function info(msg) { console.log(`${DIM}INFO${RESET}  ${msg}`); }
 function ok(msg) { console.log(`${GREEN}OK${RESET}    ${msg}`); }
@@ -82,21 +83,20 @@ function checkDocker() {
     }
   }
   try {
-    execSync('docker compose version', { stdio: ['pipe', 'pipe', 'pipe'], timeout: 5000 });
+    execFileSync('docker', ['compose', 'version'], { stdio: ['pipe', 'pipe', 'pipe'], timeout: 5000 });
     return { ok: true, via: 'native' };
   } catch {
     return { ok: false, error: 'Docker Compose not available. Install Docker.' };
   }
 }
 
-function runDockerCompose(args) {
+function runDockerCompose(composeArgs) {
   if (process.platform === 'win32') {
-    const wslRoot = getWslRoot(ROOT);
     return execFileSync('wsl', [
-      '--', 'bash', '-c', `cd "${wslRoot}" && docker compose ${args} 2>&1`,
-    ], { encoding: 'utf-8', timeout: 120000 });
+      '--', 'docker', 'compose', ...composeArgs,
+    ], { encoding: 'utf-8', timeout: 120000, cwd: ROOT });
   }
-  return execSync(`docker compose ${args}`, {
+  return execFileSync('docker', ['compose', ...composeArgs], {
     cwd: ROOT, encoding: 'utf-8', timeout: 120000,
   });
 }
@@ -131,10 +131,11 @@ async function checkHealth(wsConfig, workspaceNames) {
 
 function formatUptime(seconds) {
   if (seconds == null) return '-';
-  if (seconds < 60) return `${seconds}s`;
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
-  const h = Math.floor(seconds / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
+  const s = Math.floor(seconds);
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ${s % 60}s`;
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
   return `${h}h ${m}m`;
 }
 
@@ -177,7 +178,7 @@ async function cmdValidate(wsConfig, options) {
   // Validate workspace configs
   const configIssues = validateWorkspaceConfigs(wsConfig);
   for (const issue of configIssues) {
-    if (issue.level === 'error') { warn(issue.message); hasErrors = true; }
+    if (issue.level === 'error') { error(issue.message); hasErrors = true; }
     else { warn(issue.message); }
   }
   if (configIssues.length === 0) ok('All workspace configs present');
@@ -201,7 +202,7 @@ async function cmdStart(wsConfig, targetWorkspaces, options) {
   const configIssues = validateWorkspaceConfigs(wsConfig);
   let hasErrors = false;
   for (const issue of configIssues) {
-    if (issue.level === 'error') { warn(issue.message); hasErrors = true; }
+    if (issue.level === 'error') { error(issue.message); hasErrors = true; }
     else { warn(issue.message); }
   }
 
@@ -230,11 +231,10 @@ async function cmdStart(wsConfig, targetWorkspaces, options) {
   if (!docker.ok) fatal(docker.error);
 
   // Start containers
-  const serviceArg = targetWorkspaces.join(' ');
   info(`Starting: ${targetWorkspaces.join(', ')}...`);
 
   try {
-    const output = runDockerCompose(`up -d ${serviceArg}`);
+    const output = runDockerCompose(['up', '-d', ...targetWorkspaces]);
     if (options.verbose) log(output);
   } catch (err) {
     fatal(`docker compose up failed:\n${err.stderr || err.stdout || err.message}`);
@@ -308,7 +308,12 @@ ${BOLD}Options:${RESET}
   }
 
   // Load workspaces.json
-  const wsConfig = loadWorkspacesConfig(ROOT);
+  let wsConfig;
+  try {
+    wsConfig = loadWorkspacesConfig(ROOT);
+  } catch (err) {
+    fatal(`workspaces.json has invalid JSON: ${err.message}`);
+  }
   if (!wsConfig) {
     fatal('workspaces.json not found. Run "npm run setup" first to configure workspaces.');
   }
