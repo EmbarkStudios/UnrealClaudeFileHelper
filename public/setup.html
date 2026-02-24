@@ -99,10 +99,23 @@
 
   <!-- Prerequisites -->
   <div class="card" id="prereqs-card">
-    <h2>Prerequisites</h2>
-    <div id="prereqs-status">
-      <div class="prereq-item"><span class="scan-spinner"></span> Checking Docker...</div>
+    <div class="card-header">
+      <h2 style="margin-bottom:0">Prerequisites <span id="prereqs-summary" style="font-size:12px;color:#888;font-weight:normal;margin-left:8px"></span></h2>
+      <button class="btn btn-secondary btn-sm" onclick="recheckPrereqs()">Re-check</button>
     </div>
+    <div id="prereqs-status">
+      <div class="prereq-item"><span class="scan-spinner"></span> Checking prerequisites...</div>
+    </div>
+    <div id="prereqs-message" style="display:none;margin-top:10px;padding:8px 12px;border-radius:4px;font-size:13px"></div>
+  </div>
+
+  <!-- Auto-start -->
+  <div class="card" id="autostart-card">
+    <div class="card-header">
+      <h2 style="margin-bottom:0">Dashboard Auto-start</h2>
+      <button class="btn btn-secondary btn-sm" id="autostart-btn" onclick="toggleAutostart()" disabled>Loading...</button>
+    </div>
+    <div id="autostart-status" style="font-size:13px;color:#888">Checking auto-start status...</div>
   </div>
 
   <!-- Workspace Overview -->
@@ -110,7 +123,7 @@
     <div class="card">
       <div class="card-header">
         <h2 style="margin-bottom:0">Workspaces</h2>
-        <button class="btn btn-primary" onclick="startWizard()">Add Workspace</button>
+        <button class="btn btn-primary" id="add-workspace-btn" onclick="startWizard()">Add Workspace</button>
       </div>
       <div id="workspaces-list">
         <div class="info-msg">Loading...</div>
@@ -333,18 +346,284 @@ function resetCurrent() {
 
 // ── Prerequisites ──────────────────────────────────────
 
+let _prereqData = null;
+
 async function checkPrereqs() {
   try {
     const resp = await fetch('/api/prerequisites');
     const data = await resp.json();
-    const el = document.getElementById('prereqs-status');
-    if (data.docker) {
-      el.innerHTML = `<div class="prereq-item"><span class="dot dot-green"></span> Docker: ${esc(data.dockerVersion)}</div>`;
-    } else {
-      el.innerHTML = `<div class="prereq-item"><span class="dot dot-red"></span> Docker: Not found. <a href="https://docker.com" target="_blank" style="color:#569cd6">Install Docker</a></div>`;
-    }
+    _prereqData = data;
+    renderPrereqs(data);
+    updateAddWorkspaceButton(data.allOk);
   } catch (err) {
     document.getElementById('prereqs-status').innerHTML = `<div class="prereq-item"><span class="dot dot-red"></span> Error checking prerequisites: ${esc(err.message)}</div>`;
+    updateAddWorkspaceButton(false);
+  }
+}
+
+async function recheckPrereqs() {
+  const el = document.getElementById('prereqs-status');
+  el.innerHTML = '<div class="prereq-item"><span class="scan-spinner"></span> Re-checking prerequisites...</div>';
+  document.getElementById('prereqs-summary').textContent = '';
+  await checkPrereqs();
+}
+
+function renderPrereqs(data) {
+  const el = document.getElementById('prereqs-status');
+  const summary = document.getElementById('prereqs-summary');
+
+  const items = [];
+
+  // Node.js
+  items.push(prereqItem(
+    data.node.ok,
+    'Node.js',
+    data.node.ok ? `v${data.node.version}` : `v${data.node.version || 'not found'} (need ${data.node.required}+)`,
+    data.node.ok ? null : '<button class="btn btn-primary btn-sm" onclick="installNode()">Install</button>',
+    data.node.ok ? null : 'Restart terminal after install'
+  ));
+
+  // WSL
+  const wslDetail = data.wsl.ok ? 'Installed'
+    : data.wsl.status === 'not_installed' ? 'Not installed'
+    : data.wsl.status === 'no_distro' ? 'No Linux distribution found'
+    : 'Error detecting WSL';
+  items.push(prereqItem(
+    data.wsl.ok,
+    'WSL 2',
+    wslDetail,
+    data.wsl.ok ? null : '<button class="btn btn-primary btn-sm" onclick="installWSL()">Install</button>',
+    data.wsl.ok ? null : 'Requires reboot after install'
+  ));
+
+  // Docker Engine — depends on WSL
+  if (!data.wsl.ok) {
+    items.push(prereqItem('gray', 'Docker Engine', 'Waiting for WSL...', null, null));
+  } else {
+    items.push(prereqItem(
+      data.dockerEngine.ok,
+      'Docker Engine',
+      data.dockerEngine.ok ? esc(data.dockerEngine.version) : 'Not installed',
+      data.dockerEngine.ok ? null : '<button class="btn btn-primary btn-sm" onclick="installDocker(\'full\')">Install</button>',
+      null
+    ));
+  }
+
+  // Docker Compose — depends on Docker Engine
+  if (!data.dockerEngine.ok) {
+    items.push(prereqItem('gray', 'Docker Compose', data.wsl.ok ? 'Waiting for Docker Engine...' : 'Waiting for WSL...', null, null));
+  } else {
+    items.push(prereqItem(
+      data.dockerCompose.ok,
+      'Docker Compose',
+      data.dockerCompose.ok ? esc(data.dockerCompose.version) : 'Plugin not found',
+      data.dockerCompose.ok ? null : '<button class="btn btn-primary btn-sm" onclick="installDocker(\'compose-only\')">Install Plugin</button>',
+      null
+    ));
+  }
+
+  // Docker Daemon — depends on Docker Engine
+  if (!data.dockerEngine.ok) {
+    items.push(prereqItem('gray', 'Docker Daemon', data.wsl.ok ? 'Waiting for Docker Engine...' : 'Waiting for WSL...', null, null));
+  } else {
+    items.push(prereqItem(
+      data.dockerDaemon.ok,
+      'Docker Daemon',
+      data.dockerDaemon.ok ? 'Running' : 'Not running',
+      data.dockerDaemon.ok ? null : '<button class="btn btn-primary btn-sm" onclick="installDocker(\'daemon-start\')">Start</button>',
+      null
+    ));
+  }
+
+  // UNREAL_INDEX_DIR
+  items.push(prereqItem(
+    data.envVar.ok,
+    'UNREAL_INDEX_DIR',
+    data.envVar.ok ? esc(data.envVar.path) : 'Not set',
+    data.envVar.ok ? null : '<button class="btn btn-primary btn-sm" onclick="setEnvVar()">Set</button>',
+    data.envVar.ok ? null : 'Restart terminal after setting'
+  ));
+
+  el.innerHTML = items.join('');
+
+  // Show "Complete Installation" button if Docker was just installed (engine ok but daemon/group may need WSL restart)
+  if (data.dockerEngine.ok && (!data.dockerDaemon.ok || !data.dockerGroup)) {
+    el.innerHTML += '<div style="margin-top:10px"><button class="btn btn-success btn-sm" onclick="completeDockerInstall(this)">Complete Installation (restarts WSL)</button></div>';
+  }
+
+  // Summary
+  const okCount = [data.node.ok, data.wsl.ok, data.dockerEngine.ok, data.dockerCompose.ok, data.dockerDaemon.ok, data.envVar.ok].filter(Boolean).length;
+  if (data.allOk) {
+    summary.textContent = '-- All checks passed';
+    summary.style.color = '#4ec9b0';
+  } else {
+    summary.textContent = `-- ${okCount}/6 passed`;
+    summary.style.color = '#dcdcaa';
+  }
+}
+
+function prereqItem(ok, label, detail, action, helpText) {
+  let dotClass;
+  if (ok === true) dotClass = 'dot-green';
+  else if (ok === 'gray') dotClass = 'dot-gray';
+  else dotClass = 'dot-red';
+
+  // Ensure .dot-gray exists (fallback styling)
+  let html = `<div class="prereq-item" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">`;
+  html += `<span style="display:flex;align-items:center"><span class="dot ${dotClass}" style="${ok === 'gray' ? 'background:#555;box-shadow:none' : ''}"></span>`;
+  html += `<strong style="margin-right:8px">${esc(label)}</strong>`;
+  html += `<span style="color:#888;font-size:13px">${detail}</span>`;
+  if (helpText) html += `<span style="color:#666;font-size:12px;margin-left:8px">(${esc(helpText)})</span>`;
+  html += `</span>`;
+  if (action) html += `<span>${action}</span>`;
+  html += `</div>`;
+  return html;
+}
+
+function updateAddWorkspaceButton(allOk) {
+  const btn = document.getElementById('add-workspace-btn');
+  if (btn) {
+    btn.disabled = !allOk;
+    btn.title = allOk ? '' : 'Fix prerequisites first';
+  }
+}
+
+async function installWSL() {
+  showPrereqMessage('Launching WSL installer (UAC prompt)...');
+  try {
+    const resp = await fetch('/api/prerequisites/install-wsl', { method: 'POST' });
+    const data = await resp.json();
+    if (data.ok) {
+      showPrereqMessage('WSL install launched. A reboot is required after installation. Then re-check.');
+    } else {
+      showPrereqMessage('Failed: ' + (data.error || 'Unknown error'), true);
+    }
+  } catch (err) {
+    showPrereqMessage('Error: ' + err.message, true);
+  }
+}
+
+async function installDocker(scenario) {
+  showPrereqMessage('Launching Docker install in new console window...');
+  try {
+    const resp = await fetch('/api/prerequisites/install-docker', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scenario }),
+    });
+    const data = await resp.json();
+    if (data.ok) {
+      showPrereqMessage(data.message + ' Follow the prompts in the new window, then click Re-check or Complete Installation.');
+    } else {
+      showPrereqMessage('Failed: ' + (data.error || 'Unknown error'), true);
+    }
+  } catch (err) {
+    showPrereqMessage('Error: ' + err.message, true);
+  }
+}
+
+async function completeDockerInstall(btn) {
+  btn.disabled = true;
+  btn.textContent = 'Restarting WSL...';
+  showPrereqMessage('Shutting down WSL and re-checking... (this takes a few seconds)');
+  try {
+    const resp = await fetch('/api/prerequisites/complete-docker', { method: 'POST' });
+    const data = await resp.json();
+    if (data.allOk !== undefined) {
+      _prereqData = data;
+      renderPrereqs(data);
+      updateAddWorkspaceButton(data.allOk);
+      showPrereqMessage(data.allOk ? 'All prerequisites passed!' : 'Some checks still failing. See above.');
+    } else {
+      showPrereqMessage('Failed: ' + (data.error || 'Unknown error'), true);
+    }
+  } catch (err) {
+    showPrereqMessage('Error: ' + err.message, true);
+  }
+}
+
+async function setEnvVar() {
+  showPrereqMessage('Setting UNREAL_INDEX_DIR...');
+  try {
+    const resp = await fetch('/api/prerequisites/set-env', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    const data = await resp.json();
+    if (data.ok) {
+      showPrereqMessage('UNREAL_INDEX_DIR set to: ' + data.path + '. Restart terminal to take effect.');
+      await checkPrereqs();
+    } else {
+      showPrereqMessage('Failed: ' + (data.error || 'Unknown error'), true);
+    }
+  } catch (err) {
+    showPrereqMessage('Error: ' + err.message, true);
+  }
+}
+
+async function installNode() {
+  showPrereqMessage('Launching Node.js installer (UAC prompt)...');
+  try {
+    const resp = await fetch('/api/prerequisites/install-node', { method: 'POST' });
+    const data = await resp.json();
+    if (data.ok) {
+      showPrereqMessage('Node.js install launched. Restart terminal after installation, then re-check.');
+    } else {
+      showPrereqMessage('Failed: ' + (data.error || 'Unknown error'), true);
+    }
+  } catch (err) {
+    showPrereqMessage('Error: ' + err.message, true);
+  }
+}
+
+function showPrereqMessage(msg, isError) {
+  const el = document.getElementById('prereqs-message');
+  el.style.display = 'block';
+  el.textContent = msg;
+  el.style.background = isError ? '#5a1d1d' : '#1e3a1e';
+  el.style.color = isError ? '#f88' : '#8f8';
+}
+
+async function checkAutostart() {
+  try {
+    const resp = await fetch('/api/autostart');
+    const data = await resp.json();
+    const btn = document.getElementById('autostart-btn');
+    const status = document.getElementById('autostart-status');
+    btn.disabled = false;
+    if (data.enabled) {
+      btn.textContent = 'Disable';
+      btn.className = 'btn btn-danger btn-sm';
+      status.textContent = 'Dashboard starts automatically at logon.';
+    } else {
+      btn.textContent = 'Enable';
+      btn.className = 'btn btn-success btn-sm';
+      status.textContent = 'Dashboard does not start automatically.';
+    }
+    btn.dataset.enabled = data.enabled;
+  } catch {
+    document.getElementById('autostart-status').textContent = 'Could not check auto-start status.';
+  }
+}
+
+async function toggleAutostart() {
+  const btn = document.getElementById('autostart-btn');
+  const isEnabled = btn.dataset.enabled === 'true';
+  btn.disabled = true;
+  btn.textContent = 'Updating...';
+  try {
+    const resp = await fetch(`/api/autostart/${isEnabled ? 'disable' : 'enable'}`, { method: 'POST' });
+    const data = await resp.json();
+    if (data.ok !== undefined) {
+      await checkAutostart();
+    } else {
+      document.getElementById('autostart-status').textContent = 'Error: ' + (data.error || 'Unknown');
+      btn.disabled = false;
+    }
+  } catch (err) {
+    document.getElementById('autostart-status').textContent = 'Error: ' + err.message;
+    btn.disabled = false;
   }
 }
 
@@ -1665,6 +1944,7 @@ function hideError(id) {
 // ── Init ───────────────────────────────────────────────
 
 checkPrereqs();
+checkAutostart();
 loadWorkspaces();
 initDashboard('workspaces');
 </script>

@@ -173,8 +173,11 @@ function generateDockerCompose(wsConfig) {
   for (const [name, ws] of Object.entries(wsConfig.workspaces)) {
     const vol = ws.volumePrefix || name;
     lines.push(`  ${vol}-db:`);
+    lines.push(`    name: unreal-index-${vol}-db`);
     lines.push(`  ${vol}-mirror:`);
+    lines.push(`    name: unreal-index-${vol}-mirror`);
     lines.push(`  ${vol}-zoekt:`);
+    lines.push(`    name: unreal-index-${vol}-zoekt`);
   }
 
   writeFileSync(DOCKER_COMPOSE_PATH, lines.join('\n') + '\n');
@@ -254,27 +257,120 @@ function buildProjectsFromSelections(selections, projectName) {
 
 // ── Prerequisites ─────────────────────────────────────────
 
-function checkPrerequisites() {
-  const results = { docker: false, dockerVersion: null };
+function checkAllPrerequisites() {
+  const result = {
+    node: { ok: false, version: null, required: '20.18.0' },
+    wsl: { ok: false, status: 'unknown' },
+    dockerEngine: { ok: false, version: null },
+    dockerCompose: { ok: false, version: null },
+    dockerDaemon: { ok: false },
+    dockerGroup: false,
+    envVar: { ok: false, path: null },
+    allOk: false,
+  };
 
+  // Node.js — check running process version
+  const nodeVer = process.versions.node;
+  result.node.version = nodeVer;
+  const [major, minor] = nodeVer.split('.').map(Number);
+  result.node.ok = major > 20 || (major === 20 && minor >= 18);
+
+  // WSL
   try {
-    const dockerVer = execSync('docker compose version', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 5000 }).trim();
-    results.docker = true;
-    results.dockerVersion = dockerVer;
-  } catch {}
-  if (!results.docker && process.platform === 'win32') {
+    execFileSync('wsl', ['--status'], { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 10000 });
+    result.wsl.ok = true;
+    result.wsl.status = 'ok';
+  } catch (err) {
+    const stderr = (err.stderr || err.message || '').toLowerCase();
+    if (stderr.includes('not recognized') || stderr.includes('not found') || stderr.includes('is not recognized')) {
+      result.wsl.status = 'not_installed';
+    } else if (stderr.includes('not installed') || stderr.includes('no installed distributions')) {
+      result.wsl.status = 'no_distro';
+    } else {
+      // wsl --status may return non-zero even when working
+      try {
+        execFileSync('wsl', ['--', 'echo', 'ok'], { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 10000 });
+        result.wsl.ok = true;
+        result.wsl.status = 'ok';
+      } catch {
+        result.wsl.status = 'error';
+      }
+    }
+  }
+
+  // Docker Engine (only if WSL ok)
+  if (result.wsl.ok) {
     try {
-      const dockerVer = execFileSync('wsl', [
-        '--', 'bash', '-c', 'docker compose version 2>/dev/null',
+      const ver = execFileSync('wsl', [
+        '--', 'bash', '-c', 'docker --version 2>/dev/null',
       ], { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 10000 }).trim();
-      if (dockerVer.includes('Docker Compose')) {
-        results.docker = true;
-        results.dockerVersion = dockerVer + ' (WSL)';
+      if (ver.includes('Docker')) {
+        result.dockerEngine.ok = true;
+        result.dockerEngine.version = ver;
       }
     } catch {}
   }
 
-  return results;
+  // Docker Compose (only if Docker Engine ok)
+  if (result.dockerEngine.ok) {
+    try {
+      const ver = execFileSync('wsl', [
+        '--', 'bash', '-c', 'docker compose version 2>/dev/null',
+      ], { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 10000 }).trim();
+      if (ver.includes('Docker Compose') || ver.includes('docker-compose')) {
+        result.dockerCompose.ok = true;
+        result.dockerCompose.version = ver;
+      }
+    } catch {}
+  }
+
+  // Docker Daemon (only if Docker Engine ok)
+  if (result.dockerEngine.ok) {
+    try {
+      const out = execFileSync('wsl', [
+        '--', 'bash', '-c', 'docker info >/dev/null 2>&1 && echo OK',
+      ], { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 10000 }).trim();
+      result.dockerDaemon.ok = out.includes('OK');
+    } catch {}
+  }
+
+  // Docker group membership
+  if (result.wsl.ok) {
+    try {
+      const groups = execFileSync('wsl', [
+        '--', 'bash', '-c', 'groups 2>/dev/null',
+      ], { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 5000 }).trim();
+      result.dockerGroup = groups.split(/\s+/).includes('docker');
+    } catch {}
+  }
+
+  // UNREAL_INDEX_DIR environment variable
+  if (process.platform === 'win32') {
+    try {
+      const envPath = execFileSync('powershell.exe', [
+        '-NoProfile', '-Command',
+        "[Environment]::GetEnvironmentVariable('UNREAL_INDEX_DIR', 'User')",
+      ], { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 5000 }).trim();
+      if (envPath && envPath !== '' && envPath !== 'null') {
+        result.envVar.ok = true;
+        result.envVar.path = envPath;
+      }
+    } catch {}
+  } else {
+    if (process.env.UNREAL_INDEX_DIR) {
+      result.envVar.ok = true;
+      result.envVar.path = process.env.UNREAL_INDEX_DIR;
+    }
+  }
+
+  result.allOk = result.node.ok && result.wsl.ok && result.dockerEngine.ok
+    && result.dockerCompose.ok && result.dockerDaemon.ok && result.envVar.ok;
+
+  // Backward compat: include legacy fields
+  result.docker = result.dockerCompose.ok && result.dockerDaemon.ok;
+  result.dockerVersion = result.dockerCompose.version;
+
+  return result;
 }
 
 // --- Docker status cache ---
@@ -596,9 +692,9 @@ route('GET', '/', (req, res) => {
   serveStatic(req, res, join(PUBLIC_DIR, 'setup.html'));
 });
 
-// GET /api/prerequisites — Check Docker availability
+// GET /api/prerequisites — Check all prerequisites
 route('GET', '/api/prerequisites', (req, res) => {
-  const prereqs = checkPrerequisites();
+  const prereqs = checkAllPrerequisites();
   res.writeHead(200, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify(prereqs));
 });
@@ -868,7 +964,9 @@ route('DELETE', '/api/workspaces/:name', async (req, res, params) => {
     if (deleteVolumes) {
       const ws = workspaces.workspaces[name];
       const volPrefix = ws.volumePrefix || name;
-      const volSuffixes = [`${volPrefix}-db`, `${volPrefix}-mirror`, `${volPrefix}-zoekt`];
+      // Match both old-style (project_<vol>-db) and new-style (unreal-index-<vol>-db) volume names
+      const volNames = [`${volPrefix}-db`, `${volPrefix}-mirror`, `${volPrefix}-zoekt`];
+      const stableNames = volNames.map(n => `unreal-index-${n}`);
       try {
         let volList;
         if (process.platform === 'win32') {
@@ -879,7 +977,7 @@ route('DELETE', '/api/workspaces/:name', async (req, res, params) => {
           volList = execSync('docker volume ls -q', { encoding: 'utf-8', timeout: 10000, stdio: 'pipe' }).trim();
         }
         const matchingVols = volList.split('\n').filter(v =>
-          volSuffixes.some(suffix => v.endsWith('_' + suffix))
+          volNames.some(suffix => v.endsWith('_' + suffix)) || stableNames.includes(v)
         );
         for (const vol of matchingVols) {
           try {
@@ -1506,6 +1604,235 @@ route('GET', '/api/service-status/:workspace', async (req, res, params) => {
   } catch {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ status: 'unreachable' }));
+  }
+});
+
+// ── Prerequisites Installation Endpoints ────────────────────
+
+// POST /api/prerequisites/install-wsl — Launch WSL install with UAC elevation
+route('POST', '/api/prerequisites/install-wsl', (req, res) => {
+  try {
+    spawn('powershell.exe', ['-Command', "Start-Process wsl -ArgumentList '--install' -Verb RunAs"], {
+      detached: true, stdio: 'ignore',
+    }).unref();
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, message: 'WSL install launched. A reboot will be required after installation completes.' }));
+  } catch (err) {
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: false, error: err.message }));
+  }
+});
+
+// POST /api/prerequisites/install-docker — Generate install script + open in new console
+route('POST', '/api/prerequisites/install-docker', async (req, res) => {
+  try {
+    const body = await parseJsonBody(req);
+    const scenario = body.scenario || 'full';
+
+    let script;
+    if (scenario === 'compose-only') {
+      script = [
+        '#!/bin/bash',
+        'set -e',
+        'echo "=== Installing Docker Compose plugin ==="',
+        'mkdir -p ~/.docker/cli-plugins',
+        'curl -SL "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64" -o ~/.docker/cli-plugins/docker-compose',
+        'chmod +x ~/.docker/cli-plugins/docker-compose',
+        'echo ""',
+        'echo "Docker Compose installed:"',
+        'docker compose version',
+        'echo ""',
+        'echo "Done! You can close this window and click Re-check in the dashboard."',
+        'read -p "Press Enter to close..."',
+      ].join('\n');
+    } else if (scenario === 'daemon-start') {
+      script = [
+        '#!/bin/bash',
+        'set -e',
+        'echo "=== Starting Docker daemon ==="',
+        'sudo service docker start',
+        'echo ""',
+        'echo "Checking Docker daemon..."',
+        'docker info > /dev/null 2>&1 && echo "Docker daemon is running!" || echo "Failed to start Docker daemon."',
+        'echo ""',
+        'echo "Done! You can close this window and click Re-check in the dashboard."',
+        'read -p "Press Enter to close..."',
+      ].join('\n');
+    } else {
+      // full install
+      script = [
+        '#!/bin/bash',
+        'set -e',
+        'echo "=== Installing Docker Engine in WSL ==="',
+        'echo ""',
+        'echo "This will install Docker Engine from the official Docker repository."',
+        'echo "You will be prompted for your sudo password."',
+        'echo ""',
+        '',
+        '# Install prerequisites',
+        'sudo apt-get update',
+        'sudo apt-get install -y ca-certificates curl',
+        '',
+        '# Add Docker GPG key',
+        'sudo install -m 0755 -d /etc/apt/keyrings',
+        'sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc',
+        'sudo chmod a+r /etc/apt/keyrings/docker.asc',
+        '',
+        '# Add Docker repository',
+        'echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo $VERSION_CODENAME) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null',
+        '',
+        '# Install Docker Engine + Compose plugin',
+        'sudo apt-get update',
+        'sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin',
+        '',
+        '# Add user to docker group',
+        'sudo usermod -aG docker $USER',
+        '',
+        '# Start Docker daemon',
+        'sudo service docker start',
+        '',
+        'echo ""',
+        'echo "=== Docker installed successfully! ==="',
+        'echo ""',
+        'docker --version',
+        'docker compose version',
+        'echo ""',
+        'echo "IMPORTANT: WSL needs to restart for group changes to take effect."',
+        'echo "After closing this window, click Complete Installation in the dashboard."',
+        'echo ""',
+        'read -p "Press Enter to close..."',
+      ].join('\n');
+    }
+
+    // Write shell script (LF line endings)
+    const scriptPath = join(ROOT, 'install-docker.sh');
+    writeFileSync(scriptPath, script, { encoding: 'utf-8' });
+
+    // Write .bat launcher with pre-computed WSL path
+    const wslScriptPath = fwd(scriptPath).replace(/^([A-Za-z]):/, (_, d) => `/mnt/${d.toLowerCase()}`);
+    const batPath = join(ROOT, 'install-docker.bat');
+    const batContent = `@echo off\r\ntitle Docker Installation\r\nwsl -- bash "${wslScriptPath}"\r\n`;
+    writeFileSync(batPath, batContent, { encoding: 'utf-8' });
+
+    // Open .bat in new console window
+    // Use exec with shell to avoid Node.js double-quoting the start title
+    exec(`start "" "${batPath}"`, { shell: 'cmd.exe', windowsHide: false });
+
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, message: `Docker ${scenario} install launched in new window.` }));
+  } catch (err) {
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: false, error: err.message }));
+  }
+});
+
+// POST /api/prerequisites/complete-docker — Shutdown WSL, wait, re-check
+route('POST', '/api/prerequisites/complete-docker', async (req, res) => {
+  try {
+    // Shutdown WSL so group membership changes take effect
+    try {
+      execFileSync('wsl', ['--shutdown'], { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 15000 });
+    } catch {}
+
+    // Wait for WSL to fully stop
+    await new Promise(resolve => setTimeout(resolve, 3000));
+
+    // Re-check prerequisites
+    const prereqs = checkAllPrerequisites();
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(prereqs));
+  } catch (err) {
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: false, error: err.message }));
+  }
+});
+
+// POST /api/prerequisites/set-env — Set UNREAL_INDEX_DIR environment variable
+route('POST', '/api/prerequisites/set-env', async (req, res) => {
+  try {
+    const body = await parseJsonBody(req);
+    const envPath = body.path || ROOT;
+
+    if (process.platform === 'win32') {
+      execFileSync('powershell.exe', [
+        '-NoProfile', '-Command',
+        `[Environment]::SetEnvironmentVariable('UNREAL_INDEX_DIR', '${envPath.replace(/'/g, "''")}', 'User')`,
+      ], { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 5000 });
+      // Also set it in current process so re-check picks it up
+      process.env.UNREAL_INDEX_DIR = envPath;
+    } else {
+      process.env.UNREAL_INDEX_DIR = envPath;
+    }
+
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, path: envPath }));
+  } catch (err) {
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: false, error: err.message }));
+  }
+});
+
+// POST /api/prerequisites/install-node — Install Node.js via winget (elevated)
+route('POST', '/api/prerequisites/install-node', (req, res) => {
+  try {
+    spawn('powershell.exe', [
+      '-Command',
+      "Start-Process powershell -ArgumentList '-Command','winget install -e --id OpenJS.NodeJS.LTS --accept-source-agreements --accept-package-agreements; Read-Host \"Press Enter to close\"' -Verb RunAs",
+    ], { detached: true, stdio: 'ignore' }).unref();
+
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, message: 'Node.js install launched. Restart terminal after installation.' }));
+  } catch (err) {
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: false, error: err.message }));
+  }
+});
+
+// GET /api/autostart — Check if autostart scheduled task exists
+route('GET', '/api/autostart', (req, res) => {
+  try {
+    execFileSync('schtasks', ['/Query', '/TN', 'UnrealIndexDashboard', '/FO', 'CSV', '/NH'], {
+      encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 5000,
+    });
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ enabled: true }));
+  } catch {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ enabled: false }));
+  }
+});
+
+// POST /api/autostart/enable — Create scheduled task for autostart
+route('POST', '/api/autostart/enable', (req, res) => {
+  try {
+    const nodePath = process.execPath;
+    const scriptPath = join(ROOT, 'src', 'setup-gui.js');
+    // Create a scheduled task that runs at logon
+    // Use execFileSync to avoid MINGW path conversion of /Create, /TN, etc.
+    execFileSync('schtasks', [
+      '/Create', '/TN', 'UnrealIndexDashboard',
+      '/TR', `"${nodePath}" "${scriptPath}"`,
+      '/SC', 'ONLOGON', '/RL', 'HIGHEST', '/F',
+    ], { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 5000 });
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, enabled: true }));
+  } catch (err) {
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: false, error: err.message }));
+  }
+});
+
+// POST /api/autostart/disable — Remove autostart scheduled task
+route('POST', '/api/autostart/disable', (req, res) => {
+  try {
+    execFileSync('schtasks', ['/Delete', '/TN', 'UnrealIndexDashboard', '/F'], {
+      encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 5000,
+    });
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, enabled: false }));
+  } catch (err) {
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: false, error: err.message }));
   }
 });
 
