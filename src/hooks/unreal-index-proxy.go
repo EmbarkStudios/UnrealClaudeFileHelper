@@ -199,6 +199,7 @@ type workspaceRoute struct {
 }
 
 var workspaceRoutes []workspaceRoute
+var configuredDefaultURL string // set from defaultPort in unreal-index-paths.json
 
 func init() {
 	exe, err := os.Executable()
@@ -213,6 +214,7 @@ func init() {
 	var cfg struct {
 		IndexedPrefixes []string         `json:"indexedPrefixes"`
 		Workspaces      []workspaceRoute `json:"workspaces"`
+		DefaultPort     int              `json:"defaultPort"`
 	}
 	if json.Unmarshal(data, &cfg) == nil {
 		for _, p := range cfg.IndexedPrefixes {
@@ -229,6 +231,9 @@ func init() {
 				Prefixes: normalized,
 			})
 		}
+		if cfg.DefaultPort > 0 {
+			configuredDefaultURL = fmt.Sprintf("http://127.0.0.1:%d", cfg.DefaultPort)
+		}
 	}
 }
 
@@ -244,7 +249,10 @@ func resolveServiceURL(path string) string {
 			}
 		}
 	}
-	// Fall back to first workspace or default
+	// Fall back to configured default (from install), then first workspace, then hardcoded default
+	if configuredDefaultURL != "" {
+		return configuredDefaultURL
+	}
 	if len(workspaceRoutes) > 0 {
 		return workspaceRoutes[0].URL
 	}

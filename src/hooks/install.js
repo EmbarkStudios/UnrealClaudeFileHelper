@@ -40,6 +40,16 @@ function toWindowsPath(p) {
   return p;
 }
 
+/** Normalize a path for prefix matching (matches proxy normalization). */
+function normalizePath(p) {
+  let s = p.replace(/\\/g, '/').toLowerCase().replace(/\/+$/, '');
+  // Git Bash: /d/path → d:/path
+  if (s.length >= 3 && s[0] === '/' && s[2] === '/' && s[1] >= 'a' && s[1] <= 'z') {
+    s = s[1] + ':' + s.slice(2);
+  }
+  return s;
+}
+
 // ── Main install function ────────────────────────────────────
 
 export async function installHooks(projectDir, { silent = false, tryGo = true } = {}) {
@@ -96,13 +106,20 @@ export async function installHooks(projectDir, { silent = false, tryGo = true } 
   const workspacesPath = join(__dirname, '..', '..', 'workspaces.json');
   const legacyConfigPath = join(__dirname, '..', '..', 'config.json');
 
+  let owningWorkspace = null;
+  let owningPort = null;
+  let wsConfig = null;
+
   if (existsSync(workspacesPath)) {
     // Multi-workspace mode: read workspaces.json + per-workspace configs
     try {
-      const wsConfig = JSON.parse(readFileSync(workspacesPath, 'utf-8'));
+      wsConfig = JSON.parse(readFileSync(workspacesPath, 'utf-8'));
       const allPrefixes = [];
       const workspaces = [];
+      const normalizedProjectDir = normalizePath(projectDir);
 
+      // Build workspace list and detect which workspace owns the project directory
+      let bestMatchLen = -1;
       for (const [name, ws] of Object.entries(wsConfig.workspaces || {})) {
         const wsConfigPath = join(__dirname, '..', '..', 'workspace-configs', `${name}.json`);
         let prefixes = [];
@@ -114,14 +131,47 @@ export async function installHooks(projectDir, { silent = false, tryGo = true } 
         }
         allPrefixes.push(...prefixes);
         workspaces.push({ port: ws.port, prefixes });
+
+        // Check if this workspace owns the project directory (longest prefix match wins)
+        for (const prefix of prefixes) {
+          const normalizedPrefix = normalizePath(prefix);
+          if (normalizedProjectDir.startsWith(normalizedPrefix) || normalizedPrefix.startsWith(normalizedProjectDir)) {
+            const matchLen = normalizedPrefix.length;
+            if (matchLen > bestMatchLen) {
+              bestMatchLen = matchLen;
+              owningWorkspace = name;
+              owningPort = ws.port;
+            }
+          }
+        }
       }
 
-      const pathsConfig = { indexedPrefixes: allPrefixes, workspaces };
+      // Fall back to defaultWorkspace from workspaces.json, then first workspace
+      if (!owningWorkspace) {
+        const defaultWs = wsConfig.defaultWorkspace;
+        if (defaultWs && wsConfig.workspaces[defaultWs]) {
+          owningWorkspace = defaultWs;
+          owningPort = wsConfig.workspaces[defaultWs].port;
+        } else {
+          const first = Object.entries(wsConfig.workspaces)[0];
+          if (first) {
+            owningWorkspace = first[0];
+            owningPort = first[1].port;
+          }
+        }
+      }
+
+      const pathsConfig = {
+        indexedPrefixes: allPrefixes,
+        workspaces,
+        ...(owningPort && { defaultPort: owningPort }),
+        ...(owningWorkspace && { defaultWorkspace: owningWorkspace }),
+      };
       writeFileSync(
         join(hooksDir, 'unreal-index-paths.json'),
         JSON.stringify(pathsConfig, null, 2) + '\n'
       );
-      if (!silent) console.log(`  Wrote indexed paths config (${allPrefixes.length} paths, ${workspaces.length} workspaces).`);
+      if (!silent) console.log(`  Wrote indexed paths config (${allPrefixes.length} paths, ${workspaces.length} workspaces, default: ${owningWorkspace}@${owningPort}).`);
     } catch (err) {
       if (!silent) console.log(`  Warning: could not write indexed paths config: ${err.message}`);
     }
@@ -168,15 +218,56 @@ export async function installHooks(projectDir, { silent = false, tryGo = true } 
 
   // ── Update CLAUDE.local.md ─────────────────────────────────
 
-  const searchInstructions = readFileSync(join(__dirname, 'search-instructions.md'), 'utf-8');
+  let searchInstructions = readFileSync(join(__dirname, 'search-instructions.md'), 'utf-8');
+
+  // Substitute template placeholders
+  const dashboardPort = owningPort || 3847;
+  searchInstructions = searchInstructions.replace(/\{\{PORT\}\}/g, String(dashboardPort));
+
+  const defaultWsName = wsConfig?.defaultWorkspace || 'main';
+  if (owningWorkspace && owningWorkspace !== defaultWsName) {
+    const wsBlock = `### Workspace-Specific MCP Configuration\n\n` +
+      `This project is indexed by the **"${owningWorkspace}"** workspace. ` +
+      `When using unreal-index MCP tools, you MUST pass \`workspace: "${owningWorkspace}"\` ` +
+      `to every tool call. Example:\n\n` +
+      '```\n' +
+      `mcp__unreal-index__unreal_find_type with name: "MyClass", workspace: "${owningWorkspace}"\n` +
+      `mcp__unreal-index__unreal_grep with pattern: "SomePattern", workspace: "${owningWorkspace}"\n` +
+      '```\n\n' +
+      `This ensures queries go to the correct index. Omitting the workspace parameter will ` +
+      `query the default workspace ("${defaultWsName}"), which will NOT have this project's files.`;
+    searchInstructions = searchInstructions.replace('{{WORKSPACE_INSTRUCTIONS}}', wsBlock);
+  } else {
+    searchInstructions = searchInstructions.replace(/\n?\{\{WORKSPACE_INSTRUCTIONS\}\}\n?/, '\n');
+  }
+
+  const BEGIN_MARKER = '<!-- BEGIN unreal-index -->';
+  const END_MARKER = '<!-- END unreal-index -->';
 
   if (existsSync(claudeLocalMdPath)) {
     const existing = readFileSync(claudeLocalMdPath, 'utf-8');
-    if (!existing.includes('USE UNREAL INDEX MCP TOOLS')) {
+    const beginIdx = existing.indexOf(BEGIN_MARKER);
+    const endIdx = existing.indexOf(END_MARKER);
+    if (beginIdx !== -1 && endIdx !== -1) {
+      // Replace existing section between markers
+      const before = existing.slice(0, beginIdx).trimEnd();
+      const after = existing.slice(endIdx + END_MARKER.length).trimStart();
+      const parts = [before, searchInstructions];
+      if (after) parts.push(after);
+      writeFileSync(claudeLocalMdPath, parts.join('\n\n') + '\n');
+      if (!silent) console.log(`  Updated search instructions in ${claudeLocalMdPath}`);
+    } else if (!existing.includes('USE UNREAL INDEX MCP TOOLS')) {
       writeFileSync(claudeLocalMdPath, existing.trimEnd() + '\n\n' + searchInstructions + '\n');
       if (!silent) console.log(`  Appended search instructions to ${claudeLocalMdPath}`);
     } else {
-      if (!silent) console.log('  CLAUDE.local.md already has search instructions.');
+      // Legacy marker present but no begin/end markers — replace from the old marker to EOF
+      const lines = existing.split('\n');
+      const markerLineIdx = lines.findIndex(l => l.includes('USE UNREAL INDEX MCP TOOLS'));
+      // The section starts at the ## heading line containing the marker
+      const sectionStart = markerLineIdx > 0 && lines[markerLineIdx - 1].startsWith('##') ? markerLineIdx - 1 : markerLineIdx;
+      const before = lines.slice(0, sectionStart).join('\n').trimEnd();
+      writeFileSync(claudeLocalMdPath, before + '\n\n' + searchInstructions + '\n');
+      if (!silent) console.log(`  Replaced search instructions in ${claudeLocalMdPath}`);
     }
   } else {
     writeFileSync(claudeLocalMdPath, '# Claude Code Local Instructions\n\n' + searchInstructions + '\n');

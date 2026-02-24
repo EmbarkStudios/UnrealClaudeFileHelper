@@ -1,3 +1,4 @@
+<!-- BEGIN unreal-index -->
 ## Searching Code — USE UNREAL INDEX MCP TOOLS (MANDATORY)
 
 **DO NOT use Glob or Grep as your first search method.** You MUST use the `unreal-index` MCP tools FIRST for ALL code searches — AngelScript, C++, types, files, everything. These provide indexed lookups that are orders of magnitude faster than file system searches.
@@ -31,7 +32,10 @@
 - Avoid broad recursive searches across the entire repo — target the specific plugin, module, or script directory
 - If the exact file location is unknown, search in the most likely directory first
 
+{{WORKSPACE_INSTRUCTIONS}}
+
 ### Troubleshooting MCP Tools
 If `unreal-index` MCP tools are not working correctly, check the issue tracker:
 - **Unreal Index:** https://github.com/EmbarkStudios/UnrealClaudeFileHelper/issues
-- **Dashboard:** Open http://localhost:3847 to check service health, watcher status, and Zoekt availability
+- **Dashboard:** Open http://localhost:{{PORT}} to check service health, watcher status, and Zoekt availability
+<!-- END unreal-index -->

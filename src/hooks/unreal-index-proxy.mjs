@@ -15,6 +15,7 @@ const FILE_EXT = /\.(as|cpp|h|hpp|cs|py|ini|json|xml|yaml|yml|toml|md|txt)$/i;
 const __hookDir = dirname(fileURLToPath(import.meta.url));
 let indexedPrefixes = [];
 let workspaceRoutes = []; // [{port, prefixes: [normalized...]}]
+let configuredDefaultUrl = null; // set from defaultPort in unreal-index-paths.json
 try {
   const cfg = JSON.parse(readFileSync(join(__hookDir, 'unreal-index-paths.json'), 'utf-8'));
   indexedPrefixes = (cfg.indexedPrefixes || []).map(normalizePath);
@@ -24,6 +25,9 @@ try {
       url: `http://localhost:${ws.port}`,
       prefixes: (ws.prefixes || []).map(normalizePath),
     }));
+  }
+  if (cfg.defaultPort) {
+    configuredDefaultUrl = `http://localhost:${cfg.defaultPort}`;
   }
 } catch {}
 
@@ -53,8 +57,8 @@ function resolveServiceUrl(path) {
       }
     }
   }
-  // Fall back to first workspace or default
-  return workspaceRoutes[0]?.url || DEFAULT_SERVICE_URL;
+  // Fall back to configured default (from install), then first workspace, then hardcoded default
+  return configuredDefaultUrl || workspaceRoutes[0]?.url || DEFAULT_SERVICE_URL;
 }
 
 let input;
