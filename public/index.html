@@ -420,7 +420,7 @@
             watcherDot.className = 'overview-dot dot-green';
             watcherDetail.textContent = `Active${hash} \u00b7 ${files} files, ${assets} assets ingested`;
           }
-          watcherAction.innerHTML = '';
+          watcherAction.innerHTML = '<button class="action-btn action-btn-warn" onclick="overviewRestartWatcher(this)">Restart</button>';
         } else {
           watcherDot.className = 'overview-dot dot-red';
           watcherDetail.textContent = 'No watcher connected \u2014 file changes won\'t be indexed';
@@ -442,7 +442,7 @@
           `Service (${serviceGitHash}) \u00b7 Watcher (${watcherGitHash})`;
         const actionsEl = document.getElementById('version-alert-actions');
         actionsEl.innerHTML = `
-          <button class="btn-primary" onclick="stopAndRestartWatcher(this)">Restart Watcher</button>
+          <button class="btn-primary" onclick="overviewRestartWatcher(this)">Restart Watcher</button>
           <span class="version-alert-status" id="version-alert-status"></span>`;
       } else {
         versionAlert.classList.remove('visible');
@@ -476,54 +476,6 @@
       }
     }
 
-    async function stopAndRestartWatcher(btn) {
-      const status = document.getElementById('version-alert-status');
-      btn.disabled = true;
-      btn.textContent = 'Stopping watcher...';
-      status.textContent = '';
-      try {
-        await fetch('/api/watcher/stop', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ workspace: WorkspaceContext.active })
-        });
-        status.textContent = 'Waiting for watcher to stop...';
-        const stopped = await waitForWatcherState(false, { maxAttempts: 20, intervalMs: 1000 });
-        if (!stopped) {
-          status.textContent = 'Watcher did not stop in time. Try closing it manually.';
-          btn.textContent = 'Restart Watcher';
-          btn.disabled = false;
-          return;
-        }
-        btn.textContent = 'Starting watcher...';
-        status.textContent = '';
-        const startResp = await fetch('/api/watcher/start', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ workspace: WorkspaceContext.active })
-        });
-        if (!startResp.ok) {
-          const err = await startResp.json();
-          status.textContent = err.error || 'Failed to start watcher';
-          btn.textContent = 'Restart Watcher';
-          btn.disabled = false;
-          return;
-        }
-        status.textContent = 'Waiting for new watcher...';
-        const started = await waitForWatcherState(true);
-        if (started) {
-          loadAllWithOverview();
-        } else {
-          status.textContent = 'Watcher started but still reconciling. Refresh shortly.';
-          btn.textContent = 'Restart Watcher';
-          btn.disabled = false;
-        }
-      } catch (err) {
-        status.textContent = 'Error: ' + err.message;
-        btn.textContent = 'Restart Watcher';
-        btn.disabled = false;
-      }
-    }
 
     async function overviewStartWatcher(btn) {
       btn.disabled = true;
@@ -552,6 +504,45 @@
       } catch (err) {
         btn.textContent = 'Error';
         setTimeout(() => { btn.textContent = 'Start'; btn.disabled = false; }, 5000);
+      }
+    }
+
+    async function overviewRestartWatcher(btn) {
+      btn.disabled = true;
+      btn.textContent = 'Restarting...';
+      try {
+        await fetch('/api/watcher/stop', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ workspace: WorkspaceContext.active })
+        });
+        const stopped = await waitForWatcherState(false, { maxAttempts: 20, intervalMs: 1000 });
+        if (!stopped) {
+          btn.textContent = 'Stop timed out';
+          setTimeout(() => { btn.textContent = 'Restart'; btn.disabled = false; }, 5000);
+          return;
+        }
+        const startResp = await fetch('/api/watcher/start', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ workspace: WorkspaceContext.active })
+        });
+        if (!startResp.ok) {
+          const data = await startResp.json();
+          btn.textContent = data.error || 'Failed';
+          setTimeout(() => { btn.textContent = 'Restart'; btn.disabled = false; }, 5000);
+          return;
+        }
+        const started = await waitForWatcherState(true);
+        if (started) {
+          loadAllWithOverview();
+        } else {
+          btn.textContent = 'Timed out';
+          setTimeout(() => { btn.textContent = 'Restart'; btn.disabled = false; }, 5000);
+        }
+      } catch (err) {
+        btn.textContent = 'Error';
+        setTimeout(() => { btn.textContent = 'Restart'; btn.disabled = false; }, 5000);
       }
     }
 
