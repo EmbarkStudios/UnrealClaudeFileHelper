@@ -151,7 +151,10 @@ function generateDockerCompose(wsConfig) {
     const swapGB = memGB + 2;
     const vol = ws.volumePrefix || name; // preserved across renames
     lines.push(`  ${name}:`);
-    lines.push(`    build: .`);
+    lines.push(`    build:`);
+    lines.push(`      context: .`);
+    lines.push(`      args:`);
+    lines.push(`        BUILD_GIT_HASH: \${BUILD_GIT_HASH:-unknown}`);
     lines.push(`    image: ${wsConfig.dockerImage}`);
     lines.push(`    container_name: unreal-index-${name}`);
     lines.push(`    ports:`);
