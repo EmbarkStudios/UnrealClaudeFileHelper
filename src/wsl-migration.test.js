@@ -85,8 +85,8 @@ before(async () => {
 });
 
 after(() => {
-  // Clear all intervals to prevent process hanging
-  if (app?._statsInterval) clearInterval(app._statsInterval);
+  // Clear timers to prevent process hanging
+  if (app?._depthDebounceTimer) clearTimeout(app._depthDebounceTimer);
   if (app?._watcherPruneInterval) clearInterval(app._watcherPruneInterval);
   if (server) server.close();
   if (database) database.close();

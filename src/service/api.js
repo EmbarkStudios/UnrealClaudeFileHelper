@@ -736,6 +736,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       // Flag inheritance depth for recomputation after new types are ingested
       if (processed > 0) {
         database.setMetadata('depthComputeNeeded', true);
+        scheduleDepthRecompute();
         grepCache.invalidate();
         if (memoryIndex) memoryIndex.invalidateInheritanceCache();
       }
@@ -960,18 +961,13 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
     }
   });
 
-  // Stats cache — refreshed on a timer, never blocks request handling
+  // Stats cache — lazy on-demand with TTL, never blocks request handling
   let statsCache = null;
+  let statsCacheTime = 0;
+  const STATS_TTL_MS = 30000;
 
   function refreshStatsCache() {
     try {
-      // Recompute inheritance depth if flagged (debounced via timer)
-      if (database.getMetadata('depthComputeNeeded')) {
-        const t = performance.now();
-        const count = database.computeInheritanceDepth();
-        console.log(`[Stats] inheritance depth recomputed: ${count} types (${(performance.now() - t).toFixed(0)}ms)`);
-      }
-
       const stats = (memoryIndex && memoryIndex.isLoaded) ? memoryIndex.getStats() : database.getStats();
       const lastBuild = database.getMetadata('lastBuild');
       const indexStatus = database.getAllIndexStatus();
@@ -990,18 +986,40 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
     }
   }
 
-  // Refresh stats every 30 seconds in the background
-  refreshStatsCache();
-  app._statsInterval = setInterval(refreshStatsCache, 30000);
+  function getStatsCache() {
+    const now = Date.now();
+    if (statsCache && (now - statsCacheTime) < STATS_TTL_MS) {
+      return statsCache;
+    }
+    refreshStatsCache();
+    statsCacheTime = now;
+    return statsCache;
+  }
+
+  // Debounced inheritance depth recomputation — triggered after ingest
+  let depthDebounceTimer = null;
+  const DEPTH_DEBOUNCE_MS = 5000;
+
+  function scheduleDepthRecompute() {
+    if (depthDebounceTimer) clearTimeout(depthDebounceTimer);
+    depthDebounceTimer = setTimeout(() => {
+      depthDebounceTimer = null;
+      try {
+        if (database.getMetadata('depthComputeNeeded')) {
+          const t = performance.now();
+          const count = database.computeInheritanceDepth();
+          console.log(`[Stats] inheritance depth recomputed: ${count} types (${(performance.now() - t).toFixed(0)}ms)`);
+        }
+      } catch (err) {
+        console.error(`[${new Date().toISOString()}] [Stats] depth recompute failed:`, err.message);
+      }
+    }, DEPTH_DEBOUNCE_MS);
+    app._depthDebounceTimer = depthDebounceTimer;
+  }
 
   app.get('/stats', (req, res) => {
-    if (statsCache) {
-      return res.json(statsCache);
-    }
-    // Fallback: compute on demand if cache hasn't been populated yet
     try {
-      refreshStatsCache();
-      res.json(statsCache);
+      res.json(getStatsCache());
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
@@ -1160,17 +1178,16 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
 
   app.get('/summary', (req, res) => {
     try {
-      const stats = statsCache || database.getStats();
-      const lastBuild = database.getMetadata('lastBuild');
-      const indexStatus = statsCache?.indexStatus || database.getAllIndexStatus();
+      const cached = getStatsCache();
+      const lastBuild = cached.lastBuild;
 
       res.json({
         generatedAt: lastBuild?.timestamp || null,
-        stats,
-        projects: Object.keys(stats.projects || {}),
-        languages: Object.keys(stats.byLanguage || {}),
+        stats: cached,
+        projects: Object.keys(cached.projects || {}),
+        languages: Object.keys(cached.byLanguage || {}),
         buildTimeMs: lastBuild?.buildTimeMs || null,
-        indexStatus
+        indexStatus: cached.indexStatus
       });
     } catch (err) {
       res.status(500).json({ error: err.message });
@@ -1500,7 +1517,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       const duration = ((performance.now() - start) / 1000).toFixed(1);
       console.log(`[${new Date().toISOString()}] [NameTrigram] Build complete in ${duration}s`);
 
-      refreshStatsCache();
+      statsCacheTime = 0; // force refresh on next stats request
       res.json({
         message: 'Name trigram index built successfully',
         types: result.types,
