@@ -85,8 +85,9 @@ before(async () => {
 });
 
 after(() => {
-  // Clear the stats refresh interval to prevent process hanging
+  // Clear all intervals to prevent process hanging
   if (app?._statsInterval) clearInterval(app._statsInterval);
+  if (app?._watcherPruneInterval) clearInterval(app._watcherPruneInterval);
   if (server) server.close();
   if (database) database.close();
   if (tmpDir) {

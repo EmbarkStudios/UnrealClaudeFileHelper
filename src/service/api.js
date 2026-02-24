@@ -405,7 +405,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
   // --- Watcher status (public, consumed by GUI) ---
 
   // Periodically prune stale watchers (covers case where all watchers disconnect)
-  setInterval(() => {
+  app._watcherPruneInterval = setInterval(() => {
     const cutoff = Date.now() - 60000;
     for (const [id, w] of watcherState.watchers) {
       if (new Date(w.receivedAt).getTime() < cutoff) {
@@ -414,6 +414,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
     }
   }, 15000);
 
+  // Returns watcher heartbeat data including progress state (phase, projectProgress, watchedPaths)
   app.get('/watcher-status', (req, res) => {
     const watchers = [];
     const staleCutoff = Date.now() - 45000; // 3 missed heartbeats = stale
