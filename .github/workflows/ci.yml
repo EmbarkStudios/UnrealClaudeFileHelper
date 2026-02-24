@@ -1,0 +1,22 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    uses: EmbarkStudios/johlander-claude-workflows/.github/workflows/node-ci.yml@main
+    with:
+      node_version: '22'
+      lint_command: ''
+      typecheck_command: ''
+      build_command: ''
+      test_command: 'npm test'
+      security_audit: true
