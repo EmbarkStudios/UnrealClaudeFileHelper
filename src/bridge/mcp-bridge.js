@@ -181,7 +181,7 @@ Available workspaces: ${availableWorkspaces()}. Default workspace: "${defaultWor
                 },
                 language: {
                   type: 'string',
-                  enum: ['all', 'angelscript', 'cpp', 'blueprint'],
+                  enum: ['all', 'angelscript', 'cpp', 'csharp', 'blueprint'],
                   default: 'all',
                   description: 'Filter by source language. Note: C++ types exposed to AngelScript via bindings are stored as cpp, so use "all" (default) to find all types usable from AngelScript.'
                 },
@@ -230,7 +230,7 @@ Available workspaces: ${availableWorkspaces()}. Default workspace: "${defaultWor
                 },
                 language: {
                   type: 'string',
-                  enum: ['all', 'angelscript', 'cpp', 'blueprint'],
+                  enum: ['all', 'angelscript', 'cpp', 'csharp', 'blueprint'],
                   default: 'all',
                   description: 'Filter by source language. Note: C++ types exposed to AngelScript via bindings are stored as cpp, so use "all" (default) to find all types usable from AngelScript.'
                 },
@@ -260,9 +260,9 @@ Available workspaces: ${availableWorkspaces()}. Default workspace: "${defaultWor
                 },
                 language: {
                   type: 'string',
-                  enum: ['all', 'angelscript', 'cpp'],
+                  enum: ['all', 'angelscript', 'cpp', 'csharp'],
                   default: 'all',
-                  description: 'Filter by language: all, angelscript, or cpp'
+                  description: 'Filter by language: all, angelscript, cpp, or csharp'
                 },
                 maxResults: {
                   type: 'number',
@@ -290,9 +290,9 @@ Available workspaces: ${availableWorkspaces()}. Default workspace: "${defaultWor
                 },
                 language: {
                   type: 'string',
-                  enum: ['all', 'angelscript', 'cpp', 'config'],
+                  enum: ['all', 'angelscript', 'cpp', 'csharp', 'config'],
                   default: 'all',
-                  description: 'Filter by language: all, angelscript, cpp, or config'
+                  description: 'Filter by language: all, angelscript, cpp, csharp, or config'
                 },
                 maxResults: {
                   type: 'number',
@@ -312,9 +312,9 @@ Available workspaces: ${availableWorkspaces()}. Default workspace: "${defaultWor
               properties: {
                 language: {
                   type: 'string',
-                  enum: ['all', 'angelscript', 'cpp'],
+                  enum: ['all', 'angelscript', 'cpp', 'csharp'],
                   default: 'all',
-                  description: 'Language to refresh: all, angelscript, or cpp'
+                  description: 'Language to refresh: all, angelscript, cpp, or csharp'
                 },
                 ...workspaceParam
               }
@@ -350,7 +350,7 @@ Available workspaces: ${availableWorkspaces()}. Default workspace: "${defaultWor
                 },
                 language: {
                   type: 'string',
-                  enum: ['all', 'angelscript', 'cpp'],
+                  enum: ['all', 'angelscript', 'cpp', 'csharp'],
                   default: 'all',
                   description: 'Filter by language'
                 },
@@ -390,7 +390,7 @@ Available workspaces: ${availableWorkspaces()}. Default workspace: "${defaultWor
                 },
                 language: {
                   type: 'string',
-                  enum: ['all', 'angelscript', 'cpp'],
+                  enum: ['all', 'angelscript', 'cpp', 'csharp'],
                   default: 'all',
                   description: 'Filter by language'
                 },
@@ -478,9 +478,9 @@ Available workspaces: ${availableWorkspaces()}. Default workspace: "${defaultWor
                 },
                 language: {
                   type: 'string',
-                  enum: ['all', 'angelscript', 'cpp', 'config'],
+                  enum: ['all', 'angelscript', 'cpp', 'csharp', 'config'],
                   default: 'all',
-                  description: 'Filter by language: all, angelscript, cpp, or config'
+                  description: 'Filter by language: all, angelscript, cpp, csharp, or config'
                 },
                 caseSensitive: {
                   type: 'boolean',
@@ -523,7 +523,7 @@ Available workspaces: ${availableWorkspaces()}. Default workspace: "${defaultWor
                 },
                 language: {
                   type: 'string',
-                  enum: ['all', 'angelscript', 'cpp'],
+                  enum: ['all', 'angelscript', 'cpp', 'csharp'],
                   default: 'all',
                   description: 'Filter by language'
                 },

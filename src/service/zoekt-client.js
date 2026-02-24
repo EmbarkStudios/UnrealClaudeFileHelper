@@ -3,12 +3,14 @@ import { Agent } from 'undici';
 const LANGUAGE_EXTENSIONS = {
   angelscript: '\\.as$',
   cpp: '\\.(cpp|h|hpp|cc|inl)$',
+  csharp: '\\.cs$',
   config: '\\.(ini|json|uplugin|uproject)$'
 };
 
 const EXTENSION_TO_LANGUAGE = {
   '.as': 'angelscript',
   '.cpp': 'cpp', '.h': 'cpp', '.hpp': 'cpp', '.cc': 'cpp', '.inl': 'cpp',
+  '.cs': 'csharp',
   '.ini': 'config', '.json': 'config', '.uplugin': 'config', '.uproject': 'config'
 };
 

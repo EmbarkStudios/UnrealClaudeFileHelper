@@ -504,7 +504,7 @@ export class MemoryIndex {
   findTypeByName(name, options = {}) {
     const { fuzzy = false, project = null, language = null, kind = null, maxResults = 10, includeAssets } = options;
 
-    const includeSourceTypes = !language || language === 'all' || language === 'angelscript' || language === 'cpp';
+    const includeSourceTypes = !language || language === 'all' || language === 'angelscript' || language === 'cpp' || language === 'csharp';
     const assetsDefault = !fuzzy;
     const includeBlueprints = (includeAssets !== undefined ? includeAssets : (language === 'blueprint' || assetsDefault))
       && (!language || language === 'all' || language === 'blueprint');
@@ -1176,7 +1176,7 @@ export class MemoryIndex {
   findChildrenOf(parentClass, options = {}) {
     const { recursive = true, project = null, language = null, maxResults = 50 } = options;
 
-    const includeSourceTypes = !language || language === 'all' || language === 'angelscript' || language === 'cpp';
+    const includeSourceTypes = !language || language === 'all' || language === 'angelscript' || language === 'cpp' || language === 'csharp';
     const includeBlueprints = !language || language === 'all' || language === 'blueprint';
 
     // Check if parent exists

@@ -18,6 +18,7 @@ import { readdirSync, statSync, readFileSync, existsSync } from 'fs';
 import { join, relative } from 'path';
 import { parseContent as parseAngelscriptContent } from '../parsers/angelscript-parser.js';
 import { parseCppContent } from '../parsers/cpp-parser.js';
+import { parseCSharpContent } from '../parsers/csharp-parser.js';
 import { parseUAssetHeader } from '../parsers/uasset-parser.js';
 import { gzipSync } from 'zlib';
 
@@ -143,11 +144,18 @@ function findBasePathForFile(filePath, project) {
 
 function hasMatchingExtension(filePath, project) {
   const extensions = project.extensions || (project.language === 'cpp' ? ['.h', '.cpp'] : ['.as']);
-  return extensions.some(ext => filePath.endsWith(ext));
+  if (!extensions.some(ext => filePath.endsWith(ext))) return false;
+  if (project.includePatterns?.length > 0) {
+    const basename = filePath.split(/[/\\]/).pop();
+    return project.includePatterns.some(pat =>
+      pat.startsWith('*') ? basename.endsWith(pat.slice(1)) : basename === pat
+    );
+  }
+  return true;
 }
 
 function deriveModule(relativePath, projectName) {
-  const parts = relativePath.replace(/\.(as|h|cpp)$/, '').split('/');
+  const parts = relativePath.replace(/\.(as|h|cpp|cs)$/, '').split('/');
   parts.pop();
   return [projectName, ...parts].join('.');
 }
@@ -165,7 +173,7 @@ function shouldExclude(path) {
   return false;
 }
 
-function collectFiles(dirPath, projectName, extensions, language) {
+function collectFiles(dirPath, projectName, extensions, language, includePatterns) {
   const files = [];
   const scanDir = (dir) => {
     let entries;
@@ -177,6 +185,9 @@ function collectFiles(dirPath, projectName, extensions, language) {
         scanDir(fullPath);
       } else if (entry.isFile()) {
         if (!extensions.some(ext => entry.name.endsWith(ext))) continue;
+        if (includePatterns?.length > 0) {
+          if (!includePatterns.some(pat => pat.startsWith('*') ? entry.name.endsWith(pat.slice(1)) : entry.name === pat)) continue;
+        }
         if (shouldExclude(fullPath)) continue;
         try {
           const mtime = Math.floor(statSync(fullPath).mtimeMs);
@@ -268,6 +279,8 @@ async function readAndParseSource(filePath, project, language) {
   let parsed;
   if (language === 'cpp') {
     parsed = parseCppContent(content, filePath);
+  } else if (language === 'csharp') {
+    parsed = parseCSharpContent(content, filePath);
   } else {
     parsed = parseAngelscriptContent(content, filePath);
   }
@@ -281,7 +294,7 @@ async function readAndParseSource(filePath, project, language) {
     for (const d of parsed.delegates || []) types.push({ name: d.name, kind: 'delegate', parent: null, line: d.line });
     for (const ns of parsed.namespaces || []) types.push({ name: ns.name, kind: 'namespace', parent: null, line: ns.line });
   }
-  if (language === 'cpp') {
+  if (language === 'cpp' || language === 'csharp') {
     for (const d of parsed.delegates || []) types.push({ name: d.name, kind: 'delegate', parent: null, line: d.line });
   }
 
@@ -367,7 +380,7 @@ async function reconcile(project) {
 
     // Step 2: Scan disk (stat only, no reads)
     const collectStart = performance.now();
-    const diskFiles = collectFiles(basePath, project.name, extensions, language);
+    const diskFiles = collectFiles(basePath, project.name, extensions, language, project.includePatterns);
     const diskMap = new Map(diskFiles.map(f => [f.path, f]));
     const collectMs = (performance.now() - collectStart).toFixed(0);
 
@@ -462,7 +475,7 @@ async function fullScan(languages) {
 
     for (const basePath of project.paths) {
       const collectStart = performance.now();
-      const files = collectFiles(basePath, project.name, extensions, project.language);
+      const files = collectFiles(basePath, project.name, extensions, project.language, project.includePatterns);
       const collectMs = (performance.now() - collectStart).toFixed(0);
       console.log(`${logPrefix} Collected ${files.length} files from ${project.name} (${collectMs}ms)`);
 

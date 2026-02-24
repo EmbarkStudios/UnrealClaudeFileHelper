@@ -188,6 +188,20 @@ function generateDockerCompose(wsConfig) {
 
 // ── Detection ──────────────────────────────────────────────
 
+function scanForBuildCs(dir, depth = 3) {
+  if (depth <= 0) return false;
+  try {
+    const entries = readdirSync(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.isFile() && entry.name.endsWith('.Build.cs')) return true;
+      if (entry.isDirectory() && depth > 1) {
+        if (scanForBuildCs(join(dir, entry.name), depth - 1)) return true;
+      }
+    }
+  } catch { /* */ }
+  return false;
+}
+
 function detectDirectories(projectRoot) {
   const candidates = [];
   const checks = [
@@ -202,6 +216,16 @@ function detectDirectories(projectRoot) {
     if (existsSync(dir)) {
       candidates.push({ dir: fwd(dir), label: check.label, language: check.language });
     }
+  }
+  // Check for C# Build files in Source/
+  const sourceDir = join(projectRoot, 'Source');
+  if (existsSync(sourceDir)) {
+    try {
+      const hasBuildCs = scanForBuildCs(sourceDir);
+      if (hasBuildCs) {
+        candidates.push({ dir: fwd(sourceDir), label: 'Source/ (C# Build files)', language: 'csharp' });
+      }
+    } catch { /* */ }
   }
   return candidates;
 }
@@ -253,6 +277,12 @@ function buildProjectsFromSelections(selections, projectName) {
     projects.push({
       name: `${projectName}-Config`, paths: byLanguage.config, language: 'config',
       extensions: ['.ini'],
+    });
+  }
+  if (byLanguage.csharp) {
+    projects.push({
+      name: `${projectName}-CSharp`, paths: byLanguage.csharp, language: 'csharp',
+      extensions: ['.cs'], includePatterns: ['*.Build.cs', '*.Target.cs', '*.Automation.cs'],
     });
   }
   return projects;

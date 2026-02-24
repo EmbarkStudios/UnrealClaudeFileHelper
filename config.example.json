@@ -30,6 +30,13 @@
       "paths": ["C:/Path/To/YourProject/Config"],
       "language": "config",
       "extensions": [".ini"]
+    },
+    {
+      "name": "MyGame-CSharp",
+      "paths": ["C:/Path/To/YourProject/Source", "C:/Path/To/YourProject/Plugins"],
+      "language": "csharp",
+      "extensions": [".cs"],
+      "includePatterns": ["*.Build.cs", "*.Target.cs", "*.Automation.cs"]
     }
   ],
   "exclude": [
