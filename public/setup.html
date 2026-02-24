@@ -151,6 +151,7 @@
         <div class="wizard-step" id="step-ind-1">Engine</div>
         <div class="wizard-step" id="step-ind-2">Workspace</div>
         <div class="wizard-step" id="step-ind-3">Review</div>
+        <div class="wizard-step" id="step-ind-4">Watcher</div>
       </div>
 
       <!-- Step 0: Projects Overview -->
@@ -167,7 +168,6 @@
       <div class="wizard-content hidden" id="step-1">
         <div class="tabs">
           <div class="tab active" onclick="switchTab('scan')">Scan Drives</div>
-          <div class="tab" onclick="switchTab('p4')">P4 Clients</div>
           <div class="tab" onclick="switchTab('manual')">Enter Path</div>
         </div>
 
@@ -175,12 +175,6 @@
           <button class="btn btn-primary btn-sm" onclick="startScan()" id="scan-btn">Scan Drives</button>
           <div class="scanning-status hidden" id="scan-status"></div>
           <div id="scan-results" style="margin-top:8px; max-height:300px; overflow-y:auto"></div>
-        </div>
-
-        <div class="tab-content" id="tab-p4">
-          <button class="btn btn-primary btn-sm" onclick="startP4Scan()" id="p4-scan-btn">Scan P4 Clients</button>
-          <div class="scanning-status hidden" id="p4-status"></div>
-          <div id="p4-results" style="margin-top:8px; max-height:300px; overflow-y:auto"></div>
         </div>
 
         <div class="tab-content" id="tab-manual">
@@ -297,8 +291,28 @@
           </div>
 
           <div style="margin-top:16px">
-            <button class="btn btn-secondary" onclick="finishWizard()">Done</button>
+            <button class="btn btn-primary" onclick="showStep(6)">Next: Start Watcher</button>
+            <button class="btn btn-secondary" onclick="finishWizard()" style="margin-left:8px">Skip & Finish</button>
           </div>
+        </div>
+      </div>
+
+      <!-- Step 6: Watcher -->
+      <div class="wizard-content hidden" id="step-6">
+        <h3>Start Watcher</h3>
+        <p class="info-msg" style="margin-bottom:12px">Start the file watcher and monitor its initial scan progress. The watcher indexes your project files and sends them to the service container.</p>
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px">
+          <button class="btn btn-primary" onclick="wizardStartWatcher()" id="wizard-watcher-btn">Start Watcher</button>
+          <span id="wizard-watcher-status" class="info-msg"></span>
+        </div>
+        <div id="wizard-watcher-monitor" class="hidden">
+          <div id="wizard-watcher-phase"></div>
+          <div id="wizard-watcher-projects" style="margin-top:8px"></div>
+          <div id="wizard-watcher-paths" style="margin-top:8px"></div>
+        </div>
+        <div class="wizard-nav">
+          <button class="btn btn-secondary" onclick="wizardBack()">Back</button>
+          <button class="btn btn-success" onclick="finishWizard()">Done</button>
         </div>
       </div>
     </div>
@@ -662,6 +676,26 @@ async function loadWorkspaces() {
         memHtml = `<span style="font-size:11px;color:#555;margin-left:8px">limit: ${ws.computedMemLimitGB}GB</span>`;
       }
 
+      // Watcher status display
+      let watcherHtml = '';
+      const wStatus = ws.watcherStatus;
+      if (ws.running && wStatus) {
+        if (wStatus.hasActiveWatcher && wStatus.phase === 'watching') {
+          watcherHtml = `<span style="font-size:12px;margin-left:8px"><span class="dot dot-green" style="width:8px;height:8px"></span>Watcher active</span>`;
+        } else if (wStatus.hasActiveWatcher && (wStatus.phase === 'scanning' || wStatus.phase === 'reconciling')) {
+          const phaseLabel = wStatus.phase === 'scanning' ? 'Scanning...' : 'Reconciling...';
+          watcherHtml = `<span style="font-size:12px;margin-left:8px"><span class="dot dot-yellow" style="width:8px;height:8px"></span>${phaseLabel}</span>`;
+        } else {
+          watcherHtml = `<span style="font-size:12px;color:#555;margin-left:8px"><span class="dot dot-gray" style="width:8px;height:8px"></span>No watcher</span>`;
+        }
+      }
+
+      // Watcher progress bars (for scanning/reconciling)
+      let watcherProgressHtml = '';
+      if (ws.running && wStatus && wStatus.hasActiveWatcher && wStatus.phase !== 'watching' && (wStatus.projectProgress || []).length > 0) {
+        watcherProgressHtml = `<div id="ws-watcher-${esc(name)}" style="margin-top:6px"></div>`;
+      }
+
       html += `
         <div class="workspace-card">
           <div class="ws-header">
@@ -670,9 +704,11 @@ async function loadWorkspaces() {
             <span class="badge badge-port">:${ws.port}</span>
             <span style="font-size:12px;color:#808080;margin-left:4px">${esc(healthLabel)}</span>
             ${memHtml}
+            ${watcherHtml}
             <span class="ws-desc">${esc(ws.description || '')}</span>
           </div>
           <div class="ws-projects">${projects || 'No projects configured'}</div>
+          ${watcherProgressHtml}
           <div class="ws-actions">
             ${ws.running
               ? `<a class="btn btn-primary btn-sm" href="/index.html" onclick="WorkspaceContext.onSelect('${escAttr(name)}')">Dashboard</a>
@@ -717,6 +753,39 @@ async function loadWorkspaces() {
       `;
     }
     el.innerHTML = html;
+
+    // Render watcher progress bars for scanning/reconciling workspaces
+    for (const [name, ws] of entries) {
+      const wStatus = ws.watcherStatus;
+      if (ws.running && wStatus && wStatus.hasActiveWatcher && wStatus.phase !== 'watching') {
+        const container = document.getElementById('ws-watcher-' + name);
+        if (container && (wStatus.projectProgress || []).length > 0) {
+          // Build compact inline progress bars
+          let progressHtml = '';
+          for (const proj of wStatus.projectProgress) {
+            const pct = proj.total > 0 ? Math.min(100, Math.round((proj.current / proj.total) * 100)) : 0;
+            const isDone = proj.phase === 'done' || proj.phase === 'upToDate';
+            const label = isDone ? 'done'
+              : proj.phase === 'upToDate' ? 'up to date'
+              : proj.phase === 'collecting' ? 'scanning...'
+              : proj.phase === 'diffing' ? 'comparing...'
+              : `${(proj.current || 0).toLocaleString()} / ${(proj.total || 0).toLocaleString()}`;
+            const barColor = isDone ? '#4ec9b0' : '#569cd6';
+            const barPct = isDone ? 100 : pct;
+            progressHtml += `<div style="margin-bottom:4px">
+              <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:2px">
+                <span><strong>${esc(proj.name)}</strong> <span style="background:#333;color:#9cdcfe;padding:0 4px;border-radius:2px;font-size:10px">${esc(proj.language)}</span></span>
+                <span style="color:#808080">${label}</span>
+              </div>
+              <div style="background:#2d2d2d;border-radius:2px;height:4px;overflow:hidden">
+                <div style="background:${barColor};height:100%;width:${barPct}%"></div>
+              </div>
+            </div>`;
+          }
+          container.innerHTML = progressHtml;
+        }
+      }
+    }
 
   } catch (err) {
     document.getElementById('workspaces-list').innerHTML = `<div class="error-msg">Failed to load workspaces: ${esc(err.message)}</div>`;
@@ -803,8 +872,23 @@ async function killPortProcess(port, workspaceName, btn) {
 
 async function stopWorkspace(name, btn) {
   btn.disabled = true;
-  btn.textContent = 'Stopping...';
+  btn.textContent = 'Stopping watcher...';
   try {
+    // Stop watcher first (signals shutdown via heartbeat)
+    try {
+      await fetch('/api/watcher/stop', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspace: name }),
+      });
+      // Wait briefly for watcher to receive shutdown signal on next heartbeat
+      await new Promise(r => setTimeout(r, 3000));
+    } catch {
+      // Watcher may not be running — continue to stop container
+    }
+
+    // Stop the Docker container
+    btn.textContent = 'Stopping container...';
     await fetch('/api/docker/stop', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1080,21 +1164,101 @@ function cancelWizard() {
   loadWorkspaces();
 }
 
+let wizardWatcherPoll = null;
+
 function finishWizard() {
+  if (wizardWatcherPoll) { clearInterval(wizardWatcherPoll); wizardWatcherPoll = null; }
   cancelWizard();
+}
+
+async function wizardStartWatcher() {
+  const btn = document.getElementById('wizard-watcher-btn');
+  const status = document.getElementById('wizard-watcher-status');
+  const monitor = document.getElementById('wizard-watcher-monitor');
+  btn.disabled = true;
+  status.textContent = 'Starting watcher...';
+
+  try {
+    const ws = wizardData.workspaceName;
+    const resp = await fetch('/api/watcher/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workspace: ws })
+    });
+    const data = await resp.json();
+    if (!resp.ok) {
+      status.textContent = data.error || 'Failed to start';
+      btn.disabled = false;
+      return;
+    }
+    status.textContent = 'Started, waiting for heartbeat...';
+    monitor.classList.remove('hidden');
+
+    // Poll for progress every 3s
+    wizardWatcherPoll = setInterval(() => updateWizardWatcherProgress(ws), 3000);
+    // Immediate first check
+    setTimeout(() => updateWizardWatcherProgress(ws), 1500);
+  } catch (err) {
+    status.textContent = err.name === 'TypeError'
+      ? 'Setup GUI not reachable'
+      : 'Error: ' + err.message;
+    btn.disabled = false;
+  }
+}
+
+async function updateWizardWatcherProgress(workspace) {
+  try {
+    const resp = await fetch(`/api/service-proxy/watcher-status?workspace=${encodeURIComponent(workspace)}`);
+    if (!resp.ok) return;
+    const data = await resp.json();
+
+    const statusEl = document.getElementById('wizard-watcher-status');
+    const activeWatchers = (data.watchers || []).filter(w => w.status === 'active');
+    const w = activeWatchers[0];
+
+    if (!w) {
+      document.getElementById('wizard-watcher-phase').innerHTML = `
+        <div style="display:flex;align-items:center;gap:8px;font-size:13px">
+          <span class="dot-yellow" style="display:inline-block;width:8px;height:8px;border-radius:50%"></span>
+          <span>Waiting for watcher to connect...</span>
+        </div>`;
+      return;
+    }
+
+    const progress = w.progress || {};
+    renderWatcherProgress('wizard-watcher', progress);
+
+    // Update status text based on phase
+    if (progress.phase === 'watching') {
+      statusEl.textContent = 'Initial scan complete!';
+      statusEl.style.color = '#4ec9b0';
+      if (wizardWatcherPoll) { clearInterval(wizardWatcherPoll); wizardWatcherPoll = null; }
+    } else if (progress.phase === 'scanning' || progress.phase === 'reconciling') {
+      const pp = progress.projectProgress || [];
+      const active = pp.find(p => p.phase === 'ingesting');
+      if (active && active.total > 0) {
+        const pct = Math.round((active.current / active.total) * 100);
+        statusEl.textContent = `${progress.phase === 'scanning' ? 'Scanning' : 'Reconciling'}: ${active.name} (${pct}%)`;
+      } else {
+        statusEl.textContent = progress.phase === 'scanning' ? 'Scanning...' : 'Reconciling...';
+      }
+    }
+  } catch {
+    // Silently ignore polling errors
+  }
 }
 
 function showStep(n) {
   wizardStep = n;
-  // Show/hide content panels (6 internal steps: 0-5)
-  for (let i = 0; i <= 5; i++) {
+  // Show/hide content panels (7 internal steps: 0-6)
+  for (let i = 0; i <= 6; i++) {
     document.getElementById('step-' + i).classList.toggle('hidden', i !== n);
   }
-  // Update step indicators (4 visible indicators)
-  // Steps 0,1,2 → indicator 0 (Projects); 3 → 1 (Engine); 4 → 2 (Workspace); 5 → 3 (Review)
-  const indMap = [0, 0, 0, 1, 2, 3];
+  // Update step indicators (5 visible indicators)
+  // Steps 0,1,2 → indicator 0 (Projects); 3 → 1 (Engine); 4 → 2 (Workspace); 5 → 3 (Review); 6 → 4 (Watcher)
+  const indMap = [0, 0, 0, 1, 2, 3, 4];
   const activeInd = indMap[n];
-  for (let i = 0; i <= 3; i++) {
+  for (let i = 0; i <= 4; i++) {
     const el = document.getElementById('step-ind-' + i);
     el.className = 'wizard-step' + (i === activeInd ? ' active' : (i < activeInd ? ' done' : ''));
   }
@@ -1106,6 +1270,7 @@ function wizardBack() {
   else if (wizardStep === 3) showStep(0); // Engine → Projects list
   else if (wizardStep === 4) showStep(3); // Workspace → Engine
   else if (wizardStep === 5) showStep(4); // Review → Workspace
+  else if (wizardStep === 6) showStep(5); // Watcher → Review
 }
 
 function wizardNext() {
@@ -1205,7 +1370,19 @@ function switchTab(name) {
   document.querySelectorAll('.tabs .tab').forEach(t => t.classList.remove('active'));
   document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
   document.querySelector(`.tab-content#tab-${name}`).classList.add('active');
-  document.querySelector(`.tabs .tab:nth-child(${name === 'scan' ? 1 : name === 'p4' ? 2 : 3})`).classList.add('active');
+  document.querySelector(`.tabs .tab:nth-child(${name === 'scan' ? 1 : 2})`).classList.add('active');
+}
+
+// ── Sort scan results ──────────────────────────────────
+
+function sortScanResults(results) {
+  results.sort((a, b) => {
+    const aTemplate = /template/i.test(a.dir) || /template/i.test(a.name);
+    const bTemplate = /template/i.test(b.dir) || /template/i.test(b.name);
+    if (aTemplate !== bTemplate) return aTemplate ? 1 : -1;
+    if (a.hasEngine !== b.hasEngine) return b.hasEngine ? 1 : -1;
+    return (a.name || '').localeCompare(b.name || '');
+  });
 }
 
 // ── Step 1: Scan Drives ────────────────────────────────
@@ -1228,7 +1405,7 @@ function startScan() {
   evtSource.addEventListener('done', e => {
     const d = JSON.parse(e.data);
     // Sort: projects with engine source first
-    scanResults.sort((a, b) => (b.hasEngine ? 1 : 0) - (a.hasEngine ? 1 : 0));
+    sortScanResults(scanResults);
     results.innerHTML = scanResults.map(p => makeProjectCard(p)).join('');
     status.innerHTML = `Found ${d.total} project(s).`;
     btn.disabled = false;
@@ -1241,52 +1418,9 @@ function startScan() {
   });
   evtSource.onerror = () => {
     // Sort whatever we have so far
-    scanResults.sort((a, b) => (b.hasEngine ? 1 : 0) - (a.hasEngine ? 1 : 0));
+    sortScanResults(scanResults);
     results.innerHTML = scanResults.map(p => makeProjectCard(p)).join('');
     status.innerHTML = `Scan complete.`;
-    btn.disabled = false;
-    evtSource.close();
-  };
-}
-
-// ── Step 1: P4 Scan ────────────────────────────────────
-
-function startP4Scan() {
-  const btn = document.getElementById('p4-scan-btn');
-  const status = document.getElementById('p4-status');
-  const results = document.getElementById('p4-results');
-  btn.disabled = true;
-  status.classList.remove('hidden');
-  status.innerHTML = '<span class="scan-spinner"></span> Scanning P4 clients...';
-  results.innerHTML = '';
-
-  const p4Results = [];
-  const evtSource = new EventSource('/api/p4clients');
-  evtSource.addEventListener('info', e => {
-    const d = JSON.parse(e.data);
-    status.innerHTML = `<span class="scan-spinner"></span> ${esc(d.message)}`;
-  });
-  evtSource.addEventListener('project', e => {
-    p4Results.push(JSON.parse(e.data));
-  });
-  evtSource.addEventListener('error', e => {
-    const d = JSON.parse(e.data);
-    status.innerHTML = `Error: ${esc(d.message)}`;
-    btn.disabled = false;
-  });
-  evtSource.addEventListener('done', e => {
-    const d = JSON.parse(e.data);
-    // Sort: projects with engine source first
-    p4Results.sort((a, b) => (b.hasEngine ? 1 : 0) - (a.hasEngine ? 1 : 0));
-    results.innerHTML = p4Results.map(p => makeProjectCard(p)).join('');
-    status.innerHTML = `Found ${d.total} project(s) in ${d.clientCount || 0} client(s).`;
-    btn.disabled = false;
-    evtSource.close();
-  });
-  evtSource.onerror = () => {
-    p4Results.sort((a, b) => (b.hasEngine ? 1 : 0) - (a.hasEngine ? 1 : 0));
-    results.innerHTML = p4Results.map(p => makeProjectCard(p)).join('');
-    status.innerHTML = 'P4 scan complete.';
     btn.disabled = false;
     evtSource.close();
   };
@@ -1296,9 +1430,12 @@ function makeProjectCard(p) {
   const dir = (p.dir || '').replace(/\\/g, '/');
   const p4 = p.p4client ? `<div class="p4">P4 client: ${esc(p.p4client)}</div>` : '';
   const engineBadge = p.hasEngine ? ' <span class="badge" style="background:#2d4a2d;color:#4ec9b0">Engine</span>' : '';
-  return `<div class="project-card" onclick="selectProject('${escAttr(dir)}')">
+  const isTemplate = /template/i.test(dir) || /template/i.test(p.name);
+  const dimStyle = isTemplate ? 'opacity:0.5' : '';
+  const templateBadge = isTemplate ? ' <span class="badge" style="background:#4d3519;color:#ce9178">Template</span>' : '';
+  return `<div class="project-card" onclick="selectProject('${escAttr(dir)}')" style="${dimStyle}">
     <div style="flex:1">
-      <div class="name">${esc(p.name)}${engineBadge}</div>
+      <div class="name">${esc(p.name)}${engineBadge}${templateBadge}</div>
       <div class="path">${esc(dir)}</div>
       ${p4}
     </div>
@@ -1762,12 +1899,24 @@ function commonParentDir(paths) {
 
 function populateHookTargets() {
   const roots = wizardData.addedProjects.map(p => p.projectRoot);
+  // Include engine root in common parent calculation — engine code also needs hooks
+  if (wizardData.engineRoot) {
+    roots.push(wizardData.engineRoot);
+  }
   const parent = commonParentDir(roots);
 
   wizardData.hookTargets = [];
-  // Add common parent if it differs from every individual project root
-  if (parent && !roots.includes(parent)) {
+  // Add common parent if it differs from every individual root
+  const projectRoots = wizardData.addedProjects.map(p => p.projectRoot);
+  if (parent && !projectRoots.includes(parent) && parent !== wizardData.engineRoot) {
     wizardData.hookTargets.push({ path: parent, label: 'Workspace root (recommended)' });
+  }
+  // Add engine root if present
+  if (wizardData.engineRoot) {
+    const isAlsoProjectRoot = projectRoots.includes(wizardData.engineRoot);
+    if (!isAlsoProjectRoot) {
+      wizardData.hookTargets.push({ path: wizardData.engineRoot, label: 'Engine root (recommended)' });
+    }
   }
   // Add each project root
   for (const p of wizardData.addedProjects) {
@@ -1845,11 +1994,33 @@ function populateWorkspaceHookTargets(name) {
   if (!ws || !ws.config) return;
 
   const roots = deriveProjectRoots(ws.config);
-  const parent = commonParentDir(roots);
+
+  // Derive engine root from config (Engine project paths → parent of Engine/)
+  let engineRoot = null;
+  for (const project of (ws.config.projects || [])) {
+    if (project.name === 'Engine') {
+      for (const p of (project.paths || [])) {
+        const normalized = p.replace(/\\/g, '/');
+        const engineIdx = normalized.indexOf('/Engine/');
+        if (engineIdx !== -1) {
+          engineRoot = normalized.substring(0, engineIdx);
+          break;
+        }
+      }
+      if (engineRoot) break;
+    }
+  }
+
+  // Include engine root for better common parent
+  const allRoots = engineRoot ? [...roots, engineRoot] : roots;
+  const parent = commonParentDir(allRoots);
 
   const targets = [];
-  if (parent && roots.length > 1 && !roots.includes(parent)) {
+  if (parent && !roots.includes(parent) && parent !== engineRoot) {
     targets.push({ path: parent, label: 'Common root (recommended)' });
+  }
+  if (engineRoot && !roots.includes(engineRoot)) {
+    targets.push({ path: engineRoot, label: 'Engine root (recommended)' });
   }
   for (const root of roots) {
     targets.push({ path: root, label: root.split('/').pop() });
