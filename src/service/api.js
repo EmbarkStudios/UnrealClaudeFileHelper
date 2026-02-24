@@ -414,7 +414,6 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
     }
   }, 15000);
 
-  // Returns watcher heartbeat data including progress state (phase, projectProgress, watchedPaths)
   app.get('/watcher-status', (req, res) => {
     const watchers = [];
     const staleCutoff = Date.now() - 45000; // 3 missed heartbeats = stale

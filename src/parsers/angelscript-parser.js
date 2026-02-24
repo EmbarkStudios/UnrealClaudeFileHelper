@@ -1,4 +1,5 @@
 import { readFile } from 'fs/promises';
+import { countBraces } from './parser-utils.js';
 
 // Keywords that should not be treated as return types for function detection
 const AS_KEYWORDS = new Set([
@@ -262,27 +263,3 @@ export function parseContent(content, filePath = '') {
   return result;
 }
 
-function countBraces(line) {
-  let delta = 0;
-  let inString = false;
-  let stringChar = '';
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i];
-    if (inString) {
-      if (ch === '\\') { i++; continue; }
-      if (ch === stringChar) inString = false;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      inString = true;
-      stringChar = ch;
-    } else if (ch === '/' && line[i + 1] === '/') {
-      break; // rest is comment
-    } else if (ch === '{') {
-      delta++;
-    } else if (ch === '}') {
-      delta--;
-    }
-  }
-  return delta;
-}

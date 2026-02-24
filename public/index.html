@@ -179,6 +179,29 @@
       });
     }
 
+    async function waitForWatcherState(targetActive, { maxAttempts = 30, intervalMs = 2000 } = {}) {
+      for (let i = 0; i < maxAttempts; i++) {
+        await new Promise(r => setTimeout(r, intervalMs));
+        try {
+          const sr = await WorkspaceContext.serviceFetch('/watcher-status');
+          const sd = await sr.json();
+          if (sd.hasActiveWatcher === targetActive) return true;
+        } catch {}
+      }
+      return false;
+    }
+
+    async function waitForServiceHealth({ maxAttempts = 30, intervalMs = 2000 } = {}) {
+      for (let i = 0; i < maxAttempts; i++) {
+        await new Promise(r => setTimeout(r, intervalMs));
+        try {
+          const resp = await WorkspaceContext.serviceFetch('/health');
+          if (resp.ok) return true;
+        } catch {}
+      }
+      return false;
+    }
+
     async function startWatcher() {
       const btn = document.getElementById('start-watcher-btn');
       const msg = document.getElementById('start-watcher-msg');
@@ -197,23 +220,13 @@
           return;
         }
         if (msg) msg.textContent = 'Started! Waiting for heartbeat...';
-        let attempts = 0;
-        const poll = setInterval(async () => {
-          attempts++;
-          try {
-            const sr = await WorkspaceContext.serviceFetch('/watcher-status');
-            const sd = await sr.json();
-            if (sd.hasActiveWatcher) {
-              clearInterval(poll);
-              loadWatcher();
-            }
-          } catch {}
-          if (attempts >= 30) {
-            clearInterval(poll);
-            if (msg) msg.textContent = 'Started but still reconciling — refresh shortly';
-            if (btn) btn.disabled = false;
-          }
-        }, 2000);
+        const ok = await waitForWatcherState(true);
+        if (ok) {
+          loadWatcher();
+        } else {
+          if (msg) msg.textContent = 'Started but still reconciling \u2014 refresh shortly';
+          if (btn) btn.disabled = false;
+        }
       } catch (err) {
         if (msg) msg.textContent = err.name === 'TypeError'
           ? 'Setup GUI not reachable. Ensure you are on port 3846.'
@@ -475,13 +488,7 @@
           body: JSON.stringify({ workspace: WorkspaceContext.active })
         });
         status.textContent = 'Waiting for watcher to stop...';
-        let stopped = false;
-        for (let i = 0; i < 20; i++) {
-          await new Promise(r => setTimeout(r, 1000));
-          const sr = await WorkspaceContext.serviceFetch('/watcher-status');
-          const sd = await sr.json();
-          if (!sd.hasActiveWatcher) { stopped = true; break; }
-        }
+        const stopped = await waitForWatcherState(false, { maxAttempts: 20, intervalMs: 1000 });
         if (!stopped) {
           status.textContent = 'Watcher did not stop in time. Try closing it manually.';
           btn.textContent = 'Restart Watcher';
@@ -503,15 +510,14 @@
           return;
         }
         status.textContent = 'Waiting for new watcher...';
-        for (let i = 0; i < 30; i++) {
-          await new Promise(r => setTimeout(r, 2000));
-          const sr = await WorkspaceContext.serviceFetch('/watcher-status');
-          const sd = await sr.json();
-          if (sd.hasActiveWatcher) { loadAllWithOverview(); return; }
+        const started = await waitForWatcherState(true);
+        if (started) {
+          loadAllWithOverview();
+        } else {
+          status.textContent = 'Watcher started but still reconciling. Refresh shortly.';
+          btn.textContent = 'Restart Watcher';
+          btn.disabled = false;
         }
-        status.textContent = 'Watcher started but still reconciling. Refresh shortly.';
-        btn.textContent = 'Restart Watcher';
-        btn.disabled = false;
       } catch (err) {
         status.textContent = 'Error: ' + err.message;
         btn.textContent = 'Restart Watcher';
@@ -535,24 +541,14 @@
           return;
         }
         btn.textContent = 'Started';
-        let attempts = 0;
-        const poll = setInterval(async () => {
-          attempts++;
-          try {
-            const sr = await WorkspaceContext.serviceFetch('/watcher-status');
-            const sd = await sr.json();
-            if (sd.hasActiveWatcher) {
-              clearInterval(poll);
-              loadOverview();
-              loadWatcher();
-            }
-          } catch {}
-          if (attempts >= 30) {
-            clearInterval(poll);
-            btn.textContent = 'Start';
-            btn.disabled = false;
-          }
-        }, 2000);
+        const ok = await waitForWatcherState(true);
+        if (ok) {
+          loadOverview();
+          loadWatcher();
+        } else {
+          btn.textContent = 'Timed out';
+          setTimeout(() => { btn.textContent = 'Start'; btn.disabled = false; }, 5000);
+        }
       } catch (err) {
         btn.textContent = 'Error';
         setTimeout(() => { btn.textContent = 'Start'; btn.disabled = false; }, 5000);
@@ -588,24 +584,15 @@
       } catch {}
       document.getElementById('ov-service-dot').className = 'overview-dot dot-yellow';
       document.getElementById('ov-service-detail').textContent = 'Restarting...';
-      let attempts = 0;
-      const poll = setInterval(async () => {
-        attempts++;
-        try {
-          const resp = await WorkspaceContext.serviceFetch('/health');
-          if (resp.ok) {
-            clearInterval(poll);
-            loadAllWithOverview();
-          }
-        } catch {}
-        if (attempts >= 30) {
-          clearInterval(poll);
-          document.getElementById('ov-service-dot').className = 'overview-dot dot-red';
-          document.getElementById('ov-service-detail').textContent = 'Failed to restart \u2014 check logs';
-          btn.textContent = 'Restart';
-          btn.disabled = false;
-        }
-      }, 2000);
+      const ok = await waitForServiceHealth();
+      if (ok) {
+        loadAllWithOverview();
+      } else {
+        document.getElementById('ov-service-dot').className = 'overview-dot dot-red';
+        document.getElementById('ov-service-detail').textContent = 'Failed to restart \u2014 check logs';
+        btn.textContent = 'Restart';
+        btn.disabled = false;
+      }
     }
 
     // --- Projects card (merged config + stats + freshness) ---
