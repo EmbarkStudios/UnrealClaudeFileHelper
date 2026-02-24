@@ -6,13 +6,5 @@ on:
 
 jobs:
   review:
-    if: github.event.pull_request.draft == false
     uses: EmbarkStudios/johlander-claude-workflows/.github/workflows/claude-code-review.yml@main
-    with:
-      review_prompt: |
-        Review this PR. Focus on:
-        - Code quality and potential bugs
-        - Security issues
-        - Test coverage gaps
-        Approve the PR if everything looks good, or request changes if there are issues.
     secrets: inherit
