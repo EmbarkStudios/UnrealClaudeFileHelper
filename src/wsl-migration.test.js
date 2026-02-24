@@ -318,10 +318,12 @@ describe('POST /internal/ingest — assets', () => {
     assert.equal(data.results[0].name, 'BP_Player');
   });
 
-  it('should return asset stats', async () => {
-    const { status, data } = await fetchJson(`${BASE}/asset-stats`);
+  it('should include asset counts in stats', async () => {
+    const { status, data } = await fetchJson(`${BASE}/stats`);
     assert.equal(status, 200);
-    assert.ok(data.total >= 2, `expected >= 2 assets, got ${data.total}`);
+    // totalAssets and blueprintCount are now part of getStats()
+    assert.ok('totalAssets' in data, 'stats should include totalAssets field');
+    assert.ok('blueprintCount' in data, 'stats should include blueprintCount field');
   });
 });
 

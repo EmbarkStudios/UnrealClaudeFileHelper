@@ -1611,6 +1611,8 @@ export class IndexDatabase {
     const totalFiles = this.db.prepare("SELECT COUNT(*) as count FROM files WHERE language != 'asset'").get().count;
     const totalTypes = this.db.prepare('SELECT COUNT(*) as count FROM types').get().count;
     const totalMembers = this.db.prepare('SELECT COUNT(*) as count FROM members').get().count;
+    const totalAssets = this.db.prepare('SELECT COUNT(*) as count FROM assets').get().count;
+    const blueprintCount = this.db.prepare('SELECT COUNT(*) as count FROM assets WHERE parent_class IS NOT NULL').get().count;
 
     const kindCounts = this.db.prepare(`
       SELECT kind, COUNT(*) as count FROM types GROUP BY kind
@@ -1636,6 +1638,8 @@ export class IndexDatabase {
       totalFiles,
       totalTypes,
       totalMembers,
+      totalAssets,
+      blueprintCount,
       byKind: {},
       byMemberKind: {},
       byLanguage: {},
@@ -1772,31 +1776,20 @@ export class IndexDatabase {
         mtime = excluded.mtime,
         asset_class = excluded.asset_class,
         parent_class = excluded.parent_class
+      RETURNING id, path, name, content_path, folder, project, extension, mtime, asset_class, parent_class
     `);
 
     const insertMany = this.db.transaction((items) => {
+      const results = [];
       for (const item of items) {
-        stmt.run(item.path, item.name, item.contentPath, item.folder, item.project, item.extension, item.mtime,
+        const row = stmt.get(item.path, item.name, item.contentPath, item.folder, item.project, item.extension, item.mtime,
           item.assetClass || null, item.parentClass || null);
+        results.push(row);
       }
+      return results;
     });
 
-    insertMany(assets);
-
-    // Batch fetch all upserted rows (1 query instead of N individual SELECTs)
-    const paths = assets.map(a => a.path);
-    const results = [];
-    const chunkSize = 900;
-    for (let i = 0; i < paths.length; i += chunkSize) {
-      const chunk = paths.slice(i, i + chunkSize);
-      const ph = chunk.map(() => '?').join(',');
-      const rows = this.db.prepare(`
-        SELECT id, path, name, content_path, folder, project, extension, mtime, asset_class, parent_class
-        FROM assets WHERE path IN (${ph})
-      `).all(...chunk);
-      results.push(...rows);
-    }
-    return results;
+    return insertMany(assets);
   }
 
   deleteAsset(path) {
@@ -1960,29 +1953,6 @@ export class IndexDatabase {
     return Array.from(folderCounts.entries())
       .map(([path, assetCount]) => ({ path, assetCount }))
       .sort((a, b) => a.path.localeCompare(b.path));
-  }
-
-  getAssetStats() {
-    const total = this.db.prepare('SELECT COUNT(*) as count FROM assets').get().count;
-
-    const byProject = this.db.prepare(`
-      SELECT project, COUNT(*) as count FROM assets GROUP BY project
-    `).all();
-
-    const byExtension = this.db.prepare(`
-      SELECT extension, COUNT(*) as count FROM assets GROUP BY extension
-    `).all();
-
-    const byAssetClass = this.db.prepare(`
-      SELECT COALESCE(asset_class, 'Unknown') as asset_class, COUNT(*) as count
-      FROM assets GROUP BY asset_class ORDER BY count DESC
-    `).all();
-
-    const blueprintCount = this.db.prepare(`
-      SELECT COUNT(*) as count FROM assets WHERE parent_class IS NOT NULL
-    `).get().count;
-
-    return { total, byProject, byExtension, byAssetClass, blueprintCount };
   }
 
   // --- Trigram index methods ---
@@ -2383,7 +2353,7 @@ export class IndexDatabase {
 // Wrap key methods with slow-query timing and analytics logging
 const methodsToTime = [
   'findTypeByName', 'findChildrenOf', 'findMember', 'findFileByName',
-  'findAssetByName', 'getStats', 'getAssetStats', 'upsertAssetBatch',
+  'findAssetByName', 'getStats', 'upsertAssetBatch',
 ];
 for (const method of methodsToTime) {
   const original = IndexDatabase.prototype[method];
