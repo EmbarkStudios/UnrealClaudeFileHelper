@@ -1,4 +1,5 @@
 import { readFile } from 'fs/promises';
+import { countBraces } from './parser-utils.js';
 
 export async function parseCppFile(filePath) {
   const content = await readFile(filePath, 'utf-8');
@@ -381,27 +382,3 @@ function extractSpecifiers(line) {
   return match[1].split(',').map(s => s.trim()).filter(Boolean);
 }
 
-function countBraces(line) {
-  let delta = 0;
-  let inString = false;
-  let stringChar = '';
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i];
-    if (inString) {
-      if (ch === '\\') { i++; continue; }
-      if (ch === stringChar) inString = false;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      inString = true;
-      stringChar = ch;
-    } else if (ch === '/' && line[i + 1] === '/') {
-      break;
-    } else if (ch === '{') {
-      delta++;
-    } else if (ch === '}') {
-      delta--;
-    }
-  }
-  return delta;
-}
