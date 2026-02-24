@@ -5,6 +5,9 @@
   "main": "src/service/index.js",
   "type": "module",
   "scripts": {
+    "start": "node src/cli.js start",
+    "validate": "node src/cli.js validate",
+    "status": "node src/cli.js status",
     "setup": "node src/setup-gui.js",
     "watcher": "node src/watcher/watcher-client.js",
     "bridge": "node src/bridge/mcp-bridge.js",

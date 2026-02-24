@@ -56,6 +56,17 @@ function loadWorkspacesConfig() {
 }
 loadWorkspacesConfig();
 
+// Pre-flight: warn about missing workspace configs (non-blocking)
+if (!INSIDE_CONTAINER) {
+  const configDir = join(__dirname, '..', '..', 'workspace-configs');
+  for (const name of workspaceUrls.keys()) {
+    const configPath = join(configDir, `${name}.json`);
+    if (!existsSync(configPath)) {
+      console.error(`[Bridge] WARNING: Missing workspace-configs/${name}.json for workspace "${name}". Run "npm run setup" or "npm start" to fix.`);
+    }
+  }
+}
+
 function resolveServiceUrl(workspace) {
   if (workspace && workspaceUrls.has(workspace)) {
     return workspaceUrls.get(workspace);
