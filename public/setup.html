@@ -764,18 +764,19 @@ async function loadWorkspaces() {
           let progressHtml = '';
           for (const proj of wStatus.projectProgress) {
             const pct = proj.total > 0 ? Math.min(100, Math.round((proj.current / proj.total) * 100)) : 0;
-            const isDone = proj.phase === 'done' || proj.phase === 'upToDate';
+            const isDone = proj.phase === 'done';
+            const isUpToDate = proj.phase === 'upToDate';
             const label = isDone ? 'done'
-              : proj.phase === 'upToDate' ? 'up to date'
+              : isUpToDate ? 'up to date'
               : proj.phase === 'collecting' ? 'scanning...'
               : proj.phase === 'diffing' ? 'comparing...'
               : `${(proj.current || 0).toLocaleString()} / ${(proj.total || 0).toLocaleString()}`;
-            const barColor = isDone ? '#4ec9b0' : '#569cd6';
-            const barPct = isDone ? 100 : pct;
+            const barColor = (isDone || isUpToDate) ? '#4ec9b0' : '#569cd6';
+            const barPct = (isDone || isUpToDate) ? 100 : pct;
             progressHtml += `<div style="margin-bottom:4px">
               <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:2px">
                 <span><strong>${esc(proj.name)}</strong> <span style="background:#333;color:#9cdcfe;padding:0 4px;border-radius:2px;font-size:10px">${esc(proj.language)}</span></span>
-                <span style="color:#808080">${label}</span>
+                <span style="color:#808080">${esc(label)}</span>
               </div>
               <div style="background:#2d2d2d;border-radius:2px;height:4px;overflow:hidden">
                 <div style="background:${barColor};height:100%;width:${barPct}%"></div>
@@ -1159,6 +1160,7 @@ function startWizard() {
 }
 
 function cancelWizard() {
+  if (wizardWatcherPoll) { clearInterval(wizardWatcherPoll); wizardWatcherPoll = null; }
   document.getElementById('wizard-section').classList.add('hidden');
   document.getElementById('overview-section').classList.remove('hidden');
   loadWorkspaces();
