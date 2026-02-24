@@ -1006,7 +1006,7 @@ export class IndexDatabase {
   findTypeByName(name, options = {}) {
     const { fuzzy = false, project = null, language = null, kind = null, maxResults = 10, includeAssets } = options;
 
-    const includeSourceTypes = !language || language === 'all' || language === 'angelscript' || language === 'cpp';
+    const includeSourceTypes = !language || language === 'all' || language === 'angelscript' || language === 'cpp' || language === 'csharp';
     // For fuzzy mode, assets are opt-in (default false) UNLESS language is explicitly "blueprint".
     const assetsDefault = !fuzzy;
     const includeBlueprints = (includeAssets !== undefined ? includeAssets : (language === 'blueprint' || assetsDefault))
@@ -1325,7 +1325,7 @@ export class IndexDatabase {
   findChildrenOf(parentClass, options = {}) {
     const { recursive = true, project = null, language = null, maxResults = 50 } = options;
 
-    const includeSourceTypes = !language || language === 'all' || language === 'angelscript' || language === 'cpp';
+    const includeSourceTypes = !language || language === 'all' || language === 'angelscript' || language === 'cpp' || language === 'csharp';
     const includeBlueprints = !language || language === 'all' || language === 'blueprint';
 
     const parentFound = !!(

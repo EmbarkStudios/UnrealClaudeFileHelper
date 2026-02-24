@@ -491,7 +491,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       }
       // For text-searchable languages, report null mtime for files missing content
       // so the watcher re-ingests them (self-healing for previously content-less files)
-      const needsContent = ['angelscript', 'cpp', 'config'].includes(language);
+      const needsContent = ['angelscript', 'cpp', 'csharp', 'config'].includes(language);
       const sql = needsContent
         ? `SELECT f.path, f.mtime, fc.file_id as has_content
            FROM files f LEFT JOIN file_content fc ON f.id = fc.file_id
