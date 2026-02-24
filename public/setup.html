@@ -794,6 +794,7 @@ async function loadWorkspaces() {
 }
 
 async function startWorkspace(name, btn, opts) {
+  if (!btn) return;
   btn.disabled = true;
   btn.textContent = 'Starting...';
   const statusEl = btn.parentElement.querySelector('.ws-start-error');
@@ -1048,6 +1049,8 @@ async function rebuildWorkspace(name) {
 
 function startAfterRebuild(name, opts) {
   const status = document.getElementById('ws-rebuild-status-' + name);
+  // Disable any action buttons in the status area to prevent double-submission
+  status.querySelectorAll('button').forEach(b => { b.disabled = true; });
   status.textContent = 'Restarting container...';
   fetch('/api/docker/start', {
     method: 'POST',

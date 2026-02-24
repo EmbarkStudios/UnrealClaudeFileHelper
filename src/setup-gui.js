@@ -1467,6 +1467,8 @@ route('GET', '/api/docker/logs/:workspace', (req, res, params) => {
 
 /** Check if a port is in use. Returns { inUse, pid, process, raw } */
 function checkPortInUse(port) {
+  port = parseInt(port, 10);
+  if (!port || port < 1 || port > 65535) return { inUse: false };
   let output;
   if (process.platform === 'win32') {
     output = execFileSync('wsl', [
