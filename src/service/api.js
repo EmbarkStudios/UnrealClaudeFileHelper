@@ -1004,6 +1004,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
     if (depthDebounceTimer) clearTimeout(depthDebounceTimer);
     depthDebounceTimer = setTimeout(() => {
       depthDebounceTimer = null;
+      app._depthDebounceTimer = null;
       try {
         if (database.getMetadata('depthComputeNeeded')) {
           const t = performance.now();
@@ -1019,7 +1020,9 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
 
   app.get('/stats', (req, res) => {
     try {
-      res.json(getStatsCache());
+      const data = getStatsCache();
+      if (!data) return res.status(503).json({ error: 'Stats not yet available' });
+      res.json(data);
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
@@ -1179,6 +1182,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
   app.get('/summary', (req, res) => {
     try {
       const cached = getStatsCache();
+      if (!cached) return res.status(503).json({ error: 'Stats not yet available' });
       const lastBuild = cached.lastBuild;
 
       res.json({
