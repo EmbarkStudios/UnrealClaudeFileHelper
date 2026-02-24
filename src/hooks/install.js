@@ -132,11 +132,11 @@ export async function installHooks(projectDir, { silent = false, tryGo = true } 
         allPrefixes.push(...prefixes);
         workspaces.push({ port: ws.port, prefixes });
 
-        // Check if this workspace owns the project directory (longest prefix match wins)
+        // Check if this workspace owns the project directory (longest overlap wins)
         for (const prefix of prefixes) {
           const normalizedPrefix = normalizePath(prefix);
           if (normalizedProjectDir.startsWith(normalizedPrefix) || normalizedPrefix.startsWith(normalizedProjectDir)) {
-            const matchLen = normalizedPrefix.length;
+            const matchLen = Math.min(normalizedProjectDir.length, normalizedPrefix.length);
             if (matchLen > bestMatchLen) {
               bestMatchLen = matchLen;
               owningWorkspace = name;
@@ -224,7 +224,7 @@ export async function installHooks(projectDir, { silent = false, tryGo = true } 
   const dashboardPort = owningPort || 3847;
   searchInstructions = searchInstructions.replace(/\{\{PORT\}\}/g, String(dashboardPort));
 
-  const defaultWsName = wsConfig?.defaultWorkspace || 'main';
+  const defaultWsName = wsConfig?.defaultWorkspace || Object.keys(wsConfig?.workspaces || {})[0] || 'main';
   if (owningWorkspace && owningWorkspace !== defaultWsName) {
     const wsBlock = `### Workspace-Specific MCP Configuration\n\n` +
       `This project is indexed by the **"${owningWorkspace}"** workspace. ` +
@@ -248,7 +248,7 @@ export async function installHooks(projectDir, { silent = false, tryGo = true } 
     const existing = readFileSync(claudeLocalMdPath, 'utf-8');
     const beginIdx = existing.indexOf(BEGIN_MARKER);
     const endIdx = existing.indexOf(END_MARKER);
-    if (beginIdx !== -1 && endIdx !== -1) {
+    if (beginIdx !== -1 && endIdx !== -1 && beginIdx < endIdx) {
       // Replace existing section between markers
       const before = existing.slice(0, beginIdx).trimEnd();
       const after = existing.slice(endIdx + END_MARKER.length).trimStart();
