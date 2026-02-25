@@ -9,6 +9,7 @@ import { parseContent as parseAngelscriptContent } from '../parsers/angelscript-
 import { parseCppContent } from '../parsers/cpp-parser.js';
 import { parseCSharpContent } from '../parsers/csharp-parser.js';
 import { parseUAssetHeader } from '../parsers/uasset-parser.js';
+import { compileExcludePatterns, shouldExcludePath } from './exclude-patterns.js';
 
 const MAX_CONCURRENT = 10;
 const BATCH_SIZE = 50;
@@ -17,6 +18,7 @@ const serviceUrl = workerData?.serviceUrl;
 const config = workerData?.config;
 const task = workerData?.task;
 const workerPrefix = `${workerData?.logPrefix || '[Watcher]'}[scan]`;
+const compiledExcludePatterns = compileExcludePatterns(config?.exclude || []);
 
 let filesIngested = 0;
 let assetsIngested = 0;
@@ -81,17 +83,11 @@ function deriveModule(relativePath, projectName) {
   return [projectName, ...parts].join('.');
 }
 
-function shouldExclude(filePath) {
-  const normalized = filePath.replace(/\\/g, '/');
-  for (const pattern of config.exclude || []) {
-    if (pattern.includes('**')) {
-      const regex = new RegExp(pattern.replace(/\*\*/g, '.*').replace(/\*/g, '[^/]*'));
-      if (regex.test(normalized)) return true;
-    } else if (normalized.includes(pattern.replace(/\*/g, ''))) {
-      return true;
-    }
-  }
-  return false;
+export function shouldExclude(filePath, excludeMatchers = compiledExcludePatterns) {
+  const matchers = Array.isArray(excludeMatchers) && typeof excludeMatchers[0] === 'string'
+    ? compileExcludePatterns(excludeMatchers)
+    : excludeMatchers;
+  return shouldExcludePath(filePath, matchers || []);
 }
 
 function collectFiles(dirPath, projectName, extensions, language, includePatterns) {
@@ -313,7 +309,12 @@ async function runFullScan(languages) {
           const batch = files.slice(i, i + BATCH_SIZE * 10);
           const assets = [];
           for (const f of batch) {
-            try { assets.push(parseAsset(f.path, project)); } catch {}
+            try {
+              assets.push(parseAsset(f.path, project));
+            } catch (err) {
+              recordIngest({ errors: 1 });
+              warn(`Error parsing asset ${f.path}: ${err.message}`);
+            }
           }
           if (assets.length > 0) {
             await postJson(`${serviceUrl}/internal/ingest`, { assets });
@@ -415,7 +416,12 @@ async function runReconcile(project) {
         const batch = changed.slice(i, i + BATCH_SIZE * 10);
         const assets = [];
         for (const f of batch) {
-          try { assets.push(parseAsset(f.path, project)); } catch {}
+          try {
+            assets.push(parseAsset(f.path, project));
+          } catch (err) {
+            recordIngest({ errors: 1 });
+            warn(`Error parsing asset ${f.path}: ${err.message}`);
+          }
         }
         if (assets.length > 0) {
           await postJson(`${serviceUrl}/internal/ingest`, { assets });
@@ -471,7 +477,6 @@ async function runReconcileProjects(projectNames) {
     try {
       await runReconcile(project);
     } catch (err) {
-      errorsCount++;
       recordIngest({ errors: 1 });
       warn(`Reconcile failed for ${project.name}: ${err.message}`);
     }
@@ -499,22 +504,28 @@ async function main() {
   throw new Error(`Unknown task kind: ${task.kind}`);
 }
 
-main()
-  .then(() => {
-    postMessage('result', {
-      telemetry: {
-        filesIngested,
-        assetsIngested,
-        deletesProcessed,
-        errorsCount,
-        lastIngestAt
-      }
+export function getTelemetrySnapshot() {
+  return {
+    filesIngested,
+    assetsIngested,
+    deletesProcessed,
+    errorsCount,
+    lastIngestAt
+  };
+}
+
+if (parentPort) {
+  main()
+    .then(() => {
+      postMessage('result', {
+        telemetry: getTelemetrySnapshot()
+      });
+    })
+    .catch((err) => {
+      postMessage('log', {
+        level: 'error',
+        message: `${workerPrefix} Fatal error: ${err.stack || err.message}`
+      });
+      process.exit(1);
     });
-  })
-  .catch((err) => {
-    postMessage('log', {
-      level: 'error',
-      message: `${workerPrefix} Fatal error: ${err.stack || err.message}`
-    });
-    process.exit(1);
-  });
+}

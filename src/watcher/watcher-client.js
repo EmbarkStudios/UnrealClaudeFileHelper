@@ -22,6 +22,8 @@ import { parseCppContent } from '../parsers/cpp-parser.js';
 import { parseCSharpContent } from '../parsers/csharp-parser.js';
 import { parseUAssetHeader } from '../parsers/uasset-parser.js';
 import { gzipSync } from 'zlib';
+import { compileExcludePatterns, shouldExcludePath } from './exclude-patterns.js';
+import { getConfigReloadAction, mergeScanTelemetrySnapshot, reconcileFinalTelemetry } from './scan-telemetry.js';
 
 // --- Config ---
 
@@ -85,6 +87,7 @@ const logPrefix = workspaceName ? `[Watcher:${workspaceName}]` : '[Watcher]';
 
 // Config is fetched from the service after connection — initially null
 let config = null;
+let compiledExcludePatterns = [];
 let lastConfigVersion = 0;
 
 // Config-derived settings (set after config fetch)
@@ -121,14 +124,22 @@ let nextReconcileTimestamp = null;
 let scanTaskInFlight = false;
 
 function mergeScanTelemetry(telemetry) {
-  if (!telemetry) return;
-  totalFilesIngested += telemetry.filesIngested || 0;
-  totalAssetsIngested += telemetry.assetsIngested || 0;
-  totalDeletes += telemetry.deletesProcessed || 0;
-  totalErrors += telemetry.errorsCount || 0;
-  if (telemetry.lastIngestAt) {
-    lastIngestTimestamp = telemetry.lastIngestAt;
-  }
+  const merged = mergeScanTelemetrySnapshot({
+    filesIngested: totalFilesIngested,
+    assetsIngested: totalAssetsIngested,
+    deletesProcessed: totalDeletes,
+    errorsCount: totalErrors,
+    lastIngestAt: lastIngestTimestamp
+  }, telemetry);
+  totalFilesIngested = merged.filesIngested;
+  totalAssetsIngested = merged.assetsIngested;
+  totalDeletes = merged.deletesProcessed;
+  totalErrors = merged.errorsCount;
+  lastIngestTimestamp = merged.lastIngestAt;
+}
+
+function refreshCompiledExcludePatterns() {
+  compiledExcludePatterns = compileExcludePatterns(config?.exclude || []);
 }
 
 async function runScanTask(task) {
@@ -172,22 +183,11 @@ async function runScanTask(task) {
         return;
       }
       if (msg.type === 'result') {
-        const finalTelemetry = msg.telemetry || null;
-        if (!streamedTelemetry) {
-          telemetry = finalTelemetry;
-          return;
-        }
-        if (finalTelemetry) {
-          telemetry = {
-            filesIngested: Math.max(0, (finalTelemetry.filesIngested || 0) - streamedTotals.filesIngested),
-            assetsIngested: Math.max(0, (finalTelemetry.assetsIngested || 0) - streamedTotals.assetsIngested),
-            deletesProcessed: Math.max(0, (finalTelemetry.deletesProcessed || 0) - streamedTotals.deletesProcessed),
-            errorsCount: Math.max(0, (finalTelemetry.errorsCount || 0) - streamedTotals.errorsCount),
-            lastIngestAt: finalTelemetry.lastIngestAt || null
-          };
-        } else {
-          telemetry = null;
-        }
+        telemetry = reconcileFinalTelemetry({
+          streamedTelemetry,
+          streamedTotals,
+          finalTelemetry: msg.telemetry || null
+        });
       }
     });
 
@@ -249,16 +249,7 @@ function deriveModule(relativePath, projectName) {
 }
 
 function shouldExclude(path) {
-  const normalized = path.replace(/\\/g, '/');
-  for (const pattern of config.exclude || []) {
-    if (pattern.includes('**')) {
-      const regex = new RegExp(pattern.replace(/\*\*/g, '.*').replace(/\*/g, '[^/]*'));
-      if (regex.test(normalized)) return true;
-    } else if (normalized.includes(pattern.replace(/\*/g, ''))) {
-      return true;
-    }
-  }
-  return false;
+  return shouldExcludePath(path, compiledExcludePatterns);
 }
 
 function collectFiles(dirPath, projectName, extensions, language, includePatterns) {
@@ -512,7 +503,12 @@ async function reconcile(project) {
         const batch = changed.slice(i, i + BATCH_SIZE * 10);
         const assets = [];
         for (const f of batch) {
-          try { assets.push(parseAsset(f.path, project)); } catch {}
+          try {
+            assets.push(parseAsset(f.path, project));
+          } catch (err) {
+            totalErrors++;
+            console.warn(`${logPrefix} Error parsing asset ${f.path}: ${err.message}`);
+          }
         }
         if (assets.length > 0) {
           await postJson(`${SERVICE_URL}/internal/ingest`, { assets });
@@ -573,7 +569,12 @@ async function fullScan(languages) {
           const batch = files.slice(i, i + BATCH_SIZE * 10);
           const assets = [];
           for (const f of batch) {
-            try { assets.push(parseAsset(f.path, project)); } catch {}
+            try {
+              assets.push(parseAsset(f.path, project));
+            } catch (err) {
+              totalErrors++;
+              console.warn(`${logPrefix} Error parsing asset ${f.path}: ${err.message}`);
+            }
           }
           if (assets.length > 0) {
             await postJson(`${SERVICE_URL}/internal/ingest`, { assets });
@@ -629,10 +630,7 @@ function startWatcher() {
   let debounceTimer = null;
 
   const watcher = chokidar.watch(watchPaths, {
-    ignored: [
-      /(^|[\/\\])\../,
-      ...(config.exclude || []).map(p => new RegExp(p.replace(/\*\*/g, '.*').replace(/\*/g, '[^/\\\\]*')))
-    ],
+    ignored: (watchPath) => /(^|[\/\\])\../.test(watchPath) || shouldExclude(watchPath),
     persistent: true,
     ignoreInitial: true,
     awaitWriteFinish: { stabilityThreshold: 100, pollInterval: 50 }
@@ -729,6 +727,7 @@ async function main() {
   // Fetch config from service (single source of truth)
   try {
     config = await fetchConfigFromService();
+    refreshCompiledExcludePatterns();
     console.log(`${logPrefix} Config from service: ${config.projects.length} projects`);
   } catch (err) {
     // Fallback: try local config.json if service doesn't have the endpoint (older version)
@@ -736,6 +735,7 @@ async function main() {
     const fallbackPath = join(import.meta.dirname, '..', '..', 'config.json');
     if (existsSync(fallbackPath)) {
       config = JSON.parse(readFileSync(fallbackPath, 'utf-8'));
+      refreshCompiledExcludePatterns();
       console.log(`${logPrefix} Config from local fallback: ${config.projects.length} projects`);
     } else {
       throw new Error('No config available: service /internal/config failed and no local config.json found');
@@ -787,14 +787,14 @@ async function main() {
           const newConfig = await fetchConfigFromService();
           const projectsChanged = JSON.stringify(newConfig.projects) !== JSON.stringify(config.projects);
           config = newConfig;
-          if (projectsChanged) {
-            if (activeWatcher) {
-              console.log(`${logPrefix} Projects changed — restarting file watches...`);
-              await activeWatcher.close();
-              activeWatcher = startWatcher();
-            } else {
-              console.log(`${logPrefix} Projects changed during bootstrap — watcher will start with updated config`);
-            }
+          refreshCompiledExcludePatterns();
+          const reloadAction = getConfigReloadAction(projectsChanged, Boolean(activeWatcher));
+          if (reloadAction === 'restart') {
+            console.log(`${logPrefix} Projects changed — restarting file watches...`);
+            await activeWatcher.close();
+            activeWatcher = startWatcher();
+          } else if (reloadAction === 'defer') {
+            console.log(`${logPrefix} Projects changed during bootstrap — watcher will start with updated config`);
           } else {
             console.log(`${logPrefix} Config updated (no project path changes)`);
           }
@@ -852,6 +852,7 @@ async function main() {
   nextReconcileTimestamp = new Date(Date.now() + getReconcileIntervalMs()).toISOString();
 
   async function periodicReconcile() {
+    nextReconcileTimestamp = new Date(Date.now() + getReconcileIntervalMs()).toISOString();
     if (scanTaskInFlight) {
       console.log(`${logPrefix} Skipping periodic reconciliation (scan already in progress)`);
       return;
