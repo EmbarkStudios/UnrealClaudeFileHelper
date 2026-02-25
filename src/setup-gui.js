@@ -20,6 +20,11 @@ import {
   generateDockerComposeContent,
 } from './workspace-utils.js';
 
+// Prevent unhandled rejections from silently crashing the server
+process.on('unhandledRejection', (reason) => {
+  console.error('[setup-gui] Unhandled rejection:', reason);
+});
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const ROOT = join(__dirname, '..');
@@ -639,6 +644,12 @@ route('GET', '/', (req, res) => {
   serveStatic(req, res, join(PUBLIC_DIR, 'setup.html'));
 });
 
+// GET /api/health — Quick health check for frontend connectivity detection
+route('GET', '/api/health', (req, res) => {
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ ok: true, pid: process.pid, uptime: process.uptime() }));
+});
+
 // GET /api/prerequisites — Check all prerequisites
 route('GET', '/api/prerequisites', (req, res) => {
   const prereqs = checkAllPrerequisites();
@@ -1132,6 +1143,35 @@ route('POST', '/api/detect', async (req, res) => {
     const engineRoot = detectEngineRoot(projectRoot);
     const engineDirs = engineRoot ? detectEngineDirectories(engineRoot) : [];
 
+    // Build diagnostic hints when no directories are found
+    let hints = null;
+    if (directories.length === 0) {
+      hints = [];
+      const expectedDirs = ['Script', 'Source', 'Plugins', 'Content', 'Config'];
+      let foundEntries;
+      try { foundEntries = readdirSync(projectRoot, { withFileTypes: true }); } catch { foundEntries = []; }
+      const subdirs = foundEntries.filter(e => e.isDirectory()).map(e => e.name);
+      const files = foundEntries.filter(e => e.isFile()).map(e => e.name);
+      hints.push(`Path resolved to: ${fwd(projectRoot)}`);
+      if (subdirs.length === 0 && files.length === 0) {
+        hints.push('Directory is empty.');
+      } else {
+        const uprojectFile = files.find(f => f.endsWith('.uproject'));
+        if (!uprojectFile && files.length > 0) {
+          hints.push(`No .uproject file found. Top-level files: ${files.slice(0, 5).join(', ')}${files.length > 5 ? '...' : ''}`);
+        }
+        if (subdirs.length > 0) {
+          hints.push(`Subdirectories found: ${subdirs.slice(0, 10).join(', ')}${subdirs.length > 10 ? '...' : ''}`);
+        }
+        const missing = expectedDirs.filter(d => !subdirs.includes(d));
+        if (missing.length > 0 && missing.length < expectedDirs.length) {
+          hints.push(`Expected dirs not found: ${missing.join(', ')}`);
+        } else if (missing.length === expectedDirs.length) {
+          hints.push(`None of the expected UE dirs found (${expectedDirs.join(', ')}). Is this the correct project root?`);
+        }
+      }
+    }
+
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       projectRoot: fwd(projectRoot),
@@ -1139,6 +1179,7 @@ route('POST', '/api/detect', async (req, res) => {
       directories,
       engineRoot: engineRoot ? fwd(engineRoot) : null,
       engineDirectories: engineDirs,
+      ...(hints ? { hints } : {}),
     }));
   } catch (err) {
     res.writeHead(500, { 'Content-Type': 'application/json' });
@@ -1928,6 +1969,18 @@ const server = http.createServer(async (req, res) => {
 
   res.writeHead(404, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({ error: 'Not found' }));
+});
+
+server.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`\n  ERROR: Port ${PORT} is already in use.`);
+    console.error(`  Another instance of the setup GUI may be running.`);
+    console.error(`  Try: npx kill-port ${PORT}   or   netstat -ano | findstr :${PORT}\n`);
+  } else {
+    console.error(`\n  ERROR: Failed to start setup GUI: ${err.message}`);
+    console.error(`  Code: ${err.code || 'unknown'}\n`);
+  }
+  process.exit(1);
 });
 
 server.listen(PORT, () => {

@@ -789,7 +789,12 @@ async function loadWorkspaces() {
     }
 
   } catch (err) {
-    document.getElementById('workspaces-list').innerHTML = `<div class="error-msg">Failed to load workspaces: ${esc(err.message)}</div>`;
+    const health = await checkServerHealth();
+    if (!health.ok) {
+      document.getElementById('workspaces-list').innerHTML = connectionErrorHtml(health.detail);
+    } else {
+      document.getElementById('workspaces-list').innerHTML = `<div class="error-msg">Failed to load workspaces: ${esc(err.message)}</div>`;
+    }
   }
 }
 
@@ -1389,7 +1394,7 @@ function sortScanResults(results) {
 
 // ── Step 1: Scan Drives ────────────────────────────────
 
-function startScan() {
+async function startScan() {
   const btn = document.getElementById('scan-btn');
   const status = document.getElementById('scan-status');
   const results = document.getElementById('scan-results');
@@ -1398,13 +1403,25 @@ function startScan() {
   status.innerHTML = '<span class="scan-spinner"></span> Scanning drives...';
   results.innerHTML = '';
 
+  // Pre-flight health check
+  const health = await checkServerHealth();
+  if (!health.ok) {
+    status.innerHTML = '';
+    results.innerHTML = connectionErrorHtml(health.detail);
+    btn.disabled = false;
+    return;
+  }
+
   const scanResults = [];
+  let receivedAnyEvent = false;
   const evtSource = new EventSource('/api/scan');
   evtSource.addEventListener('project', e => {
+    receivedAnyEvent = true;
     scanResults.push(JSON.parse(e.data));
     status.innerHTML = `<span class="scan-spinner"></span> Scanning drives... (${scanResults.length} found)`;
   });
   evtSource.addEventListener('done', e => {
+    receivedAnyEvent = true;
     const d = JSON.parse(e.data);
     // Sort: projects with engine source first
     sortScanResults(scanResults);
@@ -1414,17 +1431,33 @@ function startScan() {
     evtSource.close();
   });
   evtSource.addEventListener('error', e => {
-    status.innerHTML = 'Scan error.';
+    receivedAnyEvent = true;
+    try {
+      const d = JSON.parse(e.data);
+      status.innerHTML = `<span class="error-msg">Scan error: ${esc(d.message || 'Unknown error')}</span>`;
+    } catch {
+      status.innerHTML = '<span class="error-msg">Scan error.</span>';
+    }
     btn.disabled = false;
     evtSource.close();
   });
-  evtSource.onerror = () => {
+  evtSource.onerror = async () => {
+    evtSource.close();
+    if (!receivedAnyEvent) {
+      // Connection failed before any data arrived — server likely unreachable
+      const recheck = await checkServerHealth();
+      if (!recheck.ok) {
+        status.innerHTML = '';
+        results.innerHTML = connectionErrorHtml(recheck.detail);
+        btn.disabled = false;
+        return;
+      }
+    }
     // Sort whatever we have so far
     sortScanResults(scanResults);
     results.innerHTML = scanResults.map(p => makeProjectCard(p)).join('');
     status.innerHTML = `Scan complete.`;
     btn.disabled = false;
-    evtSource.close();
   };
 }
 
@@ -1460,6 +1493,7 @@ function selectManualPath() {
 // ── Step 1→2: Select project and detect ────────────────
 
 async function selectProject(path) {
+  hideError('manual-error');
   try {
     const resp = await fetch('/api/detect', {
       method: 'POST',
@@ -1469,7 +1503,7 @@ async function selectProject(path) {
     const data = await resp.json();
 
     if (!resp.ok) {
-      alert(data.error || 'Detection failed');
+      showError('manual-error', data.error || 'Detection failed');
       return;
     }
 
@@ -1478,11 +1512,22 @@ async function selectProject(path) {
     wizardData.current.directories = data.directories || [];
     wizardData.current.engineRoot = data.engineRoot;
     wizardData.current.engineDirs = data.engineDirectories || [];
+    wizardData.current.detectHints = data.hints || null;
 
     populateDirectories();
     showStep(2);
   } catch (err) {
-    alert('Error: ' + err.message);
+    // Detect server connectivity issues vs other errors
+    if (err.name === 'TypeError' || err.message?.includes('fetch') || err.message?.includes('Failed')) {
+      const health = await checkServerHealth();
+      if (!health.ok) {
+        const errorEl = document.getElementById('manual-error');
+        errorEl.innerHTML = connectionErrorHtml(health.detail);
+        errorEl.classList.remove('hidden');
+        return;
+      }
+    }
+    showError('manual-error', 'Error: ' + err.message);
   }
 }
 
@@ -1494,7 +1539,16 @@ function populateDirectories() {
 
   const el = document.getElementById('dir-checkboxes');
   if (wizardData.current.directories.length === 0) {
-    el.innerHTML = '<div class="info-msg">No standard directories found in this project.</div>';
+    const hints = wizardData.current.detectHints;
+    let html = '<div class="info-msg">No standard directories found in this project.</div>';
+    if (hints && hints.length > 0) {
+      html += '<div style="margin-top:8px;padding:10px;background:#2d2d2d;border:1px solid #3e3e3e;border-radius:4px;font-size:12px">';
+      html += '<div style="color:#dcdcaa;margin-bottom:4px;font-weight:600">Diagnostics:</div>';
+      html += '<ul style="margin:0;padding-left:18px;color:#999">';
+      hints.forEach(h => { html += `<li style="margin-bottom:2px">${esc(h)}</li>`; });
+      html += '</ul></div>';
+    }
+    el.innerHTML = html;
     return;
   }
   let html = '';
@@ -2112,6 +2166,30 @@ function showError(id, msg) {
 
 function hideError(id) {
   document.getElementById(id).classList.add('hidden');
+}
+
+// Check if the setup server is reachable; returns { ok, detail }
+async function checkServerHealth() {
+  try {
+    const resp = await fetch('/api/health', { signal: AbortSignal.timeout(3000) });
+    if (resp.ok) return { ok: true };
+    return { ok: false, detail: `Server returned status ${resp.status}` };
+  } catch (err) {
+    if (err.name === 'TypeError' || err.message?.includes('fetch')) {
+      return { ok: false, detail: 'Cannot reach the setup server. It may have crashed or been stopped. Try restarting: npm run setup' };
+    }
+    return { ok: false, detail: err.message };
+  }
+}
+
+function connectionErrorHtml(detail) {
+  return `<div class="error-msg" style="padding:10px;background:#3a1d1d;border:1px solid #5a3333;border-radius:4px;margin-top:8px">
+    <div style="font-weight:600;margin-bottom:4px">Connection lost to setup server</div>
+    <div style="font-size:12px;color:#ccc;margin-bottom:8px">${esc(detail)}</div>
+    <div style="font-size:12px;color:#999">
+      <strong>To fix:</strong> Check the terminal where you ran <code style="background:#2d2d2d;padding:1px 4px;border-radius:2px">npm run setup</code> for errors, then restart it.
+    </div>
+  </div>`;
 }
 
 // ── Init ───────────────────────────────────────────────
