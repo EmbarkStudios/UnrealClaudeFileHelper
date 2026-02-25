@@ -1285,10 +1285,49 @@ route('POST', '/api/docker/build', (req, res) => {
 });
 
 // POST /api/docker/start — Start workspace container(s)
+// Supports body: { workspace?, force?, killConflicts? }
 route('POST', '/api/docker/start', async (req, res) => {
   try {
     const body = await parseJsonBody(req);
     const workspace = body.workspace; // optional, start specific or all
+    const force = body.force || false;
+    const killConflicts = body.killConflicts || false;
+
+    // Pre-check: detect port conflicts before attempting docker compose up
+    if (!force) {
+      const wsConfig = loadWorkspacesConfigCached();
+      const workspaces = wsConfig.workspaces || {};
+      const targets = workspace ? { [workspace]: workspaces[workspace] } : workspaces;
+      const conflicts = [];
+      for (const [wsName, ws] of Object.entries(targets)) {
+        if (!ws || !ws.port) continue;
+        try {
+          const info = checkPortInUse(ws.port);
+          if (info.inUse) {
+            // Skip docker-proxy — that's the container itself already running
+            const proc = (info.process || '').toLowerCase();
+            if (proc === 'docker-proxy' || proc === 'com.docker') continue;
+            conflicts.push({ workspace: wsName, port: ws.port, pid: info.pid, process: info.process });
+          }
+        } catch { /* ignore check failures, let docker compose handle it */ }
+      }
+
+      if (conflicts.length > 0) {
+        if (killConflicts) {
+          // Auto-kill all conflicting processes before starting
+          for (const c of conflicts) {
+            try { killPort(c.port); } catch { /* best effort */ }
+          }
+          // Wait for ports to free up (WSL processes can take time to release)
+          await new Promise(r => setTimeout(r, 1000));
+        } else {
+          // Return conflicts so the frontend can offer kill/force options
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ portConflicts: conflicts }));
+          return;
+        }
+      }
+    }
 
     const service = workspace ? ` ${workspace}` : '';
 
@@ -1465,6 +1504,50 @@ route('GET', '/api/docker/logs/:workspace', (req, res, params) => {
   }
 });
 
+// ── Port conflict helpers ────────────────────────────────────
+
+/** Check if a port is in use. Returns { inUse, pid, process, raw } */
+function checkPortInUse(port) {
+  port = parseInt(port, 10);
+  if (!port || port < 1 || port > 65535) return { inUse: false };
+  let output;
+  if (process.platform === 'win32') {
+    output = execFileSync('wsl', [
+      '--', 'bash', '-c', `ss -tlnp 2>/dev/null | grep ':${port} ' || true`,
+    ], { encoding: 'utf-8', timeout: 5000 }).trim();
+  } else {
+    output = execSync(`ss -tlnp 2>/dev/null | grep ':${port} ' || true`, {
+      encoding: 'utf-8', timeout: 5000,
+    }).trim();
+  }
+  if (!output) return { inUse: false };
+  const pidMatch = output.match(/pid=(\d+)/);
+  const procMatch = output.match(/\("([^"]+)"/);
+  return {
+    inUse: true,
+    pid: pidMatch ? parseInt(pidMatch[1], 10) : null,
+    process: procMatch ? procMatch[1] : null,
+    raw: output,
+  };
+}
+
+/** Kill the process using a specific port. Returns { killed, pid } */
+function killPort(port) {
+  const info = checkPortInUse(port);
+  if (!info.inUse || !info.pid) return { killed: false };
+  const pid = info.pid;
+  if (process.platform === 'win32') {
+    execFileSync('wsl', [
+      '--', 'bash', '-c', `kill ${pid} 2>/dev/null; sleep 0.5; kill -0 ${pid} 2>/dev/null && kill -9 ${pid} 2>/dev/null; true`,
+    ], { encoding: 'utf-8', timeout: 5000 });
+  } else {
+    execSync(`kill ${pid} 2>/dev/null; sleep 0.5; kill -0 ${pid} 2>/dev/null && kill -9 ${pid} 2>/dev/null; true`, {
+      encoding: 'utf-8', timeout: 5000,
+    });
+  }
+  return { killed: true, pid };
+}
+
 // GET /api/port-check/:port — Check what process is using a port (WSL)
 route('GET', '/api/port-check/:port', (req, res, params) => {
   const port = parseInt(params.port, 10);
@@ -1474,31 +1557,9 @@ route('GET', '/api/port-check/:port', (req, res, params) => {
     return;
   }
   try {
-    let output;
-    if (process.platform === 'win32') {
-      output = execFileSync('wsl', [
-        '--', 'bash', '-c', `ss -tlnp 2>/dev/null | grep ':${port} ' || true`,
-      ], { encoding: 'utf-8', timeout: 5000 }).trim();
-    } else {
-      output = execSync(`ss -tlnp 2>/dev/null | grep ':${port} ' || true`, {
-        encoding: 'utf-8', timeout: 5000,
-      }).trim();
-    }
-    if (!output) {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ inUse: false }));
-      return;
-    }
-    // Extract PID and process name from ss output, e.g.: users:(("node",pid=828,fd=37))
-    const pidMatch = output.match(/pid=(\d+)/);
-    const procMatch = output.match(/\("([^"]+)"/);
+    const info = checkPortInUse(port);
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({
-      inUse: true,
-      pid: pidMatch ? parseInt(pidMatch[1], 10) : null,
-      process: procMatch ? procMatch[1] : null,
-      raw: output,
-    }));
+    res.end(JSON.stringify(info));
   } catch (err) {
     res.writeHead(500, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: err.message }));
@@ -1515,35 +1576,13 @@ route('POST', '/api/port-kill', async (req, res) => {
       res.end(JSON.stringify({ error: 'Invalid port' }));
       return;
     }
-    // Find the PID first
-    let ssOutput;
-    if (process.platform === 'win32') {
-      ssOutput = execFileSync('wsl', [
-        '--', 'bash', '-c', `ss -tlnp 2>/dev/null | grep ':${port} ' || true`,
-      ], { encoding: 'utf-8', timeout: 5000 }).trim();
-    } else {
-      ssOutput = execSync(`ss -tlnp 2>/dev/null | grep ':${port} ' || true`, {
-        encoding: 'utf-8', timeout: 5000,
-      }).trim();
-    }
-    const pidMatch = ssOutput.match(/pid=(\d+)/);
-    if (!pidMatch) {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: true, message: 'No process found on port' }));
-      return;
-    }
-    const pid = pidMatch[1];
-    if (process.platform === 'win32') {
-      execFileSync('wsl', [
-        '--', 'bash', '-c', `kill ${pid} 2>/dev/null; sleep 0.5; kill -0 ${pid} 2>/dev/null && kill -9 ${pid} 2>/dev/null; true`,
-      ], { encoding: 'utf-8', timeout: 5000 });
-    } else {
-      execSync(`kill ${pid} 2>/dev/null; sleep 0.5; kill -0 ${pid} 2>/dev/null && kill -9 ${pid} 2>/dev/null; true`, {
-        encoding: 'utf-8', timeout: 5000,
-      });
-    }
+    const result = killPort(port);
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ ok: true, killedPid: parseInt(pid, 10) }));
+    if (result.killed) {
+      res.end(JSON.stringify({ ok: true, killedPid: result.pid }));
+    } else {
+      res.end(JSON.stringify({ ok: true, message: 'No process found on port' }));
+    }
   } catch (err) {
     res.writeHead(500, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: err.message }));
