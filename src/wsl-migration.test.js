@@ -499,6 +499,86 @@ describe('Unknown project fallback', () => {
     assert.ok(data.results.length > 0, 'should still return results');
     assert.ok(data.hints?.some(h => h.includes("Unknown project 'FakeProject'")));
   });
+
+  it('should return warning hint for unknown project in browse-module', async () => {
+    const { status, data } = await fetchJson(`${BASE}/browse-module?module=Discovery.Script.Camera&project=NonExistent`);
+    assert.equal(status, 200);
+    assert.ok(data.hints?.some(h => h.includes("Unknown project 'NonExistent'")));
+  });
+
+  it('should return warning hint for unknown project in explain-type', async () => {
+    const { status, data } = await fetchJson(`${BASE}/explain-type?name=AimComponent&project=NonExistent&includeMembers=false&includeChildren=false`);
+    assert.equal(status, 200);
+    assert.ok(data.type, 'should still find the type');
+    assert.ok(data.hints?.some(h => h.includes("Unknown project 'NonExistent'")));
+  });
+});
+
+// ============================================================
+// Unknown project fallback — grep (requires mock Zoekt)
+// ============================================================
+
+describe('Unknown project fallback — grep', () => {
+  let grepServer, grepApp;
+  const GREP_PORT = 3898;
+  const GREP_BASE = `http://127.0.0.1:${GREP_PORT}`;
+
+  before(async () => {
+    const mockZoektClient = {
+      search: async () => ({
+        results: [{ file: 'Discovery/Script/Camera/AimComponent.as', line: 3, match: 'void GetTarget() {}', language: 'angelscript', project: 'Discovery' }],
+        matchedFiles: 1,
+        zoektDurationMs: 1
+      }),
+      searchAssets: async () => ({ results: [] })
+    };
+    const mockZoektManager = {
+      updateMirrorFile() {},
+      deleteMirrorFile() {},
+      triggerReindex() {},
+      isAvailable() { return true; },
+      getStatus() { return { available: true }; }
+    };
+
+    grepApp = createApi(database, null, null, {
+      zoektClient: mockZoektClient,
+      zoektManager: mockZoektManager
+    });
+    grepServer = await startServer(grepApp, GREP_PORT);
+  });
+
+  after(() => {
+    if (grepApp?._depthDebounceTimer) clearTimeout(grepApp._depthDebounceTimer);
+    if (grepApp?._watcherPruneInterval) clearInterval(grepApp._watcherPruneInterval);
+    if (grepServer) grepServer.close();
+  });
+
+  it('should return warning hint for unknown project in grep', async () => {
+    const { status, data } = await fetchJson(`${GREP_BASE}/grep?pattern=GetTarget&project=NonExistent`);
+    assert.equal(status, 200);
+    assert.ok(data.results?.length > 0 || data.totalMatches > 0, 'should return results');
+    assert.ok(data.hints?.some(h => h.includes("Unknown project 'NonExistent'")));
+  });
+
+  it('should not include warning in cached grep response for valid caller', async () => {
+    // First call with unknown project warms the cache (key uses project=null)
+    await fetchJson(`${GREP_BASE}/grep?pattern=AimSpeed&project=BadProject`);
+    // Second call with no project hits the same cache key
+    const { status, data } = await fetchJson(`${GREP_BASE}/grep?pattern=AimSpeed`);
+    assert.equal(status, 200);
+    // Should NOT have any "Unknown project" hint since this caller used no project
+    const hasWarning = data.hints?.some(h => h.includes('Unknown project'));
+    assert.ok(!hasWarning, `valid caller should not see project warning, got hints: ${JSON.stringify(data.hints)}`);
+  });
+
+  it('should inject warning on grep cache hit for unknown project', async () => {
+    // Warm cache with valid no-project call
+    await fetchJson(`${GREP_BASE}/grep?pattern=Jump`);
+    // Hit cache with unknown project — should inject warning
+    const { status, data } = await fetchJson(`${GREP_BASE}/grep?pattern=Jump&project=CacheTest`);
+    assert.equal(status, 200);
+    assert.ok(data.hints?.some(h => h.includes("Unknown project 'CacheTest'")));
+  });
 });
 
 // ============================================================
