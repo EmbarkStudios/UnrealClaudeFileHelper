@@ -137,6 +137,12 @@ async function runScanTask(task) {
     let done = false;
     let telemetry = null;
     let streamedTelemetry = false;
+    const streamedTotals = {
+      filesIngested: 0,
+      assetsIngested: 0,
+      deletesProcessed: 0,
+      errorsCount: 0
+    };
 
     const worker = new Worker(scanWorkerUrl, {
       workerData: {
@@ -157,11 +163,31 @@ async function runScanTask(task) {
       }
       if (msg.type === 'telemetry') {
         streamedTelemetry = true;
-        mergeScanTelemetry(msg.delta || null);
+        const delta = msg.delta || null;
+        mergeScanTelemetry(delta);
+        streamedTotals.filesIngested += delta?.filesIngested || 0;
+        streamedTotals.assetsIngested += delta?.assetsIngested || 0;
+        streamedTotals.deletesProcessed += delta?.deletesProcessed || 0;
+        streamedTotals.errorsCount += delta?.errorsCount || 0;
         return;
       }
       if (msg.type === 'result') {
-        telemetry = streamedTelemetry ? null : (msg.telemetry || null);
+        const finalTelemetry = msg.telemetry || null;
+        if (!streamedTelemetry) {
+          telemetry = finalTelemetry;
+          return;
+        }
+        if (finalTelemetry) {
+          telemetry = {
+            filesIngested: Math.max(0, (finalTelemetry.filesIngested || 0) - streamedTotals.filesIngested),
+            assetsIngested: Math.max(0, (finalTelemetry.assetsIngested || 0) - streamedTotals.assetsIngested),
+            deletesProcessed: Math.max(0, (finalTelemetry.deletesProcessed || 0) - streamedTotals.deletesProcessed),
+            errorsCount: Math.max(0, (finalTelemetry.errorsCount || 0) - streamedTotals.errorsCount),
+            lastIngestAt: finalTelemetry.lastIngestAt || null
+          };
+        } else {
+          telemetry = null;
+        }
       }
     });
 
@@ -762,9 +788,13 @@ async function main() {
           const projectsChanged = JSON.stringify(newConfig.projects) !== JSON.stringify(config.projects);
           config = newConfig;
           if (projectsChanged) {
-            console.log(`${logPrefix} Projects changed — restarting file watches...`);
-            if (activeWatcher) await activeWatcher.close();
-            activeWatcher = startWatcher();
+            if (activeWatcher) {
+              console.log(`${logPrefix} Projects changed — restarting file watches...`);
+              await activeWatcher.close();
+              activeWatcher = startWatcher();
+            } else {
+              console.log(`${logPrefix} Projects changed during bootstrap — watcher will start with updated config`);
+            }
           } else {
             console.log(`${logPrefix} Config updated (no project path changes)`);
           }
@@ -810,7 +840,9 @@ async function main() {
     }
   }
 
-  activeWatcher = startWatcher();
+  if (!activeWatcher) {
+    activeWatcher = startWatcher();
+  }
 
   // --- Periodic reconciliation: catch missed file changes ---
 

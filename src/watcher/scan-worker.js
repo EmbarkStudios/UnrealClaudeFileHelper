@@ -472,6 +472,7 @@ async function runReconcileProjects(projectNames) {
       await runReconcile(project);
     } catch (err) {
       errorsCount++;
+      recordIngest({ errors: 1 });
       warn(`Reconcile failed for ${project.name}: ${err.message}`);
     }
   }
