@@ -21,11 +21,38 @@ Trigger this skill when:
 
 The only hard prerequisite to launch the dashboard is **Node.js 20.18+**. Everything else (WSL, Docker, environment variables) is installed from within the dashboard GUI.
 
-If Node.js is missing or too old:
+**You MUST check and auto-install missing prerequisites — do NOT just tell the user to install them.**
+
+### Check Node.js
+
 ```bash
-powershell.exe -Command "Start-Process powershell -ArgumentList '-Command','winget install -e --id OpenJS.NodeJS.LTS --accept-source-agreements --accept-package-agreements' -Verb RunAs"
+node --version 2>/dev/null || echo "NOT_INSTALLED"
 ```
-Tell the user to **restart their terminal** after Node.js installation.
+
+If Node.js is missing or the version is below 20.18, **install it automatically**:
+
+```bash
+powershell.exe -Command "Start-Process powershell -ArgumentList '-Command','winget install -e --id OpenJS.NodeJS.LTS --accept-source-agreements --accept-package-agreements' -Verb RunAs" -Wait
+```
+
+After installation, verify it succeeded by checking again in a fresh shell:
+```bash
+"/c/Program Files/nodejs/node.exe" --version
+```
+
+If the install succeeded but `node` is not on PATH yet, tell the user to **restart their terminal** so the PATH update takes effect, then re-run this skill.
+
+### Check npm
+
+```bash
+npm --version 2>/dev/null || echo "NOT_INSTALLED"
+```
+
+npm ships with Node.js. If npm is missing but Node.js was just installed, the user needs to restart their terminal for PATH changes. If npm is still missing after restart, install it:
+
+```bash
+"/c/Program Files/nodejs/node.exe" "/c/Program Files/nodejs/node_modules/npm/bin/npm-cli.js" --version
+```
 
 ## Setup Steps
 
@@ -43,6 +70,11 @@ fi
 
 ```bash
 cd "$USERPROFILE/.claude/repos/embark-claude-index" && npm install --ignore-scripts --omit=dev
+```
+
+If `npm` is not found, use the full path:
+```bash
+cd "$USERPROFILE/.claude/repos/embark-claude-index" && "/c/Program Files/nodejs/npm" install --ignore-scripts --omit=dev
 ```
 
 ### Step 3: Launch the setup GUI
