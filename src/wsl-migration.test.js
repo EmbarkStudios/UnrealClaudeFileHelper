@@ -452,6 +452,136 @@ describe('POST /internal/ingest — error handling', () => {
 });
 
 // ============================================================
+// Unknown project fallback — graceful degradation
+// ============================================================
+
+describe('Unknown project fallback', () => {
+  it('should return results with warning hint for unknown project in find-type', async () => {
+    const { status, data } = await fetchJson(`${BASE}/find-type?name=AimComponent&project=NonExistent`);
+    assert.equal(status, 200);
+    assert.ok(data.results.length > 0, 'should still return results from all projects');
+    assert.ok(data.hints, 'should have hints array');
+    assert.ok(data.hints.some(h => h.includes("Unknown project 'NonExistent'")), 'should contain project warning');
+    assert.ok(data.hints.some(h => h.includes('Available:')), 'should list available projects');
+  });
+
+  it('should return results without warning for valid project', async () => {
+    const { status, data } = await fetchJson(`${BASE}/find-type?name=AimComponent&project=Discovery`);
+    assert.equal(status, 200);
+    assert.ok(data.results.length > 0, 'should return results');
+    assert.equal(data.hints, undefined, 'should not have hints when project is valid and results exist');
+  });
+
+  it('should return warning hint for unknown project in find-member', async () => {
+    const { status, data } = await fetchJson(`${BASE}/find-member?name=GetTarget&project=BadProject`);
+    assert.equal(status, 200);
+    assert.ok(data.results.length > 0, 'should still return results');
+    assert.ok(data.hints?.some(h => h.includes("Unknown project 'BadProject'")));
+  });
+
+  it('should return warning hint for unknown project in find-file', async () => {
+    const { status, data } = await fetchJson(`${BASE}/find-file?filename=AimComponent&project=DiscoveryConfig`);
+    assert.equal(status, 200);
+    assert.ok(data.results.length > 0, 'should still return results');
+    assert.ok(data.hints?.some(h => h.includes("Unknown project 'DiscoveryConfig'")));
+  });
+
+  it('should return warning hint for unknown project in find-children', async () => {
+    const { status, data } = await fetchJson(`${BASE}/find-children?parent=ACharacter&project=Bogus`);
+    assert.equal(status, 200);
+    assert.ok(data.results.length > 0, 'should still return results');
+    assert.ok(data.hints?.some(h => h.includes("Unknown project 'Bogus'")));
+  });
+
+  it('should return warning hint for unknown project in find-asset', async () => {
+    const { status, data } = await fetchJson(`${BASE}/find-asset?name=BP_Player&project=FakeProject`);
+    assert.equal(status, 200);
+    assert.ok(data.results.length > 0, 'should still return results');
+    assert.ok(data.hints?.some(h => h.includes("Unknown project 'FakeProject'")));
+  });
+
+  it('should return warning hint for unknown project in browse-module', async () => {
+    const { status, data } = await fetchJson(`${BASE}/browse-module?module=Discovery.Script.Camera&project=NonExistent`);
+    assert.equal(status, 200);
+    assert.ok(data.hints?.some(h => h.includes("Unknown project 'NonExistent'")));
+  });
+
+  it('should return warning hint for unknown project in explain-type', async () => {
+    const { status, data } = await fetchJson(`${BASE}/explain-type?name=AimComponent&project=NonExistent&includeMembers=false&includeChildren=false`);
+    assert.equal(status, 200);
+    assert.ok(data.type, 'should still find the type');
+    assert.ok(data.hints?.some(h => h.includes("Unknown project 'NonExistent'")));
+  });
+});
+
+// ============================================================
+// Unknown project fallback — grep (requires mock Zoekt)
+// ============================================================
+
+describe('Unknown project fallback — grep', () => {
+  let grepServer, grepApp;
+  const GREP_PORT = 3898;
+  const GREP_BASE = `http://127.0.0.1:${GREP_PORT}`;
+
+  before(async () => {
+    const mockZoektClient = {
+      search: async () => ({
+        results: [{ file: 'Discovery/Script/Camera/AimComponent.as', line: 3, match: 'void GetTarget() {}', language: 'angelscript', project: 'Discovery' }],
+        matchedFiles: 1,
+        zoektDurationMs: 1
+      }),
+      searchAssets: async () => ({ results: [] })
+    };
+    const mockZoektManager = {
+      updateMirrorFile() {},
+      deleteMirrorFile() {},
+      triggerReindex() {},
+      isAvailable() { return true; },
+      getStatus() { return { available: true }; }
+    };
+
+    grepApp = createApi(database, null, null, {
+      zoektClient: mockZoektClient,
+      zoektManager: mockZoektManager
+    });
+    grepServer = await startServer(grepApp, GREP_PORT);
+  });
+
+  after(() => {
+    if (grepApp?._depthDebounceTimer) clearTimeout(grepApp._depthDebounceTimer);
+    if (grepApp?._watcherPruneInterval) clearInterval(grepApp._watcherPruneInterval);
+    if (grepServer) grepServer.close();
+  });
+
+  it('should return warning hint for unknown project in grep', async () => {
+    const { status, data } = await fetchJson(`${GREP_BASE}/grep?pattern=GetTarget&project=NonExistent`);
+    assert.equal(status, 200);
+    assert.ok(data.results?.length > 0 || data.totalMatches > 0, 'should return results');
+    assert.ok(data.hints?.some(h => h.includes("Unknown project 'NonExistent'")));
+  });
+
+  it('should not include warning in cached grep response for valid caller', async () => {
+    // First call with unknown project warms the cache (key uses project=null)
+    await fetchJson(`${GREP_BASE}/grep?pattern=AimSpeed&project=BadProject`);
+    // Second call with no project hits the same cache key
+    const { status, data } = await fetchJson(`${GREP_BASE}/grep?pattern=AimSpeed`);
+    assert.equal(status, 200);
+    // Should NOT have any "Unknown project" hint since this caller used no project
+    const hasWarning = data.hints?.some(h => h.includes('Unknown project'));
+    assert.ok(!hasWarning, `valid caller should not see project warning, got hints: ${JSON.stringify(data.hints)}`);
+  });
+
+  it('should inject warning on grep cache hit for unknown project', async () => {
+    // Warm cache with valid no-project call
+    await fetchJson(`${GREP_BASE}/grep?pattern=Jump`);
+    // Hit cache with unknown project — should inject warning
+    const { status, data } = await fetchJson(`${GREP_BASE}/grep?pattern=Jump&project=CacheTest`);
+    assert.equal(status, 200);
+    assert.ok(data.hints?.some(h => h.includes("Unknown project 'CacheTest'")));
+  });
+});
+
+// ============================================================
 // ZoektMirror — local filesystem operations
 // ============================================================
 

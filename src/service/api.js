@@ -61,17 +61,19 @@ const watcherState = {
   configVersion: Date.now()  // bumped on PUT /internal/config
 };
 
-/** Validate project parameter, returning a 400 response if invalid. Returns true if invalid (response sent). */
-function validateProject(database, project, res, memIdx) {
+/** Validate project parameter. If unknown, clears to null and returns a warning hint. */
+function validateProject(database, project, memIdx) {
   if (project) {
     const exists = (memIdx && memIdx.isLoaded) ? memIdx.projectExists(project) : database.projectExists(project);
     if (!exists) {
       const available = (memIdx && memIdx.isLoaded) ? memIdx.getDistinctProjects() : database.getDistinctProjects();
-      res.status(400).json({ error: `Unknown project: ${project}. Available projects: ${available.join(', ')}` });
-      return true;
+      return {
+        project: null,
+        projectWarning: `Unknown project '${project}' — searching all projects instead. Available: ${available.join(', ')}`
+      };
     }
   }
-  return false;
+  return { project: project || null, projectWarning: null };
 }
 
 /** Build hints array for empty search results to guide agents. */
@@ -1040,19 +1042,19 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
 
   app.get('/find-type', async (req, res) => {
     try {
-      const { name, fuzzy, project, language, maxResults, includeAssets, contextLines: cl } = req.query;
+      const { name, fuzzy, project: rawProject, language, maxResults, includeAssets, contextLines: cl } = req.query;
 
       if (!name) {
         return res.status(400).json({ error: 'name parameter required' });
       }
-      if (validateProject(database, project, res, memoryIndex)) return;
+      const { project, projectWarning } = validateProject(database, rawProject, memoryIndex);
 
       const mr = parseInt(maxResults, 10) || 10;
       const contextLines = cl !== undefined ? parseInt(cl, 10) : 0;
 
       const opts = {
         fuzzy: fuzzy === 'true',
-        project: project || null,
+        project,
         language: language || null,
         kind: req.query.kind || null,
         maxResults: mr,
@@ -1074,6 +1076,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       if (results.length === 0) {
         response.hints = buildEmptyResultHints(database, { project, fuzzy: opts.fuzzy, supportsFuzzy: true }, memoryIndex);
       }
+      if (projectWarning) (response.hints ??= []).unshift(projectWarning);
       res.json(response);
     } catch (err) {
       res.status(500).json({ error: err.message });
@@ -1082,16 +1085,16 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
 
   app.get('/find-children', async (req, res) => {
     try {
-      const { parent, recursive, project, language, maxResults } = req.query;
+      const { parent, recursive, project: rawProject, language, maxResults } = req.query;
 
       if (!parent) {
         return res.status(400).json({ error: 'parent parameter required' });
       }
-      if (validateProject(database, project, res, memoryIndex)) return;
+      const { project, projectWarning } = validateProject(database, rawProject, memoryIndex);
 
       const opts = {
         recursive: recursive !== 'false',
-        project: project || null,
+        project,
         language: language || null,
         maxResults: parseInt(maxResults, 10) || 50
       };
@@ -1101,6 +1104,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       if (result.results && result.results.length === 0) {
         result.hints = buildEmptyResultHints(database, { project }, memoryIndex);
       }
+      if (projectWarning) (result.hints ??= []).unshift(projectWarning);
       res.json(result);
     } catch (err) {
       res.status(500).json({ error: err.message });
@@ -1109,15 +1113,15 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
 
   app.get('/browse-module', async (req, res) => {
     try {
-      const { module, project, language, maxResults } = req.query;
+      const { module, project: rawProject, language, maxResults } = req.query;
 
       if (!module) {
         return res.status(400).json({ error: 'module parameter required' });
       }
-      if (validateProject(database, project, res, memoryIndex)) return;
+      const { project, projectWarning } = validateProject(database, rawProject, memoryIndex);
 
       const opts = {
-        project: project || null,
+        project,
         language: language || null,
         maxResults: parseInt(maxResults, 10) || 100
       };
@@ -1128,6 +1132,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       if ((!result.types || result.types.length === 0) && (!result.files || result.files.length === 0)) {
         result.hints = buildEmptyResultHints(database, { project }, memoryIndex);
       }
+      if (projectWarning) (result.hints ??= []).unshift(projectWarning);
       res.json(result);
     } catch (err) {
       res.status(500).json({ error: err.message });
@@ -1136,17 +1141,17 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
 
   app.get('/find-file', async (req, res) => {
     try {
-      const { filename: rawFilename, project, language, maxResults } = req.query;
+      const { filename: rawFilename, project: rawProject, language, maxResults } = req.query;
 
       if (!rawFilename) {
         return res.status(400).json({ error: 'filename parameter required' });
       }
-      if (validateProject(database, project, res, memoryIndex)) return;
+      const { project, projectWarning } = validateProject(database, rawProject, memoryIndex);
 
       const filename = extractFilename(rawFilename);
 
       const opts = {
-        project: project || null,
+        project,
         language: language || null,
         maxResults: parseInt(maxResults, 10) || 20
       };
@@ -1157,6 +1162,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       if (results.length === 0) {
         response.hints = buildEmptyResultHints(database, { project }, memoryIndex);
       }
+      if (projectWarning) (response.hints ??= []).unshift(projectWarning);
       res.json(response);
     } catch (err) {
       res.status(500).json({ error: err.message });
@@ -1200,12 +1206,12 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
 
   app.get('/find-member', async (req, res) => {
     try {
-      const { name, fuzzy, containingType, containingTypeHierarchy, memberKind, project, language, maxResults, contextLines: cl, includeSignatures: iSig } = req.query;
+      const { name, fuzzy, containingType, containingTypeHierarchy, memberKind, project: rawProject, language, maxResults, contextLines: cl, includeSignatures: iSig } = req.query;
 
       if (!name) {
         return res.status(400).json({ error: 'name parameter required' });
       }
-      if (validateProject(database, project, res, memoryIndex)) return;
+      const { project, projectWarning } = validateProject(database, rawProject, memoryIndex);
 
       const mr = parseInt(maxResults, 10) || 20;
       const contextLines = cl !== undefined ? parseInt(cl, 10) : 0;
@@ -1216,7 +1222,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
         containingType: containingType || null,
         containingTypeHierarchy: containingTypeHierarchy === 'true',
         memberKind: memberKind || null,
-        project: project || null,
+        project,
         language: language || null,
         maxResults: mr
       };
@@ -1235,6 +1241,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       if (results.length === 0) {
         response.hints = buildEmptyResultHints(database, { project, fuzzy: opts.fuzzy, supportsFuzzy: true }, memoryIndex);
       }
+      if (projectWarning) (response.hints ??= []).unshift(projectWarning);
       res.json(response);
     } catch (err) {
       res.status(500).json({ error: err.message });
@@ -1262,12 +1269,12 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
 
   app.get('/explain-type', async (req, res) => {
     try {
-      const { name, project, language, contextLines: cl, includeMembers: im, includeChildren: ic, maxChildren: mc, maxFunctions: mf, maxProperties: mp } = req.query;
+      const { name, project: rawProject, language, contextLines: cl, includeMembers: im, includeChildren: ic, maxChildren: mc, maxFunctions: mf, maxProperties: mp } = req.query;
 
       if (!name) {
         return res.status(400).json({ error: 'name parameter required' });
       }
-      if (validateProject(database, project, res, memoryIndex)) return;
+      const { project, projectWarning } = validateProject(database, rawProject, memoryIndex);
 
       const startMs = performance.now();
       const contextLines = cl !== undefined ? parseInt(cl, 10) : 0;
@@ -1276,11 +1283,13 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       const maxChildren = parseInt(mc, 10) || 20;
 
       // Step 1: Find the type
-      const typeOpts = { project: project || null, language: language || null, maxResults: 1 };
+      const typeOpts = { project, language: language || null, maxResults: 1 };
       const typeResults = await poolQuery('findTypeByName', [name, typeOpts]);
 
       if (typeResults.length === 0) {
-        const response = { type: null, hints: buildEmptyResultHints(database, { project, supportsFuzzy: true }, memoryIndex) };
+        const hints = buildEmptyResultHints(database, { project, supportsFuzzy: true }, memoryIndex);
+        if (projectWarning) hints.unshift(projectWarning);
+        const response = { type: null, hints };
         return res.json(response);
       }
 
@@ -1300,7 +1309,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
         const maxFunctions = parseInt(mf, 10) || 30;
         const maxProperties = parseInt(mp, 10) || 30;
         const memberOpts = {
-          project: project || null,
+          project,
           language: language || null,
           maxFunctions,
           maxProperties
@@ -1325,7 +1334,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       if (includeChildren) {
         const childOpts = {
           recursive: true,
-          project: project || null,
+          project,
           language: language || null,
           maxResults: maxChildren
         };
@@ -1337,6 +1346,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       }
 
       response.queryTimeMs = Math.round(performance.now() - startMs);
+      if (projectWarning) (response.hints ??= []).unshift(projectWarning);
       res.json(response);
     } catch (err) {
       res.status(500).json({ error: err.message });
@@ -1347,16 +1357,16 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
 
   app.get('/find-asset', async (req, res) => {
     try {
-      const { name, fuzzy, project, folder, maxResults } = req.query;
+      const { name, fuzzy, project: rawProject, folder, maxResults } = req.query;
 
       if (!name) {
         return res.status(400).json({ error: 'name parameter required' });
       }
-      if (validateProject(database, project, res, memoryIndex)) return;
+      const { project, projectWarning } = validateProject(database, rawProject, memoryIndex);
 
       const opts = {
         fuzzy: fuzzy !== 'false',
-        project: project || null,
+        project,
         folder: folder || null,
         maxResults: parseInt(maxResults, 10) || 20
       };
@@ -1366,6 +1376,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       if (results.length === 0) {
         response.hints = buildEmptyResultHints(database, { project, fuzzy: opts.fuzzy, supportsFuzzy: true }, memoryIndex);
       }
+      if (projectWarning) (response.hints ??= []).unshift(projectWarning);
       res.json(response);
     } catch (err) {
       res.status(500).json({ error: err.message });
@@ -1607,7 +1618,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
   // --- Content search (grep) ---
 
   app.get('/grep', async (req, res) => {
-    const { pattern, project, language, caseSensitive: cs, maxResults: mr, contextLines: cl, grouped, includeAssets: ia, symbols: sym } = req.query;
+    const { pattern, project: rawProject, language, caseSensitive: cs, maxResults: mr, contextLines: cl, grouped, includeAssets: ia, symbols: sym } = req.query;
 
     if (!pattern) {
       return res.status(400).json({ error: 'pattern parameter required' });
@@ -1623,18 +1634,23 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
     const includeAssets = ia === 'true';
     const skipSymbols = sym === 'false';
 
-    // Check grep cache
+    const { project, projectWarning } = validateProject(database, rawProject, memoryIndex);
+
+    // Check grep cache (uses validated project so unknown projects map to all-project cache)
     const cacheKey = `${pattern}|${project || ''}|${language || ''}|${cs}|${mr}|${cl}|${grouped}|${ia}|${sym}`;
     const cached = grepCache.get(cacheKey);
-    if (cached) return res.json(cached);
+    if (cached) {
+      if (projectWarning) {
+        return res.json({ ...cached, hints: [projectWarning, ...(cached.hints || [])] });
+      }
+      return res.json(cached);
+    }
 
     try {
       new RegExp(pattern, caseSensitive ? '' : 'i');
     } catch (e) {
       return res.status(400).json({ error: `Invalid regex: ${e.message}` });
     }
-
-    if (validateProject(database, project, res, memoryIndex)) return;
 
     if (language === 'blueprint') {
       return res.status(400).json({ error: 'Blueprint content is binary and not text-searchable. Use find_type or find_asset to search blueprints by name.' });
@@ -1652,14 +1668,14 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       // Source search + optional asset search via Zoekt
       const t0 = performance.now();
       const sourcePromise = zoektClient.search(pattern, {
-        project: project || null,
+        project,
         language: (language && language !== 'all') ? language : null,
         caseSensitive,
         maxResults: zoektMaxResults,
         contextLines: effectiveContextLines
       });
       const assetPromise = includeAssets
-        ? zoektClient.searchAssets(pattern, { project: project || null, caseSensitive, maxResults: 20 })
+        ? zoektClient.searchAssets(pattern, { project, caseSensitive, maxResults: 20 })
         : Promise.resolve({ results: [] });
       const [sourceResult, assetResult] = await Promise.all([sourcePromise, assetPromise]);
       const tZoekt = performance.now();
@@ -1724,7 +1740,9 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       // Log to query analytics
       database._logSlowQuery('grep', [pattern, project || '', language || ''], durationMs, results.length);
 
-      // Build hints for zero-result greps to help agents understand why
+      // Build hints for greps to help agents understand results
+      // NOTE: projectWarning is NOT included here — it's injected at serve time only,
+      // so cached responses don't leak warnings to callers who didn't use an invalid project.
       const grepHints = [];
       if (results.length === 0) {
         if (pattern.includes('\\n') || pattern.includes('\\r')) {
@@ -1750,6 +1768,9 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
         if (assetResult.results.length > 0) groupedResponse.assets = assetResult.results;
         if (grepHints.length > 0) groupedResponse.hints = grepHints;
         grepCache.set(cacheKey, groupedResponse);
+        if (projectWarning) {
+          return res.json({ ...groupedResponse, hints: [projectWarning, ...(groupedResponse.hints || [])] });
+        }
         return res.json(groupedResponse);
       }
 
@@ -1765,6 +1786,9 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       }
       if (grepHints.length > 0) response.hints = grepHints;
       grepCache.set(cacheKey, response);
+      if (projectWarning) {
+        return res.json({ ...response, hints: [projectWarning, ...(response.hints || [])] });
+      }
       return res.json(response);
     } catch (err) {
       const durationMs = Math.round(performance.now() - grepStartMs);
