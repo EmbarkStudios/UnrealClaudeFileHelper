@@ -281,6 +281,7 @@ async function readAndParseBatch(batch, project, language) {
       try {
         return await readAndParseSource(f.path, project, language);
       } catch (err) {
+        recordIngest({ errors: 1 });
         warn(`Error parsing ${f.path}: ${err.message}`);
         return null;
       }

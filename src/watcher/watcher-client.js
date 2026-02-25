@@ -821,6 +821,9 @@ async function main() {
     scanTaskInFlight = true;
     try {
       mergeScanTelemetry(await runScanTask({ kind: 'full-scan', languages: emptyLanguages }));
+    } catch (err) {
+      console.error(`${logPrefix} Full scan failed: ${err.message}`);
+      totalErrors++;
     } finally {
       scanTaskInFlight = false;
     }
@@ -835,6 +838,9 @@ async function main() {
         .map(project => project.name);
       mergeScanTelemetry(await runScanTask({ kind: 'reconcile', projectNames }));
       lastReconcileTimestamp = new Date().toISOString();
+    } catch (err) {
+      console.error(`${logPrefix} Bootstrap reconcile failed: ${err.message}`);
+      totalErrors++;
     } finally {
       scanTaskInFlight = false;
     }
