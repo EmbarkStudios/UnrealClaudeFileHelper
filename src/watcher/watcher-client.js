@@ -16,6 +16,7 @@ import chokidar from 'chokidar';
 import { readFile, stat } from 'fs/promises';
 import { readdirSync, statSync, readFileSync, existsSync } from 'fs';
 import { join, relative } from 'path';
+import { Worker } from 'worker_threads';
 import { parseContent as parseAngelscriptContent } from '../parsers/angelscript-parser.js';
 import { parseCppContent } from '../parsers/cpp-parser.js';
 import { parseCSharpContent } from '../parsers/csharp-parser.js';
@@ -117,6 +118,67 @@ let totalErrors = 0;
 let lastIngestTimestamp = null;
 let lastReconcileTimestamp = null;
 let nextReconcileTimestamp = null;
+let scanTaskInFlight = false;
+
+function mergeScanTelemetry(telemetry) {
+  if (!telemetry) return;
+  totalFilesIngested += telemetry.filesIngested || 0;
+  totalAssetsIngested += telemetry.assetsIngested || 0;
+  totalDeletes += telemetry.deletesProcessed || 0;
+  totalErrors += telemetry.errorsCount || 0;
+  if (telemetry.lastIngestAt) {
+    lastIngestTimestamp = telemetry.lastIngestAt;
+  }
+}
+
+async function runScanTask(task) {
+  const scanWorkerUrl = new URL('./scan-worker.js', import.meta.url);
+  return new Promise((resolve, reject) => {
+    let done = false;
+    let telemetry = null;
+    let streamedTelemetry = false;
+
+    const worker = new Worker(scanWorkerUrl, {
+      workerData: {
+        serviceUrl: SERVICE_URL,
+        config,
+        task,
+        logPrefix
+      }
+    });
+
+    worker.on('message', (msg) => {
+      if (!msg || !msg.type) return;
+      if (msg.type === 'log') {
+        if (msg.level === 'warn') console.warn(msg.message);
+        else if (msg.level === 'error') console.error(msg.message);
+        else console.log(msg.message);
+        return;
+      }
+      if (msg.type === 'telemetry') {
+        streamedTelemetry = true;
+        mergeScanTelemetry(msg.delta || null);
+        return;
+      }
+      if (msg.type === 'result') {
+        telemetry = streamedTelemetry ? null : (msg.telemetry || null);
+      }
+    });
+
+    worker.on('error', (err) => {
+      if (done) return;
+      done = true;
+      reject(err);
+    });
+
+    worker.on('exit', (code) => {
+      if (done) return;
+      done = true;
+      if (code === 0) resolve(telemetry);
+      else reject(new Error(`Scan worker exited with code ${code}`));
+    });
+  });
+}
 
 // --- Utility functions ---
 
@@ -654,6 +716,8 @@ async function main() {
     }
   }
 
+  let activeWatcher = null;
+
   // --- Heartbeat: send watcher status to service every 15s ---
   // Start heartbeat immediately so the dashboard shows "watcher connected"
   // even during the initial reconciliation which can take several minutes.
@@ -699,7 +763,7 @@ async function main() {
           config = newConfig;
           if (projectsChanged) {
             console.log(`${logPrefix} Projects changed — restarting file watches...`);
-            await activeWatcher.close();
+            if (activeWatcher) await activeWatcher.close();
             activeWatcher = startWatcher();
           } else {
             console.log(`${logPrefix} Config updated (no project path changes)`);
@@ -724,45 +788,54 @@ async function main() {
   const populatedLanguages = configuredLanguages.filter(lang => status.counts[lang]);
 
   if (emptyLanguages.length > 0) {
-    await fullScan(emptyLanguages);
+    scanTaskInFlight = true;
+    try {
+      mergeScanTelemetry(await runScanTask({ kind: 'full-scan', languages: emptyLanguages }));
+    } finally {
+      scanTaskInFlight = false;
+    }
   }
 
   if (populatedLanguages.length > 0) {
     console.log(`${logPrefix} Reconciling populated languages: ${populatedLanguages.join(', ')}`);
-    const reconcileStart = performance.now();
-    for (const project of config.projects) {
-      if (!populatedLanguages.includes(project.language)) continue;
-      try {
-        await reconcile(project);
-      } catch (err) {
-        console.error(`${logPrefix} Reconcile failed for ${project.name}: ${err.message}`);
-      }
+    scanTaskInFlight = true;
+    try {
+      const projectNames = config.projects
+        .filter(project => populatedLanguages.includes(project.language))
+        .map(project => project.name);
+      mergeScanTelemetry(await runScanTask({ kind: 'reconcile', projectNames }));
+      lastReconcileTimestamp = new Date().toISOString();
+    } finally {
+      scanTaskInFlight = false;
     }
-    const reconcileS = ((performance.now() - reconcileStart) / 1000).toFixed(1);
-    console.log(`${logPrefix} Reconciliation complete (${reconcileS}s)`);
   }
 
-  let activeWatcher = startWatcher();
+  activeWatcher = startWatcher();
 
   // --- Periodic reconciliation: catch missed file changes ---
 
-  lastReconcileTimestamp = new Date().toISOString();
+  if (!lastReconcileTimestamp) {
+    lastReconcileTimestamp = new Date().toISOString();
+  }
   nextReconcileTimestamp = new Date(Date.now() + getReconcileIntervalMs()).toISOString();
 
   async function periodicReconcile() {
-    console.log(`${logPrefix} Starting periodic reconciliation...`);
-    const start = performance.now();
-    for (const project of config.projects) {
-      try {
-        await reconcile(project);
-      } catch (err) {
-        console.error(`${logPrefix} Periodic reconcile failed for ${project.name}: ${err.message}`);
-      }
+    if (scanTaskInFlight) {
+      console.log(`${logPrefix} Skipping periodic reconciliation (scan already in progress)`);
+      return;
     }
-    const s = ((performance.now() - start) / 1000).toFixed(1);
-    console.log(`${logPrefix} Periodic reconciliation complete (${s}s)`);
-    lastReconcileTimestamp = new Date().toISOString();
-    nextReconcileTimestamp = new Date(Date.now() + getReconcileIntervalMs()).toISOString();
+    console.log(`${logPrefix} Starting periodic reconciliation...`);
+    scanTaskInFlight = true;
+    try {
+      mergeScanTelemetry(await runScanTask({ kind: 'reconcile' }));
+      lastReconcileTimestamp = new Date().toISOString();
+    } catch (err) {
+      console.error(`${logPrefix} Periodic reconcile failed: ${err.message}`);
+      totalErrors++;
+    } finally {
+      scanTaskInFlight = false;
+      nextReconcileTimestamp = new Date(Date.now() + getReconcileIntervalMs()).toISOString();
+    }
   }
 
   setInterval(periodicReconcile, getReconcileIntervalMs());
