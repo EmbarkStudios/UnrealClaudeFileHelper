@@ -1741,8 +1741,9 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       database._logSlowQuery('grep', [pattern, project || '', language || ''], durationMs, results.length);
 
       // Build hints for greps to help agents understand results
+      // NOTE: projectWarning is NOT included here — it's injected at serve time only,
+      // so cached responses don't leak warnings to callers who didn't use an invalid project.
       const grepHints = [];
-      if (projectWarning) grepHints.push(projectWarning);
       if (results.length === 0) {
         if (pattern.includes('\\n') || pattern.includes('\\r')) {
           grepHints.push('Pattern contains \\n (newline). Grep is line-based and cannot match across line boundaries. Split into separate single-line searches instead.');
@@ -1767,6 +1768,9 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
         if (assetResult.results.length > 0) groupedResponse.assets = assetResult.results;
         if (grepHints.length > 0) groupedResponse.hints = grepHints;
         grepCache.set(cacheKey, groupedResponse);
+        if (projectWarning) {
+          return res.json({ ...groupedResponse, hints: [projectWarning, ...(groupedResponse.hints || [])] });
+        }
         return res.json(groupedResponse);
       }
 
@@ -1782,6 +1786,9 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       }
       if (grepHints.length > 0) response.hints = grepHints;
       grepCache.set(cacheKey, response);
+      if (projectWarning) {
+        return res.json({ ...response, hints: [projectWarning, ...(response.hints || [])] });
+      }
       return res.json(response);
     } catch (err) {
       const durationMs = Math.round(performance.now() - grepStartMs);

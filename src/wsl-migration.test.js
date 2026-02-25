@@ -452,6 +452,56 @@ describe('POST /internal/ingest — error handling', () => {
 });
 
 // ============================================================
+// Unknown project fallback — graceful degradation
+// ============================================================
+
+describe('Unknown project fallback', () => {
+  it('should return results with warning hint for unknown project in find-type', async () => {
+    const { status, data } = await fetchJson(`${BASE}/find-type?name=AimComponent&project=NonExistent`);
+    assert.equal(status, 200);
+    assert.ok(data.results.length > 0, 'should still return results from all projects');
+    assert.ok(data.hints, 'should have hints array');
+    assert.ok(data.hints.some(h => h.includes("Unknown project 'NonExistent'")), 'should contain project warning');
+    assert.ok(data.hints.some(h => h.includes('Available:')), 'should list available projects');
+  });
+
+  it('should return results without warning for valid project', async () => {
+    const { status, data } = await fetchJson(`${BASE}/find-type?name=AimComponent&project=Discovery`);
+    assert.equal(status, 200);
+    assert.ok(data.results.length > 0, 'should return results');
+    assert.equal(data.hints, undefined, 'should not have hints when project is valid and results exist');
+  });
+
+  it('should return warning hint for unknown project in find-member', async () => {
+    const { status, data } = await fetchJson(`${BASE}/find-member?name=GetTarget&project=BadProject`);
+    assert.equal(status, 200);
+    assert.ok(data.results.length > 0, 'should still return results');
+    assert.ok(data.hints?.some(h => h.includes("Unknown project 'BadProject'")));
+  });
+
+  it('should return warning hint for unknown project in find-file', async () => {
+    const { status, data } = await fetchJson(`${BASE}/find-file?filename=AimComponent&project=DiscoveryConfig`);
+    assert.equal(status, 200);
+    assert.ok(data.results.length > 0, 'should still return results');
+    assert.ok(data.hints?.some(h => h.includes("Unknown project 'DiscoveryConfig'")));
+  });
+
+  it('should return warning hint for unknown project in find-children', async () => {
+    const { status, data } = await fetchJson(`${BASE}/find-children?parent=ACharacter&project=Bogus`);
+    assert.equal(status, 200);
+    assert.ok(data.results.length > 0, 'should still return results');
+    assert.ok(data.hints?.some(h => h.includes("Unknown project 'Bogus'")));
+  });
+
+  it('should return warning hint for unknown project in find-asset', async () => {
+    const { status, data } = await fetchJson(`${BASE}/find-asset?name=BP_Player&project=FakeProject`);
+    assert.equal(status, 200);
+    assert.ok(data.results.length > 0, 'should still return results');
+    assert.ok(data.hints?.some(h => h.includes("Unknown project 'FakeProject'")));
+  });
+});
+
+// ============================================================
 // ZoektMirror — local filesystem operations
 // ============================================================
 
