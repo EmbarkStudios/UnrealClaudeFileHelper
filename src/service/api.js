@@ -6,6 +6,7 @@ import { writeFileSync, readFileSync, existsSync } from 'fs';
 import { spawn, execSync } from 'child_process';
 import { rankResults, groupResultsByFile } from './search-ranking.js';
 import { contentHash } from './trigram.js';
+import { buildWatcherCmdStartArgs } from '../watcher/watcher-launch.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SLOW_QUERY_MS = 100;
@@ -189,7 +190,13 @@ function attachSignatures(results, database, fileIdResolver) {
   }
 }
 
-export function createApi(database, indexer, queryPool = null, { zoektClient = null, zoektManager = null, zoektMirror = null, memoryIndex = null } = {}) {
+export function createApi(database, indexer, queryPool = null, {
+  zoektClient = null,
+  zoektManager = null,
+  zoektMirror = null,
+  memoryIndex = null,
+  spawnProcess = spawn
+} = {}) {
   const app = express();
 
   // Decompress gzip-encoded request bodies (watcher sends compressed payloads)
@@ -885,10 +892,14 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
 
     // The watcher runs on Windows — spawn via cmd.exe from WSL
     const watcherScript = `${winRepoDir}\\src\\watcher\\watcher-client.js`;
+    const watcherStart = buildWatcherCmdStartArgs({
+      scriptPath: watcherScript,
+      maxOldSpaceSizeMb: indexer.config?.watcher?.maxOldSpaceSizeMb
+    });
 
     try {
-      const child = spawn('/mnt/c/Windows/System32/cmd.exe',
-        ['/c', 'start', 'Unreal Index Watcher', 'node', watcherScript], {
+      const child = spawnProcess('/mnt/c/Windows/System32/cmd.exe',
+        watcherStart.args, {
         detached: true,
         stdio: 'ignore'
       });
@@ -896,7 +907,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
         console.error(`[API] Watcher spawn error: ${err.message}`);
       });
       child.unref();
-      console.log(`[API] Started watcher via cmd.exe: node ${watcherScript}`);
+      console.log(`[API] Started watcher via cmd.exe: node --max-old-space-size=${watcherStart.heapMb} ${watcherScript}`);
       res.json({ ok: true, message: 'Watcher process started' });
     } catch (err) {
       console.error(`[API] Failed to start watcher: ${err.message}`);

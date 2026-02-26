@@ -19,6 +19,7 @@ import {
   getWorkspaceMemoryLimitGB as _getWorkspaceMemoryLimitGB,
   generateDockerComposeContent,
 } from './workspace-utils.js';
+import { startWorkspaceWatcher } from './setup-watcher-start.js';
 
 // Prevent unhandled rejections from silently crashing the server
 process.on('unhandledRejection', (reason) => {
@@ -1352,16 +1353,15 @@ route('POST', '/api/watcher/start', async (req, res) => {
       return;
     }
 
-    const watcherScript = join(ROOT, 'src', 'watcher', 'watcher-client.js');
-
     // Spawn watcher as a detached process with --workspace flag
-    // Write stdout/stderr to a log file so we can diagnose crashes
-    const logPath = join(ROOT, `watcher-${wsName}.log`);
-    const logFd = openSync(logPath, 'a');
-    const child = spawn(process.execPath, [watcherScript, '--workspace', wsName], {
-      cwd: ROOT,
-      detached: true,
-      stdio: ['ignore', logFd, logFd]
+    // Use the per-workspace service config value for consistency with /internal/start-watcher.
+    const workspaceConfig = loadWorkspaceConfig(wsName);
+    const { child, heapMb, logPath, logFd } = startWorkspaceWatcher({
+      rootDir: ROOT,
+      workspaceName: wsName,
+      workspaceConfig,
+      spawnProcess: spawn,
+      nodeExecPath: process.execPath
     });
     child.on('error', err => {
       console.error(`[Setup] Watcher spawn error: ${err.message}`);
@@ -1371,7 +1371,7 @@ route('POST', '/api/watcher/start', async (req, res) => {
       console.error(`[Setup] Watcher for ${wsName} exited (code=${code}, signal=${signal})`);
     });
     child.unref();
-    console.log(`[Setup] Started watcher for ${wsName} (PID ${child.pid}, port ${wsConfig.port}, log: ${logPath})`);
+    console.log(`[Setup] Started watcher for ${wsName} (PID ${child.pid}, port ${wsConfig.port}, heap ${heapMb}MB, log: ${logPath})`);
 
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ ok: true, pid: child.pid, workspace: wsName }));
