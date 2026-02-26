@@ -1,0 +1,49 @@
+name: "Auto version bump"
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  bump:
+    # Skip if the push was made by the bot (prevents infinite loop)
+    if: github.actor != 'github-actions[bot]'
+    name: Bump patch version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Bump patch version
+        id: bump
+        run: |
+          CURRENT=$(jq -r '.version' package.json)
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
+          NEW_PATCH=$((PATCH + 1))
+          NEW_VERSION="${MAJOR}.${MINOR}.${NEW_PATCH}"
+          jq --arg v "$NEW_VERSION" '.version = $v' package.json > tmp.json && mv tmp.json package.json
+          echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+          echo "Bumped $CURRENT → $NEW_VERSION"
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add package.json
+          git diff --cached --quiet && echo "No changes" && exit 0
+          git commit -m "Bump version to ${{ steps.bump.outputs.version }} [skip ci]"
+          git push
+
+      - name: Dispatch to embark-ai-tools
+        env:
+          GH_TOKEN: ${{ secrets.EMBARK_AI_TOOLS_DISPATCH }}
+        run: |
+          gh api repos/EmbarkStudios/embark-ai-tools/dispatches \
+            -f event_type=upstream-release \
+            -f 'client_payload[plugin]=ue-index' \
+            -f "client_payload[version]=${{ steps.bump.outputs.version }}" \
+            -f 'client_payload[upstream_repo]=EmbarkStudios/UnrealClaudeFileHelper'
