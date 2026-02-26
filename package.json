@@ -11,7 +11,7 @@
     "setup": "node src/setup-gui.js",
     "watcher": "node src/watcher/watcher-client.js",
     "bridge": "node src/bridge/mcp-bridge.js",
-    "test": "node --test --test-timeout 30000 src/*.test.js",
+    "test": "node --test --test-timeout 30000 src/*.test.js src/watcher/*.test.js",
     "stress-test": "node --test src/stress-test.js"
   },
   "keywords": [

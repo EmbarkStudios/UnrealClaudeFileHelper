@@ -16,11 +16,14 @@ import chokidar from 'chokidar';
 import { readFile, stat } from 'fs/promises';
 import { readdirSync, statSync, readFileSync, existsSync } from 'fs';
 import { join, relative } from 'path';
+import { Worker } from 'worker_threads';
 import { parseContent as parseAngelscriptContent } from '../parsers/angelscript-parser.js';
 import { parseCppContent } from '../parsers/cpp-parser.js';
 import { parseCSharpContent } from '../parsers/csharp-parser.js';
 import { parseUAssetHeader } from '../parsers/uasset-parser.js';
 import { gzipSync } from 'zlib';
+import { compileExcludePatterns, shouldExcludePath } from './exclude-patterns.js';
+import { getConfigReloadAction, mergeScanTelemetrySnapshot, reconcileFinalTelemetry } from './scan-telemetry.js';
 
 // --- Config ---
 
@@ -84,6 +87,7 @@ const logPrefix = workspaceName ? `[Watcher:${workspaceName}]` : '[Watcher]';
 
 // Config is fetched from the service after connection — initially null
 let config = null;
+let compiledExcludePatterns = [];
 let lastConfigVersion = 0;
 
 // Config-derived settings (set after config fetch)
@@ -117,6 +121,90 @@ let totalErrors = 0;
 let lastIngestTimestamp = null;
 let lastReconcileTimestamp = null;
 let nextReconcileTimestamp = null;
+let scanTaskInFlight = false;
+
+function mergeScanTelemetry(telemetry) {
+  const merged = mergeScanTelemetrySnapshot({
+    filesIngested: totalFilesIngested,
+    assetsIngested: totalAssetsIngested,
+    deletesProcessed: totalDeletes,
+    errorsCount: totalErrors,
+    lastIngestAt: lastIngestTimestamp
+  }, telemetry);
+  totalFilesIngested = merged.filesIngested;
+  totalAssetsIngested = merged.assetsIngested;
+  totalDeletes = merged.deletesProcessed;
+  totalErrors = merged.errorsCount;
+  lastIngestTimestamp = merged.lastIngestAt;
+}
+
+function refreshCompiledExcludePatterns() {
+  compiledExcludePatterns = compileExcludePatterns(config?.exclude || []);
+}
+
+async function runScanTask(task) {
+  const scanWorkerUrl = new URL('./scan-worker.js', import.meta.url);
+  return new Promise((resolve, reject) => {
+    let done = false;
+    let telemetry = null;
+    let streamedTelemetry = false;
+    const streamedTotals = {
+      filesIngested: 0,
+      assetsIngested: 0,
+      deletesProcessed: 0,
+      errorsCount: 0
+    };
+
+    const worker = new Worker(scanWorkerUrl, {
+      workerData: {
+        serviceUrl: SERVICE_URL,
+        config,
+        task,
+        logPrefix
+      }
+    });
+
+    worker.on('message', (msg) => {
+      if (!msg || !msg.type) return;
+      if (msg.type === 'log') {
+        if (msg.level === 'warn') console.warn(msg.message);
+        else if (msg.level === 'error') console.error(msg.message);
+        else console.log(msg.message);
+        return;
+      }
+      if (msg.type === 'telemetry') {
+        streamedTelemetry = true;
+        const delta = msg.delta || null;
+        mergeScanTelemetry(delta);
+        streamedTotals.filesIngested += delta?.filesIngested || 0;
+        streamedTotals.assetsIngested += delta?.assetsIngested || 0;
+        streamedTotals.deletesProcessed += delta?.deletesProcessed || 0;
+        streamedTotals.errorsCount += delta?.errorsCount || 0;
+        return;
+      }
+      if (msg.type === 'result') {
+        telemetry = reconcileFinalTelemetry({
+          streamedTelemetry,
+          streamedTotals,
+          finalTelemetry: msg.telemetry || null
+        });
+      }
+    });
+
+    worker.on('error', (err) => {
+      if (done) return;
+      done = true;
+      reject(err);
+    });
+
+    worker.on('exit', (code) => {
+      if (done) return;
+      done = true;
+      if (code === 0) resolve(telemetry);
+      else reject(new Error(`Scan worker exited with code ${code}`));
+    });
+  });
+}
 
 // --- Utility functions ---
 
@@ -161,16 +249,7 @@ function deriveModule(relativePath, projectName) {
 }
 
 function shouldExclude(path) {
-  const normalized = path.replace(/\\/g, '/');
-  for (const pattern of config.exclude || []) {
-    if (pattern.includes('**')) {
-      const regex = new RegExp(pattern.replace(/\*\*/g, '.*').replace(/\*/g, '[^/]*'));
-      if (regex.test(normalized)) return true;
-    } else if (normalized.includes(pattern.replace(/\*/g, ''))) {
-      return true;
-    }
-  }
-  return false;
+  return shouldExcludePath(path, compiledExcludePatterns);
 }
 
 function collectFiles(dirPath, projectName, extensions, language, includePatterns) {
@@ -424,7 +503,12 @@ async function reconcile(project) {
         const batch = changed.slice(i, i + BATCH_SIZE * 10);
         const assets = [];
         for (const f of batch) {
-          try { assets.push(parseAsset(f.path, project)); } catch {}
+          try {
+            assets.push(parseAsset(f.path, project));
+          } catch (err) {
+            totalErrors++;
+            console.warn(`${logPrefix} Error parsing asset ${f.path}: ${err.message}`);
+          }
         }
         if (assets.length > 0) {
           await postJson(`${SERVICE_URL}/internal/ingest`, { assets });
@@ -485,7 +569,12 @@ async function fullScan(languages) {
           const batch = files.slice(i, i + BATCH_SIZE * 10);
           const assets = [];
           for (const f of batch) {
-            try { assets.push(parseAsset(f.path, project)); } catch {}
+            try {
+              assets.push(parseAsset(f.path, project));
+            } catch (err) {
+              totalErrors++;
+              console.warn(`${logPrefix} Error parsing asset ${f.path}: ${err.message}`);
+            }
           }
           if (assets.length > 0) {
             await postJson(`${SERVICE_URL}/internal/ingest`, { assets });
@@ -541,10 +630,7 @@ function startWatcher() {
   let debounceTimer = null;
 
   const watcher = chokidar.watch(watchPaths, {
-    ignored: [
-      /(^|[\/\\])\../,
-      ...(config.exclude || []).map(p => new RegExp(p.replace(/\*\*/g, '.*').replace(/\*/g, '[^/\\\\]*')))
-    ],
+    ignored: (watchPath) => /(^|[\/\\])\../.test(watchPath) || shouldExclude(watchPath),
     persistent: true,
     ignoreInitial: true,
     awaitWriteFinish: { stabilityThreshold: 100, pollInterval: 50 }
@@ -641,6 +727,7 @@ async function main() {
   // Fetch config from service (single source of truth)
   try {
     config = await fetchConfigFromService();
+    refreshCompiledExcludePatterns();
     console.log(`${logPrefix} Config from service: ${config.projects.length} projects`);
   } catch (err) {
     // Fallback: try local config.json if service doesn't have the endpoint (older version)
@@ -648,11 +735,14 @@ async function main() {
     const fallbackPath = join(import.meta.dirname, '..', '..', 'config.json');
     if (existsSync(fallbackPath)) {
       config = JSON.parse(readFileSync(fallbackPath, 'utf-8'));
+      refreshCompiledExcludePatterns();
       console.log(`${logPrefix} Config from local fallback: ${config.projects.length} projects`);
     } else {
       throw new Error('No config available: service /internal/config failed and no local config.json found');
     }
   }
+
+  let activeWatcher = null;
 
   // --- Heartbeat: send watcher status to service every 15s ---
   // Start heartbeat immediately so the dashboard shows "watcher connected"
@@ -697,10 +787,14 @@ async function main() {
           const newConfig = await fetchConfigFromService();
           const projectsChanged = JSON.stringify(newConfig.projects) !== JSON.stringify(config.projects);
           config = newConfig;
-          if (projectsChanged) {
+          refreshCompiledExcludePatterns();
+          const reloadAction = getConfigReloadAction(projectsChanged, Boolean(activeWatcher));
+          if (reloadAction === 'restart') {
             console.log(`${logPrefix} Projects changed — restarting file watches...`);
             await activeWatcher.close();
             activeWatcher = startWatcher();
+          } else if (reloadAction === 'defer') {
+            console.log(`${logPrefix} Projects changed during bootstrap — watcher will start with updated config`);
           } else {
             console.log(`${logPrefix} Config updated (no project path changes)`);
           }
@@ -724,45 +818,63 @@ async function main() {
   const populatedLanguages = configuredLanguages.filter(lang => status.counts[lang]);
 
   if (emptyLanguages.length > 0) {
-    await fullScan(emptyLanguages);
+    scanTaskInFlight = true;
+    try {
+      mergeScanTelemetry(await runScanTask({ kind: 'full-scan', languages: emptyLanguages }));
+    } catch (err) {
+      console.error(`${logPrefix} Full scan failed: ${err.message}`);
+      totalErrors++;
+    } finally {
+      scanTaskInFlight = false;
+    }
   }
 
   if (populatedLanguages.length > 0) {
     console.log(`${logPrefix} Reconciling populated languages: ${populatedLanguages.join(', ')}`);
-    const reconcileStart = performance.now();
-    for (const project of config.projects) {
-      if (!populatedLanguages.includes(project.language)) continue;
-      try {
-        await reconcile(project);
-      } catch (err) {
-        console.error(`${logPrefix} Reconcile failed for ${project.name}: ${err.message}`);
-      }
+    scanTaskInFlight = true;
+    try {
+      const projectNames = config.projects
+        .filter(project => populatedLanguages.includes(project.language))
+        .map(project => project.name);
+      mergeScanTelemetry(await runScanTask({ kind: 'reconcile', projectNames }));
+      lastReconcileTimestamp = new Date().toISOString();
+    } catch (err) {
+      console.error(`${logPrefix} Bootstrap reconcile failed: ${err.message}`);
+      totalErrors++;
+    } finally {
+      scanTaskInFlight = false;
     }
-    const reconcileS = ((performance.now() - reconcileStart) / 1000).toFixed(1);
-    console.log(`${logPrefix} Reconciliation complete (${reconcileS}s)`);
   }
 
-  let activeWatcher = startWatcher();
+  if (!activeWatcher) {
+    activeWatcher = startWatcher();
+  }
 
   // --- Periodic reconciliation: catch missed file changes ---
 
-  lastReconcileTimestamp = new Date().toISOString();
+  if (!lastReconcileTimestamp) {
+    lastReconcileTimestamp = new Date().toISOString();
+  }
   nextReconcileTimestamp = new Date(Date.now() + getReconcileIntervalMs()).toISOString();
 
   async function periodicReconcile() {
-    console.log(`${logPrefix} Starting periodic reconciliation...`);
-    const start = performance.now();
-    for (const project of config.projects) {
-      try {
-        await reconcile(project);
-      } catch (err) {
-        console.error(`${logPrefix} Periodic reconcile failed for ${project.name}: ${err.message}`);
-      }
-    }
-    const s = ((performance.now() - start) / 1000).toFixed(1);
-    console.log(`${logPrefix} Periodic reconciliation complete (${s}s)`);
-    lastReconcileTimestamp = new Date().toISOString();
     nextReconcileTimestamp = new Date(Date.now() + getReconcileIntervalMs()).toISOString();
+    if (scanTaskInFlight) {
+      console.log(`${logPrefix} Skipping periodic reconciliation (scan already in progress)`);
+      return;
+    }
+    console.log(`${logPrefix} Starting periodic reconciliation...`);
+    scanTaskInFlight = true;
+    try {
+      mergeScanTelemetry(await runScanTask({ kind: 'reconcile' }));
+      lastReconcileTimestamp = new Date().toISOString();
+    } catch (err) {
+      console.error(`${logPrefix} Periodic reconcile failed: ${err.message}`);
+      totalErrors++;
+    } finally {
+      scanTaskInFlight = false;
+      nextReconcileTimestamp = new Date(Date.now() + getReconcileIntervalMs()).toISOString();
+    }
   }
 
   setInterval(periodicReconcile, getReconcileIntervalMs());
