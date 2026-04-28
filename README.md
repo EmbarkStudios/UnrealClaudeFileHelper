@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/embarkstudios-unrealclaudefilehelper-badge.png)](https://mseep.ai/app/embarkstudios-unrealclaudefilehelper)
+
 # embark-claude-index
 
 Fast code search for Unreal Engine projects in Claude Code.
