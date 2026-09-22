@@ -711,3 +711,65 @@ describe('Health and summary endpoints', () => {
     assert.ok(data.stats);
   });
 });
+
+// ============================================================
+// POST /internal/ingest — delete removes the mirror file the write created
+// ============================================================
+
+describe('POST /internal/ingest — mirror delete path', () => {
+  let mirrorServer, mirrorApp;
+  const MIRROR_PORT = 3897;
+  const MIRROR_BASE = `http://127.0.0.1:${MIRROR_PORT}`;
+  const written = [];
+  const deleted = [];
+
+  before(async () => {
+    const recordingZoektManager = {
+      updateMirrorFile(path) { written.push(path); },
+      deleteMirrorFile(path) { deleted.push(path); },
+      triggerReindex() {},
+      isAvailable() { return false; },
+      getStatus() { return { available: false }; }
+    };
+    // A global prefix that differs from the project root, as in a multi-project workspace
+    const mirror = new ZoektMirror(join(tmpDir, 'mirror-delete'));
+    mirror.pathPrefix = 'D:/p4/';
+
+    mirrorApp = createApi(database, null, null, {
+      zoektClient: null,
+      zoektManager: recordingZoektManager,
+      zoektMirror: mirror
+    });
+    mirrorServer = await startServer(mirrorApp, MIRROR_PORT);
+  });
+
+  after(() => {
+    if (mirrorApp?._depthDebounceTimer) clearTimeout(mirrorApp._depthDebounceTimer);
+    if (mirrorApp?._watcherPruneInterval) clearInterval(mirrorApp._watcherPruneInterval);
+    if (mirrorServer) mirrorServer.close();
+  });
+
+  it('should delete the mirror file at the path it was written to', async () => {
+    const path = 'D:/p4/games/Games/Discovery/Script/Mirror/MirrorProbe.as';
+
+    const ingest = await postJson(`${MIRROR_BASE}/internal/ingest`, {
+      files: [{
+        path,
+        project: 'Discovery',
+        relativePath: 'Script/Mirror/MirrorProbe.as',
+        module: 'Discovery.Script.Mirror',
+        language: 'angelscript',
+        mtime: 1700000200,
+        content: 'class MirrorProbe : UObject\n{\n}',
+        types: [{ name: 'MirrorProbe', kind: 'class', parent: 'UObject', line: 1 }],
+        members: []
+      }]
+    });
+    assert.equal(ingest.status, 200);
+    assert.deepEqual(written, ['Discovery/Script/Mirror/MirrorProbe.as']);
+
+    const del = await postJson(`${MIRROR_BASE}/internal/ingest`, { deletes: [path] });
+    assert.equal(del.status, 200);
+    assert.deepEqual(deleted, written, 'delete must target the mirror path the write used');
+  });
+});

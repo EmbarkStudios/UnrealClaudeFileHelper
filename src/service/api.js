@@ -547,6 +547,13 @@ export function createApi(database, indexer, queryPool = null, {
       // Process deletes
       for (const filePath of deletes) {
         try {
+          // Resolve the mirror path before the row is gone, using the same
+          // project/relativePath mapping the write path uses
+          const row = database.getFileByPath(filePath);
+          const mirrorPath = row?.relative_path
+            ? `${row.project}/${row.relative_path}`
+            : (zoektMirror ? zoektMirror._toRelativePath(filePath) : filePath);
+
           // Try source file first, then asset
           if (database.deleteFile(filePath)) {
             if (memoryIndex) memoryIndex.removeFileByPath(filePath);
@@ -559,8 +566,7 @@ export function createApi(database, indexer, queryPool = null, {
           // Remove from mirror
           if (zoektMirror && zoektManager) {
             try {
-              const relativePath = zoektMirror._toRelativePath(filePath);
-              zoektManager.deleteMirrorFile(relativePath);
+              zoektManager.deleteMirrorFile(mirrorPath);
             } catch {}
           }
         } catch (err) {
