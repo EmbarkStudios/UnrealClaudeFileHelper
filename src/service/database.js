@@ -1017,7 +1017,7 @@ export class IndexDatabase {
 
       if (includeSourceTypes) {
         let sql = `
-          SELECT t.name, t.kind, t.parent, t.line, f.path, f.project
+          SELECT t.name, t.kind, t.parent, t.line, f.path, f.project, f.language
           FROM types t
           JOIN files f ON t.file_id = f.id
           WHERE t.name = ?
@@ -1053,7 +1053,7 @@ export class IndexDatabase {
           if (candidates.size > 0) {
             const placeholders = [...candidates].map(() => '?').join(',');
             let batchSql = `
-              SELECT t.name, t.kind, t.parent, t.line, f.path, f.project
+              SELECT t.name, t.kind, t.parent, t.line, f.path, f.project, f.language
               FROM types t
               JOIN files f ON t.file_id = f.id
               WHERE t.name IN (${placeholders})
