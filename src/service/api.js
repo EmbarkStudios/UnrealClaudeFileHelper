@@ -548,8 +548,13 @@ export function createApi(database, indexer, queryPool = null, {
       for (const filePath of deletes) {
         try {
           // Try source file first, then asset
+          // (read the file's project before its row goes, so its zoekt shard can be reindexed below)
+          const deletedProject = database.getFileByPath(filePath)?.project;
           if (database.deleteFile(filePath)) {
             if (memoryIndex) memoryIndex.removeFileByPath(filePath);
+            // A delete changes the project's Zoekt shard too. Without this, a delete-only batch left
+            // affectedProjects empty, no reindex ran, and grep kept returning the deleted file.
+            if (deletedProject) affectedProjects.add(deletedProject);
             processed++;
           } else if (database.deleteAsset(filePath)) {
             if (memoryIndex) memoryIndex.removeAssetByPath(filePath);
@@ -1183,6 +1188,20 @@ export function createApi(database, indexer, queryPool = null, {
   app.post('/refresh', async (req, res) => {
     try {
       const { language } = req.query;
+
+      // When the service cannot see any configured source path (e.g. it runs in a container that
+      // mounts only its database, mirror and config), a rebuild from here scans nothing and used to
+      // answer success with zero files. Refuse instead, and say where indexing actually happens.
+      const roots = (indexer?.config?.projects || []).flatMap(p => p.paths || []);
+      if (roots.length > 0 && !roots.some(p => existsSync(p))) {
+        return res.status(409).json({
+          success: false,
+          error: 'refresh cannot run here: the index service cannot see any of the configured source paths, ' +
+                 'so a rebuild from here would scan nothing. Indexing is done by the file watcher, which can ' +
+                 'see the source trees; restart the watcher to re-scan and reconcile.',
+          configuredPaths: roots.length
+        });
+      }
 
       if (language && language !== 'all') {
         await indexer.indexLanguageAsync(language);
