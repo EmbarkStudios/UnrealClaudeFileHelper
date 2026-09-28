@@ -51,10 +51,54 @@ export function scoreEntry(r) {
   return s;
 }
 
+const HEADER_RE = /\.(h|hpp|inl)$/i;
+
+/**
+ * Can these two rows plausibly be ONE type declared in a header and defined in a
+ * .cpp? Only then may they be collapsed into a single answer.
+ *
+ * - An `enum` has no out-of-line definition: a .cpp row with the same name is a
+ *   DIFFERENT, file-local enum, not the same one's implementation. Never merge.
+ * - A `class` or `struct` legitimately splits: merge only when exactly one side
+ *   is a header and the other a .cpp. Two .cpp rows are two separate definitions.
+ */
+function mayBeHeaderImplPair(a, b) {
+  if (a.kind !== b.kind) return false;
+  if (a.kind !== 'class' && a.kind !== 'struct') return false;
+  const aH = HEADER_RE.test(a.path || ''), bH = HEADER_RE.test(b.path || '');
+  return aH !== bH;
+}
+
 export function dedupTypes(results) {
   const best = new Map();
   for (const r of results) {
-    const key = `${r.name}:${r.kind}`;
+    // The key MUST include the project (and language) as well as the name and
+    // kind. This collapse exists to pair ONE type's header declaration with its
+    // .cpp definition — and a header/impl pair is by definition in the same
+    // project and the same language. Keying on `name:kind` alone also collapsed
+    // genuinely unrelated types that merely share a name, which is a silent
+    // wrong answer in two ways: the losing definition vanished with no hint it
+    // existed, and if it happened to end in .cpp it was reported as the winner's
+    // `implementationPath` — a relationship that does not exist.
+    //
+    // Measured on framework 2026-09-27 before the fix (FLEET-335): `EParseState`
+    // is three unrelated enums (Engine/Core, EnginePlugins, SharedPlugins'
+    // vendored DungeonArchitect) and find_type answered with Engine's, claiming
+    // it was implemented in DAMkJsonSyntaxHighlighter.cpp. On a tenant-bearing
+    // tree the same collapse hid an AngelScript class behind a C++ class of the
+    // same name in another game (the `.h` bias in scoreEntry made the C++ one
+    // win), so `find_type` reported the wrong file with no second row.
+    //
+    // Keying alone is still not enough: after the key was narrowed, Engine's
+    // `EParseState` (a .h) was measured claiming a TraceLog `Control.cpp` as its
+    // implementation, and EnginePlugins' claimed a PCG kernel .cpp — same name,
+    // same project, still unrelated. So a merge additionally requires that the
+    // two rows COULD be a header/impl pair (mayBeHeaderImplPair); otherwise both
+    // definitions are kept, under distinct keys.
+    const baseKey = `${r.name}:${r.kind}:${r.project ?? ''}:${r.language ?? ''}`;
+    const key = best.has(baseKey) && !mayBeHeaderImplPair(best.get(baseKey), r)
+      ? `${baseKey}:${r.path ?? ''}`
+      : baseKey;
     const existing = best.get(key);
     if (!existing) { best.set(key, r); continue; }
     const existingScore = scoreEntry(existing);
