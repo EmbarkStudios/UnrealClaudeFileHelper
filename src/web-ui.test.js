@@ -128,7 +128,14 @@ describe('ZoektClient response mapping', () => {
     assert.equal(result.results[0].file, 'MyProject/src/Actor.cpp');
     assert.equal(result.results[0].project, 'MyProject');
     assert.equal(result.results[0].language, 'cpp');
-    assert.equal(result.results[0].line, 10); // 0-based -> 1-based
+    // Zoekt's LineMatch.LineNumber is ONE-BASED and passes through unchanged.
+    // This assertion used to expect 10 with the comment "0-based -> 1-based",
+    // which is what kept the off-by-one in _mapResponse alive: the fixture was
+    // written from the assumption, never from a real zoekt reply. Measured
+    // against a live zoekt on framework 2026-09-27 (FLEET-332): zoekt answers
+    // LineNumber 43 for B3DSnapshot.h's `class BOX3DSIM_API IB3DSnapshotable`,
+    // which is line 43 on disk. See src/zoekt-line-numbers.test.js.
+    assert.equal(result.results[0].line, 9);
     assert.ok(result.results[0].match.includes('AActor'));
     assert.equal(result.totalMatches, 1);
     assert.equal(result.matchedFiles, 1);

@@ -253,7 +253,15 @@ export class ZoektClient {
           file: filePath,
           project: fileProject,
           language: fileLanguage,
-          line: (lm.LineNumber || 0) + 1, // Zoekt uses 0-based line numbers
+          // Zoekt's LineMatch.LineNumber is ONE-BASED (measured against disk on
+          // framework 2026-09-27: zoekt says 43 for B3DSnapshot.h's
+          // `class BOX3DSIM_API IB3DSnapshotable`, which is line 43 in the file).
+          // The `+ 1` that used to be here - with a comment claiming 0-based -
+          // made every unreal_grep hit report one line too high, so every
+          // file:line citation copied out of a grep pointed one line late.
+          // The trigram fallback in grep-worker.js was always correct, so the
+          // two engines disagreed by one on the same query. FLEET-332.
+          line: lm.LineNumber || 0,
           match
         };
 
@@ -302,7 +310,10 @@ export class ZoektClient {
             file: filePath,
             project: fileProject,
             language: fileLanguage,
-            line: (range.Start?.LineNumber || 0) + 1,
+            // One-based, same as the LineMatches path above. (`lineIdx` stays a
+            // difference of two one-based numbers, so it is already the right
+            // 0-based index into the split chunk content.) FLEET-332.
+            line: range.Start?.LineNumber || 0,
             match: matchLine
           });
         }
